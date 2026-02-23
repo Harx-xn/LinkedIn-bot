@@ -6,65 +6,87 @@ const router = Router();
 
 // GET /bot/config - Get current user's bot config
 router.get('/config', requireAuth, async (req: Request, res: any) => {
-    try {
+  try {
+    const config = await prisma.botConfig.findUnique({
+      where: { userId: req.userId }
+    });
 
-        const config = await prisma.botConfig.findUnique({
-            where: { userId: req.userId }
-        });
-        // Return empty default structure if not found (frontend can handle creation)
-        res.json(config || { userId: req.userId, niches: '[]', sources: '[]', backgroundImageUrl: '', isEnabled: false });
-    } catch (error) {
-        console.error('Error fetching bot config:', error);
-        res.status(500).json({ error: 'Failed to fetch config' });
-    }
+    // add description default too
+    res.json(
+      config || {
+        userId: req.userId,
+        niches: '[]',
+        sources: '[]',
+        backgroundImageUrl: '',
+        isEnabled: false,
+        description: '' // ✅
+      }
+    );
+  } catch (error) {
+    console.error('Error fetching bot config:', error);
+    res.status(500).json({ error: 'Failed to fetch config' });
+  }
 });
 
 // PUT /bot/config - Update or Create bot config
 router.put('/config', requireAuth, async (req: Request, res: any) => {
-    console.log("meow")
-    const { niches, sources, customRssFeeds, customLinks, customRedditFeeds, backgroundImageUrl, isEnabled, tone, postsPerWeek } = req.body;
+  console.log('meow');
 
-    try {
-        // Ensure inputs are strings (JSON)
-        const nichesStr = typeof niches === 'string' ? niches : JSON.stringify(niches || []);
-        const sourcesStr = typeof sources === 'string' ? sources : JSON.stringify(sources || []);
-        const customRssFeedsStr = typeof customRssFeeds === 'string' ? customRssFeeds : JSON.stringify(customRssFeeds || []);
-        const customLinksStr = typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
-        const customRedditFeedsStr = typeof customRedditFeeds === 'string' ? customRedditFeeds : JSON.stringify(customRedditFeeds || []);
-      
-        const config = await prisma.botConfig.upsert({
-            where: { userId: req.userId! },
-            create: {
-                userId: req.userId!,
-                niches: nichesStr,
-                sources: sourcesStr,
-                customRssFeeds: customRssFeedsStr,
-                customLinks: customLinksStr,
-                customRedditFeeds: customRedditFeedsStr,
-                backgroundImageUrl: backgroundImageUrl || undefined,
-                tone: tone || 'Professional',
-                postsPerWeek: postsPerWeek || 7,
-                isEnabled: !!isEnabled,
-                postingSchedule: '0 9 * * *'
-            },
-            update: {
-                niches: nichesStr,
-                sources: sourcesStr,
-                customRssFeeds: customRssFeedsStr,
-                customLinks: customLinksStr,
-                customRedditFeeds: customRedditFeedsStr,
-                backgroundImageUrl: backgroundImageUrl || null,
-                tone: tone || 'Professional',
-                postsPerWeek: postsPerWeek || 7,
-                isEnabled: !!isEnabled
-            }
-        });
+  const {
+    niches,
+    sources,
+    customRssFeeds,
+    customLinks,
+    customRedditFeeds,
+    backgroundImageUrl,
+    isEnabled,
+    tone,
+    postsPerWeek,
+    description // ✅
+  } = req.body;
 
-        res.json(config);
-    } catch (error) {
-        console.error('Error saving bot config:', error);
-        res.status(500).json({ error: 'Failed to save config' });
-    }
+  try {
+    const nichesStr = typeof niches === 'string' ? niches : JSON.stringify(niches || []);
+    const sourcesStr = typeof sources === 'string' ? sources : JSON.stringify(sources || []);
+    const customRssFeedsStr = typeof customRssFeeds === 'string' ? customRssFeeds : JSON.stringify(customRssFeeds || []);
+    const customLinksStr = typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
+    const customRedditFeedsStr = typeof customRedditFeeds === 'string' ? customRedditFeeds : JSON.stringify(customRedditFeeds || []);
+
+    const config = await prisma.botConfig.upsert({
+      where: { userId: req.userId! },
+      create: {
+        userId: req.userId!,
+        niches: nichesStr,
+        sources: sourcesStr,
+        customRssFeeds: customRssFeedsStr,
+        customLinks: customLinksStr,
+        customRedditFeeds: customRedditFeedsStr,
+        backgroundImageUrl: backgroundImageUrl || undefined,
+        tone: tone || 'Professional',
+        postsPerWeek: postsPerWeek || 7,
+        isEnabled: !!isEnabled,
+        postingSchedule: '0 9 * * *',
+        description: description || '' // ✅
+      },
+      update: {
+        niches: nichesStr,
+        sources: sourcesStr,
+        customRssFeeds: customRssFeedsStr,
+        customLinks: customLinksStr,
+        customRedditFeeds: customRedditFeedsStr,
+        backgroundImageUrl: backgroundImageUrl || null,
+        tone: tone || 'Professional',
+        postsPerWeek: postsPerWeek || 7,
+        isEnabled: !!isEnabled,
+        description: description || '' // ✅
+      }
+    });
+
+    res.json(config);
+  } catch (error) {
+    console.error('Error saving bot config:', error);
+    res.status(500).json({ error: 'Failed to save config' });
+  }
 });
 
 export default router;

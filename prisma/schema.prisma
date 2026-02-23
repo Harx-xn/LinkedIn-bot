@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -29,35 +29,36 @@ model User {
 }
 
 model BotConfig {
-  id              String   @id @default(cuid())
-  user            User     @relation(fields: [userId], references: [id])
-  userId          String   @unique
-  niches          String   // JSON array: ["technology", "marketing", "finance"]
-  sources         String   // JSON array: ["reddit", "medium", "google"]
-  customRssFeeds  String?  // JSON array: ["https://techcrunch.com/feed", ...]
-  customLinks     String?  // JSON array: ["https://example.com/article1", ... (User provided links)]
-  customRedditFeeds String? // JSON array: ["https://www.reddit.com/r/all/hot.json", ...]
+  id                 String   @id @default(cuid())
+  user               User     @relation(fields: [userId], references: [id])
+  userId             String   @unique
+  niches             String // JSON array: ["technology", "marketing", "finance"]
+  sources            String // JSON array: ["reddit", "medium", "google"]
+  customRssFeeds     String? // JSON array: ["https://techcrunch.com/feed", ...]
+  customLinks        String? // JSON array: ["https://example.com/article1", ... (User provided links)]
+  customRedditFeeds  String? // JSON array: ["https://www.reddit.com/r/all/hot.json", ...]
   backgroundImageUrl String? // Path or URL to background image
-  postingSchedule String?  // e.g. "0 9 * * *"
-  postsPerWeek    Int      @default(7)
-  generationWindow Int     @default(7) // Days to generate for
-  isEnabled       Boolean  @default(false)
-  tone            String?  @default("Professional") // "Professional", "Casual", "Humorous", etc.
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  postingSchedule    String? // e.g. "0 9 * * *"
+  postsPerWeek       Int      @default(7)
+  generationWindow   Int      @default(7) // Days to generate for
+  isEnabled          Boolean  @default(false)
+  description        String?  @default("")
+  tone               String?  @default("Professional") // "Professional", "Casual", "Humorous", etc.
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
 
 model LinkedInAccount {
-  id           String   @id @default(cuid())
-  user         User     @relation(fields: [userId], references: [id])
-  userId       String
-  authorUrn    String   // Personal URN (urn:li:person:xxx)
+  id                      String   @id @default(cuid())
+  user                    User     @relation(fields: [userId], references: [id])
+  userId                  String
+  authorUrn               String // Personal URN (urn:li:person:xxx)
   selectedOrganizationUrn String? // Organization URN if posting to page (urn:li:organization:xxx)
-  accessToken  String
-  refreshToken String?
-  expiresAt    DateTime
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  accessToken             String
+  refreshToken            String?
+  expiresAt               DateTime
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   // Back relation to Post.linkedinAccount
   posts Post[]
