@@ -19,7 +19,7 @@ const app = express();
 const allowedOrigins = [
   "http://localhost:5173",
   // add your deployed frontend domain too:
-  "https://frontend-bx09.onrender.com/",
+  "https://frontend-bx09.onrender.com",
 ];
 
 app.use(
