@@ -36,8 +36,6 @@ app.use(
   })
 );
 
-// ✅ ensure preflight requests are answered
-app.options("*", cors());
 app.use(express.json());
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.path}`);
@@ -59,7 +57,7 @@ app.use('/api/bot', botActionRouter); // Used for /bot/generate
 app.use('/api/upload', uploadRouter);
 
 // Serve static files (uploaded images)
-app.use('/uploads', express.static(path.join(process.cwd(), 'dist', 'public', 'uploads')));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use(express.static(path.join(process.cwd(), 'dist', 'public')));
 app.use((req, res) => {
   console.log(`[404] ${req.method} ${req.path}`);
