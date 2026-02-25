@@ -37,6 +37,7 @@ router.post("/", requireAuth, upload.single("image"), (req: Request, res: any) =
 
   // ✅ leading slash
   const url = `/uploads/${file.filename}`;
+  console.log(url)
   res.json({ url });
 });
 
