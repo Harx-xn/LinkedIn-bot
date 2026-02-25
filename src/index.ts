@@ -15,7 +15,29 @@ import path from 'path';
 import { startScheduler } from './services/schedulerService';
 
 const app = express();
-app.use(cors());
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  // add your deployed frontend domain too:
+  // "https://your-frontend.vercel.app",
+];
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // allow tools like curl/postman (no origin)
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true, // set true only if you use cookies/auth sessions
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ✅ ensure preflight requests are answered
+app.options("*", cors());
 app.use(express.json());
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.path}`);
