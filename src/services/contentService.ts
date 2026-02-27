@@ -53,7 +53,7 @@ export class ContentService {
   async generatePost(
     topic: string,
     articleLink: string,
-    provider: 'GEMINI' | 'OPENAI' = 'GEMINI',
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     tone: string = 'Professional',
     description: string = ''
   ): Promise<any> {
@@ -159,7 +159,7 @@ Do not include markdown code blocks. Just raw JSON.
     }
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
       });
       return response.choices[0].message.content || '';

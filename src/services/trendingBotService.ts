@@ -48,20 +48,14 @@ export class TrendingBotService {
       for (const niche of niches) {
         console.log(`--- Processing Niche: ${niche} ---`);
         try {
-          const sources = config.sources
-            ? JSON.parse(config.sources)
-            : ["google"];
+          const sources = config.sources ? JSON.parse(config.sources) : ["google"];
           let customRssFeeds: string[] = [];
           try {
-            customRssFeeds = config.customRssFeeds
-              ? JSON.parse(config.customRssFeeds)
-              : [];
+            customRssFeeds = config.customRssFeeds ? JSON.parse(config.customRssFeeds) : [];
           } catch {}
           let customLinks: string[] = [];
           try {
-            customLinks = (config as any).customLinks
-              ? JSON.parse((config as any).customLinks)
-              : [];
+            customLinks = (config as any).customLinks ? JSON.parse((config as any).customLinks) : [];
           } catch {}
           let customRedditFeeds: string[] = [];
           try {
@@ -75,14 +69,14 @@ export class TrendingBotService {
             sources,
             customRssFeeds,
             customLinks,
-            customRedditFeeds,
+            customRedditFeeds
           );
           if (trends.length === 0) {
             console.log(`No trends found for ${niche}`);
             continue;
           }
 
-          let selectedTrend = null;
+          let selectedTrend: Trend | null = null;
           for (const trend of trends) {
             const exists = await prisma.post.findFirst({
               where: {
@@ -98,44 +92,39 @@ export class TrendingBotService {
           }
 
           if (!selectedTrend) {
-            console.log(
-              `All top trends for ${niche} are already posted. Skipping.`,
-            );
+            console.log(`All top trends for ${niche} are already posted. Skipping.`);
             continue;
           }
 
-          console.log(
-            `Selected Trend: ${selectedTrend.title} (${selectedTrend.source})`,
-          );
+          console.log(`Selected Trend: ${selectedTrend.title} (${selectedTrend.source})`);
 
-          const provider = process.env.GEMINI_API_KEY ? "GEMINI" : "OPENAI";
+          // ✅ FORCE OPENAI
+          const provider: "OPENAI" = "OPENAI";
+
           const generatedContent = await this.contentService.generatePost(
             selectedTrend.title,
             selectedTrend.link,
             provider,
             config.tone || "Professional",
-            config.description || "",
+            config.description || ""
           );
 
           const headline = generatedContent.headline || selectedTrend.title;
           const subheadline = generatedContent.subheadline || "";
           const bulletPoints = generatedContent.bulletPoints || [];
-          const body =
-            generatedContent.body || JSON.stringify(generatedContent);
+          const body = generatedContent.body || JSON.stringify(generatedContent);
           const hashtags = generatedContent.hashtags || "";
 
           const imagePath = await this.imageService.createTopicImage(
             headline,
             config.backgroundImageUrl || undefined,
-            { headline, subheadline, bulletPoints },
+            { headline, subheadline, bulletPoints }
           );
 
           const finalContent = `${body}\n\n${hashtags}`;
 
           if (dryRun) {
-            console.log(
-              `[DRY RUN] Generated for ${config.userId}:\n${finalContent}`,
-            );
+            console.log(`[DRY RUN] Generated for ${config.userId}:\n${finalContent}`);
           } else {
             await prisma.post.create({
               data: {
@@ -156,11 +145,7 @@ export class TrendingBotService {
     }
   }
 
-  private calculateTimeSlots(
-    postsPerWeek: number,
-    days: number,
-    startDate: Date,
-  ): Date[] {
+  private calculateTimeSlots(postsPerWeek: number, days: number, startDate: Date): Date[] {
     const slots: Date[] = [];
     const totalPosts = Math.ceil((postsPerWeek / 7) * days);
     const intervalMs = (days * 24 * 60 * 60 * 1000) / totalPosts;
@@ -177,9 +162,7 @@ export class TrendingBotService {
     const config = await prisma.botConfig.findUnique({ where: { userId } });
     if (!config || !config.isEnabled) return;
 
-    console.log(
-      `Generating batch for user ${userId}, window: ${daysWindow} days`,
-    );
+    console.log(`Generating batch for user ${userId}, window: ${daysWindow} days`);
 
     let niches: string[] = [];
     try {
@@ -191,15 +174,11 @@ export class TrendingBotService {
     const sources = config.sources ? JSON.parse(config.sources) : ["google"];
     let customRssFeeds: string[] = [];
     try {
-      customRssFeeds = config.customRssFeeds
-        ? JSON.parse(config.customRssFeeds)
-        : [];
+      customRssFeeds = config.customRssFeeds ? JSON.parse(config.customRssFeeds) : [];
     } catch {}
     let customLinks: string[] = [];
     try {
-      customLinks = (config as any).customLinks
-        ? JSON.parse((config as any).customLinks)
-        : [];
+      customLinks = (config as any).customLinks ? JSON.parse((config as any).customLinks) : [];
     } catch {}
     let customRedditFeeds: string[] = [];
     try {
@@ -208,17 +187,13 @@ export class TrendingBotService {
         : [];
     } catch {}
 
-    const slots = this.calculateTimeSlots(
-      config.postsPerWeek,
-      daysWindow,
-      new Date(),
-    );
+    const slots = this.calculateTimeSlots(config.postsPerWeek, daysWindow, new Date());
     const nicheTrendsMap: Record<string, Trend[]> = {};
     const totalNeeded = slots.length;
-    const buffer = Math.max(5, Math.ceil(totalNeeded * 0.3)); // extra for duplicates/AI failures
+    const buffer = Math.max(5, Math.ceil(totalNeeded * 0.3));
     const perNicheNeeded = Math.max(
       5,
-      Math.ceil((totalNeeded + buffer) / Math.max(1, niches.length)),
+      Math.ceil((totalNeeded + buffer) / Math.max(1, niches.length))
     );
 
     for (const niche of niches) {
@@ -229,9 +204,9 @@ export class TrendingBotService {
           customRssFeeds,
           customLinks,
           customRedditFeeds,
-          perNicheNeeded,
+          perNicheNeeded
         );
-        await new Promise((r) => setTimeout(r, 1000)); // Small pause between niche fetches
+        await new Promise((r) => setTimeout(r, 1000));
       } catch (e) {
         nicheTrendsMap[niche] = [];
       }
@@ -247,9 +222,7 @@ export class TrendingBotService {
       let success = false;
 
       if (shouldMix) {
-        const availableNiches = niches.filter(
-          (n) => nicheTrendsMap[n].length > 0,
-        );
+        const availableNiches = niches.filter((n) => nicheTrendsMap[n].length > 0);
         if (availableNiches.length >= 2) {
           const n1 = availableNiches[0];
           const n2 = availableNiches[1];
@@ -258,23 +231,24 @@ export class TrendingBotService {
 
           if (t1 && t2) {
             try {
-              const provider = process.env.GEMINI_API_KEY ? "GEMINI" : "OPENAI";
-              const generatedContent =
-                await this.contentService.generateMixedPost(
-                  [
-                    { topic: t1.title, link: t1.link },
-                    { topic: t2.title, link: t2.link },
-                  ],
-                  provider,
-                  config.tone || "Professional",
-                  config.description || "",
-                );
+              // ✅ FORCE OPENAI
+              const provider: "OPENAI" = "OPENAI";
+
+              const generatedContent = await this.contentService.generateMixedPost(
+                [
+                  { topic: t1.title, link: t1.link },
+                  { topic: t2.title, link: t2.link },
+                ],
+                provider,
+                config.tone || "Professional",
+                config.description || ""
+              );
 
               await this.createPostInDb(
                 userId,
                 generatedContent,
                 currentSlot,
-                [t1.title, t2.title].join(" + "),
+                [t1.title, t2.title].join(" + ")
               );
               success = true;
             } catch (e) {
@@ -296,21 +270,18 @@ export class TrendingBotService {
             if (!trend) continue;
 
             try {
-              const provider = process.env.GEMINI_API_KEY ? "GEMINI" : "OPENAI";
+              // ✅ FORCE OPENAI
+              const provider: "OPENAI" = "OPENAI";
+
               const generatedContent = await this.contentService.generatePost(
                 trend.title,
                 trend.link,
                 provider,
                 config.tone || "Professional",
-                config.description || "",
+                config.description || ""
               );
 
-              await this.createPostInDb(
-                userId,
-                generatedContent,
-                currentSlot,
-                trend.title,
-              );
+              await this.createPostInDb(userId, generatedContent, currentSlot, trend.title);
               success = true;
               break;
             } catch (e) {
@@ -322,12 +293,8 @@ export class TrendingBotService {
 
       if (success) {
         postsCreated++;
-        if (process.env.GEMINI_API_KEY)
-          await new Promise((r) => setTimeout(r, 6000));
       } else {
-        console.log(
-          `Could not fill slot ${slotIndex + 1}. No trends or AI failure.`,
-        );
+        console.log(`Could not fill slot ${slotIndex + 1}. No trends or AI failure.`);
         await new Promise((r) => setTimeout(r, 2000));
       }
 
@@ -341,7 +308,7 @@ export class TrendingBotService {
     userId: string,
     generatedContent: any,
     scheduledAt: Date,
-    sourceTitle: string,
+    sourceTitle: string
   ) {
     const headline = generatedContent.headline || sourceTitle;
     const subheadline = generatedContent.subheadline || "";
@@ -349,7 +316,6 @@ export class TrendingBotService {
     const body = generatedContent.body || JSON.stringify(generatedContent);
     const hashtags = generatedContent.hashtags || "";
 
-    // ✅ pull user's background image from BotConfig
     const botConfig = await prisma.botConfig.findUnique({
       where: { userId },
       select: { backgroundImageUrl: true },
@@ -359,16 +325,18 @@ export class TrendingBotService {
     try {
       mediaUrl = await this.imageService.createTopicImage(
         headline,
-        botConfig?.backgroundImageUrl ?? undefined, // ✅ use uploaded bg
-        { headline, subheadline, bulletPoints },
+        botConfig?.backgroundImageUrl ?? undefined,
+        { headline, subheadline, bulletPoints }
       );
     } catch (e) {
       console.error("Image generation failed:", e);
     }
+
     const linkedInAccount = await prisma.linkedInAccount.findFirst({
       where: { userId },
       select: { id: true },
     });
+
     await prisma.post.create({
       data: {
         userId,
@@ -399,15 +367,11 @@ export class TrendingBotService {
     const sources = config.sources ? JSON.parse(config.sources) : ["google"];
     let customRssFeeds: string[] = [];
     try {
-      customRssFeeds = config.customRssFeeds
-        ? JSON.parse(config.customRssFeeds)
-        : [];
+      customRssFeeds = config.customRssFeeds ? JSON.parse(config.customRssFeeds) : [];
     } catch {}
     let customLinks: string[] = [];
     try {
-      customLinks = (config as any).customLinks
-        ? JSON.parse((config as any).customLinks)
-        : [];
+      customLinks = (config as any).customLinks ? JSON.parse((config as any).customLinks) : [];
     } catch {}
     let customRedditFeeds: string[] = [];
     try {
@@ -425,14 +389,12 @@ export class TrendingBotService {
             sources,
             customRssFeeds,
             customLinks,
-            customRedditFeeds,
-          )),
+            customRedditFeeds
+          ))
         );
       } catch (e) {}
     }
 
-    return Array.from(
-      new Map(allTrends.map((item) => [item.title, item])).values(),
-    ).slice(0, 20);
+    return Array.from(new Map(allTrends.map((item) => [item.title, item])).values()).slice(0, 20);
   }
 }
