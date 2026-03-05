@@ -30,7 +30,7 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
 
 // PUT /bot/config - Update or Create bot config
 router.put('/config', requireAuth, async (req: Request, res: any) => {
-  console.log('meow');
+
 
   const {
     niches,

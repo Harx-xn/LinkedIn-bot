@@ -104,6 +104,20 @@ model Post {
   updatedAt DateTime @updatedAt
 }
 
+model BotGenerationJob {
+  id             String   @id @default(cuid())
+  userId         String
+  daysWindow     Int
+  status         String   @default("RUNNING") // RUNNING | DONE | FAILED
+  totalSlots     Int      @default(0)
+  completedSlots Int      @default(0)
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+  error          String?
+
+  @@index([userId, createdAt])
+}
+
 model SheetConfig {
   id            String   @id @default(cuid())
   user          User     @relation(fields: [userId], references: [id])

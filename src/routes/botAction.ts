@@ -1,23 +1,48 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { TrendingBotService } from '../services/trendingBotService';
+import { prisma } from '../prismaClient';
 
 const router = Router();
 const botService = new TrendingBotService();
 
-router.post('/generate', requireAuth, async (req, res) => {
-    const { daysWindow } = req.body; // e.g., 7 or 30
+router.get("/generate/status/:jobId", requireAuth, async (req, res) => {
+  const job = await prisma.botGenerationJob.findFirst({
+    where: { id: req.params.jobId, userId: req.userId! },
+  });
 
-    if (!daysWindow) return res.status(400).json({ error: 'Missing daysWindow' });
-
-    // Trigger generation asynchronously to not block
-    botService.generateNow(req.userId!, Number(daysWindow))
-        .then(() => console.log(`Batch generation completed for user ${req.userId}`))
-        .catch((err: any) => console.error(`Batch generation failed for user ${req.userId}`, err));
-
-    res.json({ message: 'Batch generation started. Check activity feed shortly.' });
+  if (!job) return res.status(404).json({ error: "Job not found" });
+  res.json(job);
 });
+router.post("/generate", requireAuth, async (req, res) => {
+  const { daysWindow } = req.body;
+  if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
 
+  const job = await prisma.botGenerationJob.create({
+    data: {
+      userId: req.userId!,
+      daysWindow: Number(daysWindow),
+      status: "RUNNING",
+    },
+  });
+
+  botService
+    .generateNow(req.userId!, Number(daysWindow), job.id)
+    .then(async () => {
+      await prisma.botGenerationJob.update({
+        where: { id: job.id },
+        data: { status: "DONE", completedAt: new Date() },
+      });
+    })
+    .catch(async (err: any) => {
+      await prisma.botGenerationJob.update({
+        where: { id: job.id },
+        data: { status: "FAILED", completedAt: new Date(), error: String(err?.message || err) },
+      });
+    });
+
+  res.json({ jobId: job.id, status: "RUNNING" });
+});
 // GET /bot/trends/preview - Preview top trends for current config
 router.get('/trends/preview', requireAuth, async (req, res) => {
     try {
