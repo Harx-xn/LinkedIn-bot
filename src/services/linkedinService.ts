@@ -102,8 +102,15 @@ async function uploadImageToLinkedIn(accessToken: string, authorUrn: string, ima
 
   // Step 2: Upload the image binary
   // imagePath is already an absolute path from imageService
-  const fullPath = path.isAbsolute(imagePath) ? imagePath : path.join(process.cwd(), 'dist/public', imagePath);
+ const UPLOAD_DIR =
+  process.env.RENDER
+    ? '/opt/render/project/src/uploads'
+    : path.join(process.cwd(), 'uploads');
 
+const fullPath = path.isAbsolute(imagePath)
+  ? imagePath
+  : path.join(UPLOAD_DIR, imagePath);
+  
   if (!fs.existsSync(fullPath)) {
     console.error(`Image file not found at path: ${fullPath}`);
     throw new Error(`Image file not found: ${fullPath}`);
