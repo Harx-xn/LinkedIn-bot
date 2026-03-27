@@ -64,7 +64,7 @@ router.post('/', requireAuth, async (req, res) => {
 router.get('/queue', requireAuth, async (req, res) => {
   const posts = await prisma.post.findMany({
     where: { userId: req.userId!, status: 'QUEUED' },
-    orderBy: { scheduledAt: 'asc' }
+    orderBy: { scheduledAt: 'desc' }
   });
   res.json(posts);
 });
@@ -73,11 +73,10 @@ router.get('/', requireAuth, async (req, res) => {
   const posts = await prisma.post.findMany({
     where: { userId: req.userId! },
     orderBy: { createdAt: 'desc' },
-    take: 20
+    take: 100
   });
   res.json(posts);
 });
-
 
 router.delete('/:id', requireAuth, async (req, res) => {
   const post = await prisma.post.findUnique({
