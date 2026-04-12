@@ -11,6 +11,8 @@ import userRouter from './routes/user';
 import botConfigRouter from './routes/botConfig';
 import uploadRouter from './routes/upload';
 import botActionRouter from './routes/botAction';
+import adminRoutes from './routes/admin';
+import regionRoutes from './routes/region';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
 
@@ -55,6 +57,8 @@ app.use('/api/user', userRouter);
 app.use('/api/bot', botConfigRouter);
 app.use('/api/bot', botActionRouter); // Used for /bot/generate
 app.use('/api/upload', uploadRouter);
+app.use('/admin', adminRoutes);
+app.use('/regional-admin', regionRoutes);
 
 // Serve static files (uploaded images)
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));

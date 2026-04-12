@@ -3,130 +3,243 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  REGIONAL_ADMIN
+  USER
+}
+
+model Region {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  code     String  @unique
+  isActive Boolean @default(true)
+
+  logoUrl         String?
+  primaryColor    String?
+  secondaryColor  String?
+  customDomain    String?
+  subdomain       String? @unique
+  language        String? @default("en")
+  currency        String? @default("USD")
+  frontendVariant String? @default("default")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users            User[]
+  botConfigs       BotConfig[]
+  linkedinAccounts LinkedInAccount[]
+  posts            Post[]
+  schedules        Schedule[]
+  sheetConfigs     SheetConfig[]
+  generationJobs   BotGenerationJob[]
+  subscriptions    Subscription[]
+  plans            Plan[]
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  username     String   @unique
+  id           String @id @default(cuid())
+  email        String @unique
+  username     String @unique
   passwordHash String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+
+  role     UserRole @default(USER)
+  isActive Boolean  @default(true)
+
+  regionId String?
+  region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   linkedinClientId     String?
   linkedinClientSecret String?
+  googleClientId       String?
+  googleClientSecret   String?
 
-  googleClientId     String?
-  googleClientSecret String?
-
+  botConfigs       BotConfig?
   linkedinAccounts LinkedInAccount[]
-  schedules        Schedule[]
   posts            Post[]
+  schedules        Schedule[]
   sheetConfigs     SheetConfig[]
-  botConfig        BotConfig?
+  subscriptions    Subscription[]
+  BotGenerationJob BotGenerationJob[]
+
+  @@index([regionId])
+  @@index([role])
 }
 
 model BotConfig {
   id                 String   @id @default(cuid())
-  user               User     @relation(fields: [userId], references: [id])
   userId             String   @unique
-  niches             String // JSON array: ["technology", "marketing", "finance"]
-  sources            String // JSON array: ["reddit", "medium", "google"]
-  customRssFeeds     String? // JSON array: ["https://techcrunch.com/feed", ...]
-  customLinks        String? // JSON array: ["https://example.com/article1", ... (User provided links)]
-  customRedditFeeds  String? // JSON array: ["https://www.reddit.com/r/all/hot.json", ...]
-  backgroundImageUrl String? // Path or URL to background image
-  postingSchedule    String? // e.g. "0 9 * * *"
+  regionId           String?
+  niches             String
+  sources            String
+  customRssFeeds     String?
+  customLinks        String?
+  customRedditFeeds  String?
+  backgroundImageUrl String?
+  postingSchedule    String?
   postsPerWeek       Int      @default(7)
-  generationWindow   Int      @default(7) // Days to generate for
+  generationWindow   Int      @default(7)
   isEnabled          Boolean  @default(false)
   description        String?  @default("")
-  tone               String?  @default("Professional") // "Professional", "Casual", "Humorous", etc.
+  tone               String?  @default("Professional")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([regionId])
 }
 
 model LinkedInAccount {
   id                      String   @id @default(cuid())
-  user                    User     @relation(fields: [userId], references: [id])
   userId                  String
-  authorUrn               String // Personal URN (urn:li:person:xxx)
-  selectedOrganizationUrn String? // Organization URN if posting to page (urn:li:organization:xxx)
+  regionId                String?
+  authorUrn               String
+  selectedOrganizationUrn String?
   accessToken             String
   refreshToken            String?
   expiresAt               DateTime
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
-  // Back relation to Post.linkedinAccount
-  posts Post[]
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  posts  Post[]
+
+  @@index([userId])
+  @@index([regionId])
 }
 
 model Schedule {
   id        String   @id @default(cuid())
-  user      User     @relation(fields: [userId], references: [id])
   userId    String
-  timezone  String // e.g. "Asia/Karachi"
-  cron      String // e.g. "0 10 * * 1-5" for 10:00 Mon–Fri
+  regionId  String?
+  timezone  String
+  cron      String
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([regionId])
 }
 
 model Post {
-  id     String @id @default(cuid())
-  user   User   @relation(fields: [userId], references: [id])
-  userId String
-
-  linkedinAccount   LinkedInAccount? @relation(fields: [linkedinAccountId], references: [id])
+  id                String    @id @default(cuid())
+  userId            String
+  regionId          String?
   linkedinAccountId String?
+  source            String    @default("MANUAL")
+  status            String    @default("DRAFT")
+  content           String
+  hashtags          String?
+  scheduledAt       DateTime?
+  publishedAt       DateTime?
+  linkedinPostUrn   String?
+  mediaUrl          String?
+  errorMessage      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  // Using String instead of enums to avoid connector enum limitation
-  // Suggested values:
-  //   source: "GOOGLE_SHEET" | "AI" | "MANUAL"
-  //   status: "DRAFT" | "QUEUED" | "PUBLISHED" | "FAILED"
-  source String @default("MANUAL")
-  status String @default("DRAFT")
+  linkedinAccount LinkedInAccount? @relation(fields: [linkedinAccountId], references: [id], onDelete: SetNull)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region          Region?          @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-  content  String
-  hashtags String? // you can store comma-separated or JSON
-
-  scheduledAt     DateTime?
-  publishedAt     DateTime?
-  linkedinPostUrn String?
-  mediaUrl        String? // Path or URL to the generated/attached image
-
-  errorMessage String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  @@index([userId])
+  @@index([regionId])
+  @@index([status, regionId])
 }
 
 model BotGenerationJob {
-  id             String   @id @default(cuid())
-  userId         String
+  id             String    @id @default(cuid())
+  userId         String?
+  regionId       String?
   daysWindow     Int
-  status         String   @default("RUNNING") // RUNNING | DONE | FAILED
-  totalSlots     Int      @default(0)
-  completedSlots Int      @default(0)
-  createdAt      DateTime @default(now())
+  status         String    @default("RUNNING")
+  createdAt      DateTime  @default(now())
   completedAt    DateTime?
   error          String?
+  completedSlots Int       @default(0)
+  totalSlots     Int       @default(0)
+
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
+  @@index([regionId, createdAt])
 }
 
 model SheetConfig {
   id            String   @id @default(cuid())
-  user          User     @relation(fields: [userId], references: [id])
   userId        String
+  regionId      String?
   spreadsheetId String
-  range         String // e.g. "Posts!A:D"
+  range         String
   accessToken   String?
   refreshToken  String?
   active        Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([regionId])
+}
+
+model Plan {
+  id           String  @id @default(cuid())
+  name         String
+  code         String
+  price        Float
+  currency     String
+  billingCycle String
+  isActive     Boolean @default(true)
+
+  regionId String?
+  region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@unique([code, regionId])
+  @@index([regionId])
+}
+
+model Subscription {
+  id        String    @id @default(cuid())
+  userId    String
+  regionId  String?
+  planId    String
+  status    String    @default("ACTIVE")
+  startsAt  DateTime  @default(now())
+  endsAt    DateTime?
+  autoRenew Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  plan   Plan    @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([regionId])
+  @@index([planId])
 }

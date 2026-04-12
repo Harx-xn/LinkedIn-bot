@@ -73,7 +73,16 @@ router.post('/login', async (req, res) => {
   const token = jwt.sign({ userId: user.id }, config.jwtSecret);
 
   // Return username too
-  res.json({ token, user: { id: user.id, email: user.email, username: user.username } });
+  res.json({
+  token,
+  user: {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    role: user.role,
+    regionId: user.regionId,
+  },
+});
 });
 
 export default router;
