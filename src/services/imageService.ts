@@ -1,6 +1,8 @@
 import sharp from "sharp";
 import path from "path";
 import fs from "fs";
+import axios from "axios";
+import { uploadBufferToR2 } from "../middleware/r2";
 
 interface PostContent {
   headline: string;
@@ -37,48 +39,61 @@ export class ImageService {
       // -------------------------
       // 2) Resolve background path
       // -------------------------
-      const UPLOAD_DIR = process.env.RENDER
-        ? "/opt/render/project/src/uploads"
-        : path.join(process.cwd(), "uploads");
-      let resolvedBackgroundPath: string | undefined;
-      if (backgroundUrl && backgroundUrl.trim() !== "") {
-        const searchPaths = [
-          path.isAbsolute(backgroundUrl) ? backgroundUrl : "",
-          path.join(UPLOAD_DIR, backgroundUrl),
-          path.join(UPLOAD_DIR, path.basename(backgroundUrl)),
-          path.join(process.cwd(), "public", backgroundUrl),
-          path.join(process.cwd(), backgroundUrl),
-        ].filter(Boolean) as string[];
+      let backgroundBuffer: Buffer | undefined;
 
-        for (const p of searchPaths) {
-          if (fs.existsSync(p)) {
-            resolvedBackgroundPath = p;
-            break;
+      if (backgroundUrl && backgroundUrl.trim() !== "") {
+        if (
+          backgroundUrl.startsWith("http://") ||
+          backgroundUrl.startsWith("https://")
+        ) {
+          const response = await axios.get(backgroundUrl, {
+            responseType: "arraybuffer",
+          });
+
+          backgroundBuffer = Buffer.from(response.data);
+        } else {
+          const UPLOAD_DIR = process.env.RENDER
+            ? "/opt/render/project/src/uploads"
+            : path.join(process.cwd(), "uploads");
+
+          const searchPaths = [
+            path.isAbsolute(backgroundUrl) ? backgroundUrl : "",
+            path.join(UPLOAD_DIR, backgroundUrl),
+            path.join(UPLOAD_DIR, path.basename(backgroundUrl)),
+            path.join(process.cwd(), "public", backgroundUrl),
+            path.join(process.cwd(), backgroundUrl),
+          ].filter(Boolean) as string[];
+
+          for (const p of searchPaths) {
+            if (fs.existsSync(p)) {
+              backgroundBuffer = fs.readFileSync(p);
+              break;
+            }
           }
         }
       }
 
-      const hasCustomBackground = !!resolvedBackgroundPath;
+      const hasCustomBackground = !!backgroundBuffer;
 
       // -------------------------
       // 3) Build background (so we can sample luminance)
       // -------------------------
       const gradientSvg = `
-          <svg width="${width}" height="${height}">
-            <defs>
-              <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#0F172A" />
-                <stop offset="100%" stop-color="#1E1B4B" />
-              </linearGradient>
-              <radialGradient id="a" cx="80%" cy="20%">
-                <stop offset="0%" stop-color="#6366F1" stop-opacity="0.22" />
-                <stop offset="100%" stop-color="#6366F1" stop-opacity="0" />
-              </radialGradient>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#g)"/>
-            <rect width="100%" height="100%" fill="url(#a)"/>
-          </svg>
-        `;
+            <svg width="${width}" height="${height}">
+              <defs>
+                <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#0F172A" />
+                  <stop offset="100%" stop-color="#1E1B4B" />
+                </linearGradient>
+                <radialGradient id="a" cx="80%" cy="20%">
+                  <stop offset="0%" stop-color="#6366F1" stop-opacity="0.22" />
+                  <stop offset="100%" stop-color="#6366F1" stop-opacity="0" />
+                </radialGradient>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#g)"/>
+              <rect width="100%" height="100%" fill="url(#a)"/>
+            </svg>
+          `;
 
       let backgroundSharp = sharp(Buffer.from(gradientSvg)).resize(
         width,
@@ -87,7 +102,7 @@ export class ImageService {
       );
 
       if (hasCustomBackground) {
-        backgroundSharp = sharp(resolvedBackgroundPath!).resize(width, height, {
+        backgroundSharp = sharp(backgroundBuffer!).resize(width, height, {
           fit: "cover",
           position: "centre",
         });
@@ -130,13 +145,13 @@ export class ImageService {
         height: Math.max(1, Math.min(520, boxHeight)),
       };
 
-      const backgroundBuffer = await backgroundSharp
+      const renderedBackgroundBuffer = await backgroundSharp
         .clone()
         .resize(width, height, { fit: "cover", position: "centre" })
         .png()
         .toBuffer();
 
-      const backgroundRaster = sharp(backgroundBuffer);
+      const backgroundRaster = sharp(renderedBackgroundBuffer);
       const lum = await this.getAverageLuminance(
         backgroundRaster,
         sampleRegion,
@@ -155,7 +170,7 @@ export class ImageService {
         .png()
         .toBuffer();
 
-      const baseImage: sharp.Sharp = sharp(backgroundBuffer).composite([
+      const baseImage: sharp.Sharp = sharp(renderedBackgroundBuffer).composite([
         { input: overlayBuffer, blend: "over" },
       ]);
 
@@ -356,160 +371,162 @@ export class ImageService {
       const showBrand = !hasCustomBackground;
 
       const contentSvg = `
-          <svg width="${width}" height="${height}">
-            <defs>
-              <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
-                <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="${theme.shadow}" />
-              </filter>
+            <svg width="${width}" height="${height}">
+              <defs>
+                <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+                  <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="${theme.shadow}" />
+                </filter>
 
-              <style>
-                .h {
-                  fill: ${theme.headline};
-                  font-size: ${hSize}px;
-                  font-weight: 800;
-                  letter-spacing: -0.02em;
-                  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                  filter: url(#shadow);
-                }
-                .sh {
-                  fill: ${theme.subheadline};
-                  font-size: ${shSize}px;
-                  font-weight: 600;
-                  letter-spacing: -0.01em;
-                  opacity: 0.92;
-                  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                  filter: url(#shadow);
-                }
-                .b {
-                  fill: ${theme.bullet};
-                  font-size: ${bSize}px;
-                  font-weight: 550;
-                  letter-spacing: 0;
-                  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                  filter: url(#shadow);
-                }
-                .dot {
-                  fill: ${
-                    theme.headline === "#FFFFFF"
-                      ? "rgba(255,255,255,0.35)"
-                      : "rgba(15,23,42,0.35)"
-                  };
-                  font-size: ${bSize + 6}px;
-                  font-weight: 900;
-                  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                  filter: url(#shadow);
-                }
-              </style>
-            </defs>
+                <style>
+                  .h {
+                    fill: ${theme.headline};
+                    font-size: ${hSize}px;
+                    font-weight: 800;
+                    letter-spacing: -0.02em;
+                    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    filter: url(#shadow);
+                  }
+                  .sh {
+                    fill: ${theme.subheadline};
+                    font-size: ${shSize}px;
+                    font-weight: 600;
+                    letter-spacing: -0.01em;
+                    opacity: 0.92;
+                    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    filter: url(#shadow);
+                  }
+                  .b {
+                    fill: ${theme.bullet};
+                    font-size: ${bSize}px;
+                    font-weight: 550;
+                    letter-spacing: 0;
+                    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    filter: url(#shadow);
+                  }
+                  .dot {
+                    fill: ${
+                      theme.headline === "#FFFFFF"
+                        ? "rgba(255,255,255,0.35)"
+                        : "rgba(15,23,42,0.35)"
+                    };
+                    font-size: ${bSize + 6}px;
+                    font-weight: 900;
+                    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    filter: url(#shadow);
+                  }
+                </style>
+              </defs>
 
-            ${
-              showBrand
-                ? `
-                  <text x="${safe.left}" y="100" class="logo">iT</text>
-                  <text x="${safe.left}" y="${safe.top - 20}" class="q">"</text>
-                `
-                : ""
-            }
+              ${
+                showBrand
+                  ? `
+                    <text x="${safe.left}" y="100" class="logo">iT</text>
+                    <text x="${safe.left}" y="${safe.top - 20}" class="q">"</text>
+                  `
+                  : ""
+              }
 
-            <!-- Headline -->
-            ${headlineLines
+              <!-- Headline -->
+              ${headlineLines
+                .map((ln, i) => {
+                  const yy = y + i * line.h();
+                  const x = headlineCentered ? centerX : safe.left;
+                  const anchor = headlineCentered ? "middle" : "start";
+                  return `<text x="${x}" y="${yy}" text-anchor="${anchor}" class="h">${this.escapeXml(
+                    ln,
+                  )}</text>`;
+                })
+                .join("")}
+
+              ${(() => {
+                y += headlineLines.length * line.h();
+                if (headlineLines.length) y += Math.round(hSize * 0.65);
+                return "";
+              })()}
+
+              <!-- Subheadline (forced single-line when needed) -->
+            ${subheadlineLines
               .map((ln, i) => {
-                const yy = y + i * line.h();
-                const x = headlineCentered ? centerX : safe.left;
-                const anchor = headlineCentered ? "middle" : "start";
-                return `<text x="${x}" y="${yy}" text-anchor="${anchor}" class="h">${this.escapeXml(
+                const yy = y + i * line.sh();
+                const textLengthAttr = subUseTextLength
+                  ? ` textLength="${subMaxWidth}" lengthAdjust="spacingAndGlyphs"`
+                  : "";
+                return `<text x="${subCenterX}" y="${yy}" text-anchor="middle" class="sh"${textLengthAttr}>${this.escapeXml(
                   ln,
                 )}</text>`;
               })
               .join("")}
 
-            ${(() => {
-              y += headlineLines.length * line.h();
-              if (headlineLines.length) y += Math.round(hSize * 0.65);
-              return "";
-            })()}
+              ${(() => {
+                y += subheadlineLines.length * line.sh();
+                if (subheadlineLines.length) y += Math.round(shSize * 1.4);
+                return "";
+              })()}
 
-            <!-- Subheadline (forced single-line when needed) -->
-          ${subheadlineLines
-            .map((ln, i) => {
-              const yy = y + i * line.sh();
-              const textLengthAttr = subUseTextLength
-                ? ` textLength="${subMaxWidth}" lengthAdjust="spacingAndGlyphs"`
-                : "";
-              return `<text x="${subCenterX}" y="${yy}" text-anchor="middle" class="sh"${textLengthAttr}>${this.escapeXml(
-                ln,
-              )}</text>`;
-            })
-            .join("")}
+              <!-- Bullets -->
+              ${bulletLineGroups
+                .map((group, bi) => {
+                  const chunk = group
+                    .map((ln, li) => {
+                      const yy = y + li * line.b();
+                      const clean = ln.replace(/^•\s*/, "");
 
-            ${(() => {
-              y += subheadlineLines.length * line.sh();
-              if (subheadlineLines.length) y += Math.round(shSize * 1.4);
-              return "";
-            })()}
+                      if (li === 0) {
+                        return `
+                          <text x="${dotX}" y="${yy}" text-anchor="start" class="dot">•</text>
+                          <text x="${bodyLeft}" y="${yy}" text-anchor="start" class="b">${this.escapeXml(
+                            clean,
+                          )}</text>
+                        `;
+                      }
 
-            <!-- Bullets -->
-            ${bulletLineGroups
-              .map((group, bi) => {
-                const chunk = group
-                  .map((ln, li) => {
-                    const yy = y + li * line.b();
-                    const clean = ln.replace(/^•\s*/, "");
+                      // Wrapped lines align with bullet text column (no dot)
+                      return `<text x="${bodyLeft}" y="${yy}" text-anchor="start" class="b">${this.escapeXml(
+                        clean,
+                      )}</text>`;
+                    })
+                    .join("");
 
-                    if (li === 0) {
-                      return `
-                        <text x="${dotX}" y="${yy}" text-anchor="start" class="dot">•</text>
-                        <text x="${bodyLeft}" y="${yy}" text-anchor="start" class="b">${this.escapeXml(
-                          clean,
-                        )}</text>
-                      `;
-                    }
+                  y += group.length * line.b();
+                  if (bi < bulletLineGroups.length - 1)
+                    y += Math.round(bSize * 0.75);
+                  return chunk;
+                })
+                .join("")}
 
-                    // Wrapped lines align with bullet text column (no dot)
-                    return `<text x="${bodyLeft}" y="${yy}" text-anchor="start" class="b">${this.escapeXml(
-                      clean,
-                    )}</text>`;
-                  })
-                  .join("");
-
-                y += group.length * line.b();
-                if (bi < bulletLineGroups.length - 1)
-                  y += Math.round(bSize * 0.75);
-                return chunk;
-              })
-              .join("")}
-
-            ${
-              showBrand
-                ? `
-                  <line x1="${safe.left}" y1="${height - 130}" x2="${width - safe.right}" y2="${
-                    height - 130
-                  }" stroke="#334155" />
-                  <text x="${safe.left + 40}" y="${height - 80}" class="footer">🌐 innovariatech.com</text>
-                  <text x="${safe.left + 360}" y="${height - 80}" class="footer">📷 innovariatech</text>
-                  <text x="${safe.left + 640}" y="${height - 80}" class="footer">✕ innovariatech</text>
-                `
-                : ""
-            }
-          </svg>
-        `;
+              ${
+                showBrand
+                  ? `
+                    <line x1="${safe.left}" y1="${height - 130}" x2="${width - safe.right}" y2="${
+                      height - 130
+                    }" stroke="#334155" />
+                    <text x="${safe.left + 40}" y="${height - 80}" class="footer">🌐 innovariatech.com</text>
+                    <text x="${safe.left + 360}" y="${height - 80}" class="footer">📷 innovariatech</text>
+                    <text x="${safe.left + 640}" y="${height - 80}" class="footer">✕ innovariatech</text>
+                  `
+                  : ""
+              }
+            </svg>
+          `;
 
       // -------------------------
       // 7) Composite + output
       // -------------------------
-      const outputFilename = `post-${Date.now()}.jpg`;
-      const outputPath = path.join(UPLOAD_DIR, outputFilename);
+      const outputFilename = `generated/post-${Date.now()}.jpg`;
 
-      const dir = path.dirname(outputPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-      await baseImage
+      const outputBuffer = await baseImage
         .resize(width, height, { fit: "cover" })
         .composite([{ input: Buffer.from(contentSvg), top: 0, left: 0 }])
         .jpeg({ quality: 82, progressive: true })
-        .toFile(outputPath);
+        .toBuffer();
 
-      return outputPath;
+      const url = await uploadBufferToR2(
+        outputBuffer,
+        outputFilename,
+        "image/jpeg",
+      );
+
+      return url;
     } catch (error) {
       console.error("Image Error:", error);
       throw error;

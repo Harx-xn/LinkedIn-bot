@@ -61,7 +61,7 @@ app.use('/admin', adminRoutes);
 app.use('/regional-admin', regionRoutes);
 
 // Serve static files (uploaded images)
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+// app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use(express.static(path.join(process.cwd(), 'dist', 'public')));
 app.use((req, res) => {
   console.log(`[404] ${req.method} ${req.path}`);

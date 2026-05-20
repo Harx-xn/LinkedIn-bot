@@ -10,7 +10,8 @@ import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
-router.get('/connect', requireAuth, async (req: Request, res: any) => {
+router.get('/connect', requireAuth, async (req, res: any) => {
+  console.log("meow")
   const clientId = process.env.LINKEDIN_CLIENT_ID;
 
   if (!clientId) {
@@ -81,7 +82,7 @@ res.send(`
   }
 });
 
-router.post('/disconnect', requireAuth, async (req: Request, res: any) => {
+router.post('/disconnect', requireAuth, async (req, res: any) => {
   try {
     const userId = req.userId;
 

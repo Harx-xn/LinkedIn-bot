@@ -75,55 +75,71 @@ export async function saveLinkedInAccountForUser(userId: string, accessToken: st
   });
 }
 
-async function uploadImageToLinkedIn(accessToken: string, authorUrn: string, imagePath: string): Promise<string> {
-  const fs = require('fs');
-  const path = require('path');
+async function uploadImageToLinkedIn(
+  accessToken: string,
+  authorUrn: string,
+  imagePath: string
+): Promise<string> {
+  const fs = require("fs");
+  const path = require("path");
 
   // Step 1: Register upload
   const registerResponse = await axios.post(
-    'https://api.linkedin.com/rest/images?action=initializeUpload',
+    "https://api.linkedin.com/rest/images?action=initializeUpload",
     {
       initializeUploadRequest: {
-        owner: authorUrn
-      }
+        owner: authorUrn,
+      },
     },
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'X-Restli-Protocol-Version': '2.0.0',
-        'LinkedIn-Version': config.linkedin.apiVersion
-      }
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "LinkedIn-Version": config.linkedin.apiVersion,
+      },
     }
   );
 
   const uploadUrl = registerResponse.data.value.uploadUrl;
   const imageUrn = registerResponse.data.value.image;
 
-  // Step 2: Upload the image binary
-  // imagePath is already an absolute path from imageService
- const UPLOAD_DIR =
-  process.env.RENDER
-    ? '/opt/render/project/src/uploads'
-    : path.join(process.cwd(), 'uploads');
+  let imageBuffer: Buffer;
 
-const fullPath = path.isAbsolute(imagePath)
-  ? imagePath
-  : path.join(UPLOAD_DIR, imagePath);
-  
-  if (!fs.existsSync(fullPath)) {
-    console.error(`Image file not found at path: ${fullPath}`);
-    throw new Error(`Image file not found: ${fullPath}`);
+  // New R2/public URL support
+  if (imagePath.startsWith("http://") || imagePath.startsWith("https://")) {
+    console.log(`Downloading image from URL: ${imagePath}`);
+
+    const imageResponse = await axios.get(imagePath, {
+      responseType: "arraybuffer",
+    });
+
+    imageBuffer = Buffer.from(imageResponse.data);
+  } else {
+    // Backward compatibility for old local images
+    const UPLOAD_DIR = process.env.RENDER
+      ? "/opt/render/project/src/uploads"
+      : path.join(process.cwd(), "uploads");
+
+    const fullPath = path.isAbsolute(imagePath)
+      ? imagePath
+      : path.join(UPLOAD_DIR, imagePath);
+
+    if (!fs.existsSync(fullPath)) {
+      console.error(`Image file not found at path: ${fullPath}`);
+      throw new Error(`Image file not found: ${fullPath}`);
+    }
+
+    console.log(`Uploading image from local path: ${fullPath}`);
+    imageBuffer = fs.readFileSync(fullPath);
   }
 
-  console.log(`Uploading image from: ${fullPath}`);
-  const imageBuffer = fs.readFileSync(fullPath);
-
+  // Step 2: Upload image binary to LinkedIn
   await axios.put(uploadUrl, imageBuffer, {
     headers: {
-      'Content-Type': 'application/octet-stream',
-      Authorization: `Bearer ${accessToken}`
-    }
+      "Content-Type": "application/octet-stream",
+      Authorization: `Bearer ${accessToken}`,
+    },
   });
 
   return imageUrn;

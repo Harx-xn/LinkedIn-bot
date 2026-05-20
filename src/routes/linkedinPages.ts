@@ -6,8 +6,10 @@ import { config } from '../config';
 
 const router = Router();
 
+
 // Get user's LinkedIn organizations/pages
 router.get('/pages', requireAuth, async (req, res) => {
+    
     try {
         const linkedInAccount = await prisma.linkedInAccount.findFirst({
             where: { userId: req.userId! }

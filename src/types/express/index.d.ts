@@ -12,6 +12,7 @@ declare global {
 
     interface Request {
       user?: UserContext;
+      userId?: string;
     }
   }
 }

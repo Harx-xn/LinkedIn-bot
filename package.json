@@ -13,6 +13,7 @@
     "test-post": "ts-node-dev src/test_post.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1049.0",
     "@google/generative-ai": "^0.24.1",
     "@prisma/client": "^5.22.0",
     "axios": "^1.15.0",
@@ -23,7 +24,7 @@
     "express-async-errors": "^3.1.1",
     "googleapis": "^142.0.0",
     "jsonwebtoken": "^9.0.0",
-    "multer": "^2.0.2",
+    "multer": "^2.1.1",
     "node-cron": "^3.0.3",
     "openai": "^6.10.0",
     "react-router-dom": "^7.14.0",
@@ -35,7 +36,7 @@
     "@types/cors": "^2.8.13",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.2",
-    "@types/multer": "^2.0.0",
+    "@types/multer": "^2.1.0",
     "@types/node": "^20.19.39",
     "@types/node-cron": "^3.0.11",
     "@types/sharp": "^0.31.1",
