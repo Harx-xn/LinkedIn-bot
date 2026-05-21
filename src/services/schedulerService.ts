@@ -6,6 +6,7 @@ import { fetchPostsFromSheet } from "./sheetsService";
 import { TrendingBotService } from "./trendingBotService";
 
 export function startScheduler() {
+    console.log("INSIDE startScheduler");
   // Run Trending Bot daily at 9:00 AM
   cron.schedule("0 9 * * *", async () => {
     console.log("Running Daily Trending Bot...");
@@ -17,7 +18,7 @@ export function startScheduler() {
 
   // Sync Sheets every 10 minutes
   // Sync Sheets every 10 minutes
-  cron.schedule("*/10 * * * *", async () => {
+  cron.schedule("* * * * *", async () => {
     console.log("Running Sheet Sync...");
 
     const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -29,7 +30,7 @@ export function startScheduler() {
     }
 
     const configs = await prisma.sheetConfig.findMany({
-      where: { active: true }
+      where: { active: true },
     });
 
     for (const config of configs) {
@@ -50,9 +51,21 @@ export function startScheduler() {
           spreadsheetId: config.spreadsheetId,
           range: config.range,
         });
-
+        const linkedInAccount = await prisma.linkedInAccount.findFirst({
+          where: { userId: config.userId },
+        });
         for (const row of rows) {
           if (!row.content) continue;
+          const normalizedStatus = row.status?.toUpperCase();
+
+          if (normalizedStatus === "SKIP") {
+            continue;
+          }
+
+          const finalStatus =
+            normalizedStatus === "QUEUED" && row.scheduledAt
+              ? "QUEUED"
+              : "DRAFT";
 
           const duplicate = await prisma.post.findFirst({
             where: {
@@ -67,12 +80,13 @@ export function startScheduler() {
               data: {
                 userId: config.userId,
                 regionId: config.regionId,
+                linkedinAccountId: linkedInAccount?.id || null,
                 content: row.content,
                 hashtags: row.hashtags,
                 mediaUrl: row.mediaUrl,
-                scheduledAt: row.scheduledAt,
+                scheduledAt: finalStatus === "QUEUED" ? row.scheduledAt : null,
                 source: "GOOGLE_SHEET",
-                status: row.scheduledAt ? "QUEUED" : "DRAFT",
+                status: finalStatus,
               },
             });
 
@@ -97,10 +111,31 @@ export function startScheduler() {
 
     for (const post of duePosts) {
       try {
+        let linkedinAccountId = post.linkedinAccountId;
+
+        if (!linkedinAccountId) {
+          const linkedInAccount = await prisma.linkedInAccount.findFirst({
+            where: { userId: post.userId },
+          });
+
+          if (!linkedInAccount) {
+            throw new Error("No LinkedIn account connected");
+          }
+
+          linkedinAccountId = linkedInAccount.id;
+
+          await prisma.post.update({
+            where: { id: post.id },
+            data: { linkedinAccountId },
+          });
+        }
+
         await postToLinkedInFromPostId(post.id);
+
         console.log("Published post", post.id);
       } catch (err: any) {
         console.error("Failed to publish post", post.id, err?.message || err);
+
         await prisma.post.update({
           where: { id: post.id },
           data: {

@@ -150,9 +150,12 @@ export async function postToLinkedInFromPostId(postId: string) {
     where: { id: postId },
     include: { user: true, linkedinAccount: true }
   });
+  
   if (!post) throw new Error('Post not found');
   if (!post.linkedinAccountId || !post.linkedinAccount) throw new Error('No LinkedIn account attached');
-
+const finalText = [post.content, post.hashtags]
+  .filter(Boolean)
+  .join('\n\n');
   const liAccount = post.linkedinAccount;
   const accessToken = liAccount.accessToken;
 
@@ -161,7 +164,7 @@ export async function postToLinkedInFromPostId(postId: string) {
 
   const body: any = {
     author: authorUrn,
-    commentary: post.content.replace(/\n{3,}/g, '\n\n'),
+    commentary: finalText,
     visibility: 'PUBLIC',
     distribution: {
       feedDistribution: 'MAIN_FEED',
@@ -186,6 +189,7 @@ export async function postToLinkedInFromPostId(postId: string) {
       // Continue posting without image
     }
   }
+
 
   const response = await axios.post(
     'https://api.linkedin.com/rest/posts',

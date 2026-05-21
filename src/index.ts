@@ -23,7 +23,7 @@ const allowedOrigins = [
   // add your deployed frontend domain too:
   "https://frontend-bx09.onrender.com",
 ];
-
+console.log("startScheduler import:", startScheduler);
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -75,5 +75,12 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 
 app.listen(config.port, () => {
   console.log(`Backend running on http://localhost:${config.port}`);
-  startScheduler();
+   console.log("BEFORE startScheduler");
+
+  try {
+    startScheduler();
+    console.log("AFTER startScheduler");
+  } catch (err) {
+    console.error("startScheduler failed:", err);
+  }
 });
