@@ -52,10 +52,19 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     const customLinksStr = typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
     const customRedditFeedsStr = typeof customRedditFeeds === 'string' ? customRedditFeeds : JSON.stringify(customRedditFeeds || []);
 
+    // Stamp the config with the user's region so region-scoped admin/analytics
+    // queries include bot-generated data.
+    const owner = await prisma.user.findUnique({
+      where: { id: req.userId! },
+      select: { regionId: true },
+    });
+    const regionId = owner?.regionId ?? null;
+
     const config = await prisma.botConfig.upsert({
       where: { userId: req.userId! },
       create: {
         userId: req.userId!,
+        regionId,
         niches: nichesStr,
         sources: sourcesStr,
         customRssFeeds: customRssFeedsStr,
@@ -69,6 +78,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
         description: description || '' // ✅
       },
       update: {
+        regionId,
         niches: nichesStr,
         sources: sourcesStr,
         customRssFeeds: customRssFeedsStr,

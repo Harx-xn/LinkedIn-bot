@@ -2,43 +2,79 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
 import { postToLinkedInFromPostId } from '../services/linkedinService';
+import { canPublish } from '../services/entitlementService';
 
 const router = Router();
 
 import { ImageService } from '../services/imageService';
 const imageService = new ImageService();
 
-router.get('/', requireAuth, async (req, res) => {
-  const { source, status } = req.query as {
-    source?: string;
-    status?: string;
-  };
+router.post('/', requireAuth, async (req, res) => {
+  const { content, hashtags, scheduledAt, source, linkedinAccountId, backgroundImageUrl } = req.body;
 
-  const where: any = {
-    userId: req.userId!
-  };
+  if (!content) return res.status(400).json({ error: 'Missing content' });
 
-  if (source) {
-    where.source = source;
+  // Auto-fetch user's LinkedIn account if not provided
+  let finalLinkedInAccountId = linkedinAccountId;
+  if (!finalLinkedInAccountId) {
+    const linkedInAccount = await prisma.linkedInAccount.findFirst({
+      where: { userId: req.userId! }
+    });
+    finalLinkedInAccountId = linkedInAccount?.id || null;
   }
 
-  if (status) {
-    where.status = status;
+  let mediaUrl = null;
+  if (backgroundImageUrl) {
+    try {
+      // For manual posts, use the content as simple text overlay
+      // Parse content to extract headline if user provides structured format
+      let imageContent;
+      try {
+        imageContent = JSON.parse(content);
+      } catch {
+        // If not JSON, use content as headline
+        imageContent = { headline: content.split('\n')[0] };
+      }
+
+      mediaUrl = await imageService.createTopicImage(
+        imageContent.headline || content,
+        backgroundImageUrl,
+        imageContent
+      );
+    } catch (e) {
+      console.error('Failed to generate image:', e);
+    }
   }
 
-  const posts = await prisma.post.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: 100
+  const post = await prisma.post.create({
+    data: {
+      userId: req.userId!,
+      content,
+      hashtags: hashtags || null,
+      status: scheduledAt ? 'QUEUED' : 'DRAFT',
+      scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
+      source: (source === 'GOOGLE_SHEET' || source === 'AI' || source === 'MANUAL') ? source : 'MANUAL',
+      linkedinAccountId: finalLinkedInAccountId,
+      mediaUrl: mediaUrl
+    }
   });
 
-  res.json(posts);
+  res.json(post);
 });
 
 router.get('/queue', requireAuth, async (req, res) => {
   const posts = await prisma.post.findMany({
     where: { userId: req.userId!, status: 'QUEUED' },
     orderBy: { scheduledAt: 'desc' }
+  });
+  res.json(posts);
+});
+
+router.get('/', requireAuth, async (req, res) => {
+  const posts = await prisma.post.findMany({
+    where: { userId: req.userId! },
+    orderBy: { createdAt: 'desc' },
+    take: 100
   });
   res.json(posts);
 });
@@ -74,6 +110,12 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
 
   // If it's already published, don't re-publish
   if (post.status === 'PUBLISHED') return res.status(400).json({ error: 'Already published' });
+
+  // Enforce trial / subscription limits (1 published post per day on trial).
+  const gate = await canPublish(req.userId!);
+  if (!gate.allowed) {
+    return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
+  }
 
   // If it's DRAFT or QUEUED or FAILED, try to publish
   try {

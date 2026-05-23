@@ -4,19 +4,19 @@ import { prisma } from '../prismaClient';
 import {
   getLinkedInAuthUrl,
   exchangeCodeForToken,
-  saveLinkedInAccountForUser
+  saveLinkedInAccountForUser,
+  getRegionLinkedInCreds
 } from '../services/linkedinService';
 import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 
 router.get('/connect', requireAuth, async (req, res: any) => {
-  console.log("meow")
-  const clientId = process.env.LINKEDIN_CLIENT_ID;
+  const creds = await getRegionLinkedInCreds(req.userId!);
 
-  if (!clientId) {
+  if (!creds.clientId) {
     return res.status(500).json({
-      error: 'LINKEDIN_CLIENT_ID is not set in environment variables.'
+      error: 'LinkedIn client ID is not configured for your region (and no global fallback is set).'
     });
   }
 
@@ -27,7 +27,7 @@ router.get('/connect', requireAuth, async (req, res: any) => {
   });
   const state = Buffer.from(statePayload).toString('base64');
 
-  const url = getLinkedInAuthUrl(clientId, state);
+  const url = getLinkedInAuthUrl(creds.clientId, state, creds.redirectUri);
   res.json({ url, state });
 });
 
@@ -35,25 +35,24 @@ router.get('/callback', async (req, res: any) => {
   const { code, state } = req.query as { code?: string; state?: string };
   if (!code || !state) return res.status(400).send('Missing code or state');
 
-  const clientId = process.env.LINKEDIN_CLIENT_ID;
-  const clientSecret = process.env.LINKEDIN_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    return res.status(500).send(
-      'LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET are not set in environment variables.'
-    );
-  }
-
   try {
     const decodedState = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
     const userId = decodedState.userId;
 
     if (!userId) return res.status(400).send('Invalid state');
 
+    const creds = await getRegionLinkedInCreds(userId);
+    if (!creds.clientId || !creds.clientSecret) {
+      return res.status(500).send(
+        'LinkedIn client ID / secret are not configured for this region.'
+      );
+    }
+
     const { accessToken, expiresIn } = await exchangeCodeForToken(
-      clientId,
-      clientSecret,
-      code
+      creds.clientId,
+      creds.clientSecret,
+      code,
+      creds.redirectUri
     );
 
     await saveLinkedInAccountForUser(userId, accessToken, expiresIn);

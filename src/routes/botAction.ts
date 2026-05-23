@@ -2,6 +2,7 @@
   import { requireAuth } from '../middleware/auth';
   import { TrendingBotService } from '../services/trendingBotService';
   import { prisma } from '../prismaClient';
+  import { canGenerate } from '../services/entitlementService';
 
   const router = Router();
   const botService = new TrendingBotService();
@@ -19,9 +20,22 @@
     const { daysWindow } = req.body;
     if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
 
+    // Block generation once the free trial has ended (subscribers/admins pass).
+    const gate = await canGenerate(req.userId!);
+    if (!gate.allowed) {
+      return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
+    }
+
+    // Attach the region so generation jobs show up in region-scoped analytics.
+    const owner = await prisma.user.findUnique({
+      where: { id: req.userId! },
+      select: { regionId: true },
+    });
+
     const job = await prisma.botGenerationJob.create({
       data: {
         userId: req.userId!,
+        regionId: owner?.regionId ?? null,
         daysWindow: Number(daysWindow),
         status: "RUNNING",
       },

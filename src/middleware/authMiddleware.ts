@@ -1,11 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../prismaClient';
+import { config } from '../config';
 
 type JwtPayload = {
   userId: string;
 };
 
+// Role-aware authentication: verifies the token, loads the full user (role +
+// region) onto `req.user`, and blocks inactive accounts. Used by the admin,
+// sub-admin, region, and analytics routes that need role/region context.
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
     const authHeader = req.headers.authorization;
@@ -15,13 +19,9 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     }
 
     const token = authHeader.split(' ')[1];
-    const secret = process.env.JWT_SECRET;
 
-    if (!secret) {
-      return res.status(500).json({ message: 'JWT_SECRET is missing' });
-    }
-
-    const decoded = jwt.verify(token, secret) as JwtPayload;
+    // Use the shared secret from config so every auth path stays in sync.
+    const decoded = jwt.verify(token, config.jwtSecret) as JwtPayload;
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },

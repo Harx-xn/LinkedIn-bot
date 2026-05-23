@@ -2,16 +2,40 @@ import { TrendsService, Trend } from "./trendsService";
 import { ContentService } from "./contentService";
 import { ImageService } from "./imageService";
 import { prisma } from "../prismaClient";
+import { decryptSecret, decryptSecretArray } from "./secretCrypto";
 
 export class TrendingBotService {
   private trendsService: TrendsService;
-  private contentService: ContentService;
   private imageService: ImageService;
 
   constructor() {
     this.trendsService = new TrendsService();
-    this.contentService = new ContentService();
     this.imageService = new ImageService();
+  }
+
+  // Resolve the region a user belongs to (used to stamp generated posts).
+  private async getUserRegionId(userId: string): Promise<string | null> {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { regionId: true },
+    });
+    return u?.regionId ?? null;
+  }
+
+  // Build a ContentService using the user's region AI keys (env fallback).
+  private async getContentService(userId: string): Promise<ContentService> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
+    });
+
+    const geminiApiKeys = decryptSecretArray(user?.region?.geminiApiKeys);
+    const openaiApiKey = decryptSecret(user?.region?.openaiApiKey);
+
+    return new ContentService({
+      openaiApiKey,
+      geminiApiKeys,
+    });
   }
 
   async runBot(dryRun: boolean = false) {
@@ -29,6 +53,9 @@ export class TrendingBotService {
 
     for (const config of configs) {
       console.log(`Processing config for user ${config.userId}`);
+
+      const contentService = await this.getContentService(config.userId);
+      const regionId = config.regionId ?? (await this.getUserRegionId(config.userId));
 
       let niches: string[] = [];
       try {
@@ -111,7 +138,7 @@ export class TrendingBotService {
           // ✅ FORCE OPENAI
           const provider: "OPENAI" = "OPENAI";
 
-          const generatedContent = await this.contentService.generatePost(
+          const generatedContent = await contentService.generatePost(
             selectedTrend.title,
             selectedTrend.link,
             provider,
@@ -142,6 +169,7 @@ export class TrendingBotService {
             await prisma.post.create({
               data: {
                 userId: config.userId,
+                regionId,
                 content: finalContent,
                 source: "AI_TRENDING",
                 status: "DRAFT",
@@ -158,20 +186,43 @@ export class TrendingBotService {
     }
   }
 
+  // Build the schedule of publish times for a batch. Posts are spread across
+  // `days`, and when a day holds more than one post they are spaced across a
+  // daytime window so they don't all collide at the same timestamp.
   private calculateTimeSlots(
     postsPerWeek: number,
     days: number,
     startDate: Date,
   ): Date[] {
     const slots: Date[] = [];
-    const totalPosts = Math.ceil((postsPerWeek / 7) * days);
-    const intervalMs = (days * 24 * 60 * 60 * 1000) / totalPosts;
+    const totalPosts = Math.max(1, Math.ceil((postsPerWeek / 7) * days));
 
-    for (let i = 0; i < totalPosts; i++) {
-      const time = new Date(startDate.getTime() + i * intervalMs);
-      time.setHours(9, 0, 0, 0);
-      slots.push(time);
+    // Daily posting window (local time): 09:00 - 18:00.
+    const startHour = 9;
+    const endHour = 18;
+
+    const perDay = Math.max(1, Math.round(totalPosts / days));
+    let created = 0;
+
+    for (let day = 0; day < days && created < totalPosts; day++) {
+      const todays = Math.min(perDay, totalPosts - created);
+
+      for (let i = 0; i < todays; i++) {
+        const date = new Date(startDate.getTime());
+        date.setDate(startDate.getDate() + day);
+
+        // Single post -> window start; multiple -> evenly spaced across window.
+        const frac = todays === 1 ? 0 : i / (todays - 1);
+        const hour = startHour + frac * (endHour - startHour);
+        const h = Math.floor(hour);
+        const m = Math.round((hour - h) * 60);
+        date.setHours(h, m, 0, 0);
+
+        slots.push(date);
+        created++;
+      }
     }
+
     return slots;
   }
 
@@ -182,6 +233,8 @@ export class TrendingBotService {
     console.log(
       `Generating batch for user ${userId}, window: ${daysWindow} days`,
     );
+
+    const contentService = await this.getContentService(userId);
 
     let niches: string[] = [];
     try {
@@ -270,7 +323,7 @@ export class TrendingBotService {
               const provider: "OPENAI" = "OPENAI";
 
               const generatedContent =
-                await this.contentService.generateMixedPost(
+                await contentService.generateMixedPost(
                   [
                     { topic: t1.title, link: t1.link },
                     { topic: t2.title, link: t2.link },
@@ -309,7 +362,7 @@ export class TrendingBotService {
               // ✅ FORCE OPENAI
               const provider: "OPENAI" = "OPENAI";
 
-              const generatedContent = await this.contentService.generatePost(
+              const generatedContent = await contentService.generatePost(
                 trend.title,
                 trend.link,
                 provider,
@@ -387,9 +440,12 @@ export class TrendingBotService {
       select: { id: true },
     });
 
+    const regionId = await this.getUserRegionId(userId);
+
     await prisma.post.create({
       data: {
         userId,
+        regionId,
         content: `${body}\n\n${hashtags}`,
         status: "QUEUED",
         scheduledAt,

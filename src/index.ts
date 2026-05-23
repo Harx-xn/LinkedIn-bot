@@ -13,6 +13,11 @@ import uploadRouter from './routes/upload';
 import botActionRouter from './routes/botAction';
 import adminRoutes from './routes/admin';
 import regionRoutes from './routes/region';
+import subAdminRoutes from './routes/subadmin';
+import analyticsRoutes from './routes/analytics';
+import publicRoutes from './routes/public';
+import paymentsRouter from './routes/payments';
+import { handleStripeWebhook } from './routes/stripeWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
 
@@ -23,7 +28,7 @@ const allowedOrigins = [
   // add your deployed frontend domain too:
   "https://frontend-bx09.onrender.com",
 ];
-console.log("startScheduler import:", startScheduler);
+
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -38,12 +43,19 @@ app.use(
   })
 );
 
+app.post(
+  '/api/payments/webhook/stripe/:regionId',
+  express.raw({ type: 'application/json' }),
+  handleStripeWebhook
+);
+
 app.use(express.json());
+// Lightweight request logger.
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.path}`);
   next();
 });
-console.log("check")
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
@@ -57,6 +69,13 @@ app.use('/api/user', userRouter);
 app.use('/api/bot', botConfigRouter);
 app.use('/api/bot', botActionRouter); // Used for /bot/generate
 app.use('/api/upload', uploadRouter);
+app.use('/api/admin', adminRoutes);
+app.use('/api/regional-admin', regionRoutes);
+app.use('/api/sub-admin', subAdminRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/public', publicRoutes);
+app.use('/api/payments', paymentsRouter);
+// Backwards-compatible aliases (pre-/api mounts)
 app.use('/admin', adminRoutes);
 app.use('/regional-admin', regionRoutes);
 
@@ -75,12 +94,5 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 
 app.listen(config.port, () => {
   console.log(`Backend running on http://localhost:${config.port}`);
-   console.log("BEFORE startScheduler");
-
-  try {
-    startScheduler();
-    console.log("AFTER startScheduler");
-  } catch (err) {
-    console.error("startScheduler failed:", err);
-  }
+  startScheduler();
 });

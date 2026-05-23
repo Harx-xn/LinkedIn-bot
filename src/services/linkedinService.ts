@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { config } from '../config';
 import { prisma } from '../prismaClient';
+import { decryptSecret } from './secretCrypto';
 
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
@@ -12,11 +13,11 @@ const scopes = [
   'w_member_social'
 ];
 
-export function getLinkedInAuthUrl(clientId: string, state: string) {
+export function getLinkedInAuthUrl(clientId: string, state: string, redirectUri?: string) {
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
-    redirect_uri: config.linkedin.redirectUri,
+    redirect_uri: redirectUri || config.linkedin.redirectUri,
     scope: scopes.join(' '),
     state
   });
@@ -24,11 +25,43 @@ export function getLinkedInAuthUrl(clientId: string, state: string) {
   return `${LINKEDIN_AUTH_URL}?${params.toString()}`;
 }
 
-export async function exchangeCodeForToken(clientId: string, clientSecret: string, code: string) {
+// Resolve the LinkedIn app credentials for a user, preferring their region's
+// values and falling back to the platform-wide env config.
+export async function getRegionLinkedInCreds(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      region: {
+        select: {
+          linkedinClientId: true,
+          linkedinClientSecret: true,
+          linkedinRedirectUri: true,
+          linkedinApiVersion: true,
+        },
+      },
+    },
+  });
+  const r = user?.region;
+  const regionClientSecret = decryptSecret(r?.linkedinClientSecret);
+
+  return {
+    clientId: r?.linkedinClientId || process.env.LINKEDIN_CLIENT_ID || '',
+    clientSecret: regionClientSecret || process.env.LINKEDIN_CLIENT_SECRET || '',
+    redirectUri: r?.linkedinRedirectUri || config.linkedin.redirectUri,
+    apiVersion: r?.linkedinApiVersion || config.linkedin.apiVersion,
+  };
+}
+
+export async function exchangeCodeForToken(
+  clientId: string,
+  clientSecret: string,
+  code: string,
+  redirectUri?: string
+) {
   const params = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
-    redirect_uri: config.linkedin.redirectUri,
+    redirect_uri: redirectUri || config.linkedin.redirectUri,
     client_id: clientId,
     client_secret: clientSecret
   });
@@ -78,7 +111,8 @@ export async function saveLinkedInAccountForUser(userId: string, accessToken: st
 async function uploadImageToLinkedIn(
   accessToken: string,
   authorUrn: string,
-  imagePath: string
+  imagePath: string,
+  apiVersion: string = config.linkedin.apiVersion
 ): Promise<string> {
   const fs = require("fs");
   const path = require("path");
@@ -96,7 +130,7 @@ async function uploadImageToLinkedIn(
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0",
-        "LinkedIn-Version": config.linkedin.apiVersion,
+        "LinkedIn-Version": apiVersion,
       },
     }
   );
@@ -150,21 +184,22 @@ export async function postToLinkedInFromPostId(postId: string) {
     where: { id: postId },
     include: { user: true, linkedinAccount: true }
   });
-  
   if (!post) throw new Error('Post not found');
   if (!post.linkedinAccountId || !post.linkedinAccount) throw new Error('No LinkedIn account attached');
-const finalText = [post.content, post.hashtags]
-  .filter(Boolean)
-  .join('\n\n');
+
   const liAccount = post.linkedinAccount;
   const accessToken = liAccount.accessToken;
+
+  // Resolve the region's LinkedIn API version (falls back to env/global).
+  const creds = await getRegionLinkedInCreds(post.userId);
+  const apiVersion = creds.apiVersion;
 
   // Use organization URN if selected, otherwise use personal URN
   const authorUrn = liAccount.selectedOrganizationUrn || liAccount.authorUrn;
 
   const body: any = {
     author: authorUrn,
-    commentary: finalText,
+    commentary: post.content.replace(/\n{3,}/g, '\n\n'),
     visibility: 'PUBLIC',
     distribution: {
       feedDistribution: 'MAIN_FEED',
@@ -178,7 +213,7 @@ const finalText = [post.content, post.hashtags]
   // If post has an image, upload it and attach
   if (post.mediaUrl) {
     try {
-      const imageUrn = await uploadImageToLinkedIn(accessToken, authorUrn, post.mediaUrl);
+      const imageUrn = await uploadImageToLinkedIn(accessToken, authorUrn, post.mediaUrl, apiVersion);
       body.content = {
         media: {
           id: imageUrn
@@ -190,7 +225,6 @@ const finalText = [post.content, post.hashtags]
     }
   }
 
-
   const response = await axios.post(
     'https://api.linkedin.com/rest/posts',
     body,
@@ -199,7 +233,7 @@ const finalText = [post.content, post.hashtags]
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'X-Restli-Protocol-Version': '2.0.0',
-        'LinkedIn-Version': config.linkedin.apiVersion
+        'LinkedIn-Version': apiVersion
       }
     }
   );

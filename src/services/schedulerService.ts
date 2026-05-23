@@ -2,22 +2,28 @@ import cron from "node-cron";
 import { prisma } from "../prismaClient";
 import { postToLinkedInFromPostId } from "./linkedinService";
 import { fetchPostsFromSheet } from "./sheetsService";
+import { canPublish } from "./entitlementService";
 
 import { TrendingBotService } from "./trendingBotService";
 
 export function startScheduler() {
-    console.log("INSIDE startScheduler");
-  // Run Trending Bot daily at 9:00 AM
+  // Run Trending Bot daily at 9:00 AM.
+  // This should create drafts, not publish directly.
   cron.schedule("0 9 * * *", async () => {
     console.log("Running Daily Trending Bot...");
-    const bot = new TrendingBotService();
-    // For now, we just dry run or we need to find a user to post on behalf of.
-    // In a real multi-user app, we'd iterate users who enabled this feature.
-    await bot.runBot(true); // Default to dry run for safety until configured
+
+    try {
+      const bot = new TrendingBotService();
+
+      // false = not dry-run.
+      // The updated flow expects the bot to create DRAFT posts only.
+      await bot.runBot(false);
+    } catch (err: any) {
+      console.error("Daily Trending Bot failed:", err?.message || err);
+    }
   });
 
-  // Sync Sheets every 10 minutes
-  // Sync Sheets every 10 minutes
+  // Sync Google Sheets into draft/queued posts every 10 minutes.
   cron.schedule("* * * * *", async () => {
     console.log("Running Sheet Sync...");
 
@@ -51,13 +57,17 @@ export function startScheduler() {
           spreadsheetId: config.spreadsheetId,
           range: config.range,
         });
+
         const linkedInAccount = await prisma.linkedInAccount.findFirst({
           where: { userId: config.userId },
         });
+
         for (const row of rows) {
           if (!row.content) continue;
+
           const normalizedStatus = row.status?.toUpperCase();
 
+          // Let users mark rows as SKIP in Google Sheets.
           if (normalizedStatus === "SKIP") {
             continue;
           }
@@ -98,8 +108,12 @@ export function startScheduler() {
       }
     }
   });
+
+  // Publisher: every minute, publish QUEUED posts whose scheduled time has arrived.
   cron.schedule("* * * * *", async () => {
     const now = new Date();
+
+    console.log("Processing due posts");
 
     const duePosts = await prisma.post.findMany({
       where: {
@@ -110,6 +124,15 @@ export function startScheduler() {
     });
 
     for (const post of duePosts) {
+      // Respect trial/subscription limits.
+      // If blocked, leave the post QUEUED instead of marking it FAILED.
+      const gate = await canPublish(post.userId);
+
+      if (!gate.allowed) {
+        console.log(`Skipping post ${post.id}: ${gate.reason}`);
+        continue;
+      }
+
       try {
         let linkedinAccountId = post.linkedinAccountId;
 

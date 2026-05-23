@@ -9,20 +9,25 @@ export class ContentService {
   private currentKeyIndex = 0;
   private openai: OpenAI | null = null;
 
-  constructor() {
-    // Collect all available Gemini keys
-    if (process.env.GEMINI_API_KEY) this.geminiKeys.push(process.env.GEMINI_API_KEY);
-    if (process.env.GEMINI_API_KEY_2) this.geminiKeys.push(process.env.GEMINI_API_KEY_2);
+  constructor(keys?: { openaiApiKey?: string | null; geminiApiKeys?: string[] | null }) {
+    // Region-provided Gemini keys take priority; otherwise fall back to env.
+    if (keys?.geminiApiKeys && keys.geminiApiKeys.length) {
+      this.geminiKeys = keys.geminiApiKeys.filter(Boolean) as string[];
+    } else {
+      if (process.env.GEMINI_API_KEY) this.geminiKeys.push(process.env.GEMINI_API_KEY);
+      if (process.env.GEMINI_API_KEY_2) this.geminiKeys.push(process.env.GEMINI_API_KEY_2);
 
-    // Add more if they exist
-    let i = 3;
-    while (process.env[`GEMINI_API_KEY_${i}`]) {
-      this.geminiKeys.push(process.env[`GEMINI_API_KEY_${i}`] as string);
-      i++;
+      let i = 3;
+      while (process.env[`GEMINI_API_KEY_${i}`]) {
+        this.geminiKeys.push(process.env[`GEMINI_API_KEY_${i}`] as string);
+        i++;
+      }
     }
 
-    if (process.env.OPENAI_API_KEY) {
-      this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    // Region-provided OpenAI key takes priority; otherwise fall back to env.
+    const openaiKey = keys?.openaiApiKey || process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      this.openai = new OpenAI({ apiKey: openaiKey });
     }
   }
 

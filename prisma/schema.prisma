@@ -1,244 +1,300 @@
-  generator client {
-    provider = "prisma-client-js"
-  }
+generator client {
+  provider = "prisma-client-js"
+}
 
-  datasource db {
-    provider  = "postgresql"
-    url       = env("DATABASE_URL")
-    directUrl = env("DIRECT_URL")
-  }
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
 
-  enum UserRole {
-    SUPER_ADMIN
-    REGIONAL_ADMIN
-    USER
-  }
+enum UserRole {
+  SUPER_ADMIN
+  REGIONAL_ADMIN
+  USER
+}
 
-  model Region {
-    id       String  @id @default(cuid())
-    name     String
-    slug     String  @unique
-    code     String  @unique
-    isActive Boolean @default(true)
+model Region {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  code     String  @unique
+  isActive Boolean @default(true)
 
-    logoUrl         String?
-    primaryColor    String?
-    secondaryColor  String?
-    customDomain    String?
-    subdomain       String? @unique
-    language        String? @default("en")
-    currency        String? @default("USD")
-    frontendVariant String? @default("default")
+  logoUrl         String?
+  primaryColor    String?
+  secondaryColor  String?
+  customDomain    String?
+  subdomain       String? @unique
+  language        String? @default("en")
+  currency        String? @default("USD")
+  frontendVariant String? @default("default")
 
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+  // Per-tenant AI provider keys (sub-admin supplies; used by their clients' bots)
+  openaiApiKey  String?
+  geminiApiKeys String? // JSON array of keys, stored as string
 
-    users            User[]
-    botConfigs       BotConfig[]
-    linkedinAccounts LinkedInAccount[]
-    posts            Post[]
-    schedules        Schedule[]
-    sheetConfigs     SheetConfig[]
-    generationJobs   BotGenerationJob[]
-    subscriptions    Subscription[]
-    plans            Plan[]
-  }
+  // Per-tenant LinkedIn app credentials
+  linkedinClientId     String?
+  linkedinClientSecret String?
+  linkedinRedirectUri  String?
+  linkedinApiVersion   String? @default("202511")
 
-  model User {
-    id           String @id @default(cuid())
-    email        String @unique
-    username     String @unique
-    passwordHash String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-    role     UserRole @default(USER)
-    isActive Boolean  @default(true)
+  users            User[]
+  botConfigs       BotConfig[]
+  linkedinAccounts LinkedInAccount[]
+  posts            Post[]
+  schedules        Schedule[]
+  sheetConfigs     SheetConfig[]
+  generationJobs   BotGenerationJob[]
+  subscriptions    Subscription[]
+  plans            Plan[]
+  paymentConfig    PaymentConfig?
+}
 
-    regionId String?
-    region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+model PaymentConfig {
+  id       String @id @default(cuid())
+  regionId String @unique
 
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+  provider String  @default("MANUAL") // STRIPE | PAYPAL | MANUAL
+  isActive Boolean @default(true)
 
-    linkedinClientId     String?
-    linkedinClientSecret String?
-    googleClientId       String?
-    googleClientSecret   String?
+  // Stripe
+  stripePublishableKey String?
+  stripeSecretKey      String?
+  stripeWebhookSecret  String?
 
-    botConfigs       BotConfig?
-    linkedinAccounts LinkedInAccount[]
-    posts            Post[]
-    schedules        Schedule[]
-    sheetConfigs     SheetConfig[]
-    subscriptions    Subscription[]
-    BotGenerationJob BotGenerationJob[]
+  // PayPal
+  paypalClientId     String?
+  paypalClientSecret String?
+  paypalMode         String? @default("sandbox") // sandbox | live
 
-    @@index([regionId])
-    @@index([role])
-  }
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  model BotConfig {
-    id                 String   @id @default(cuid())
-    userId             String   @unique
-    regionId           String?
-    niches             String
-    sources            String
-    customRssFeeds     String?
-    customLinks        String?
-    customRedditFeeds  String?
-    backgroundImageUrl String?
-    postingSchedule    String?
-    postsPerWeek       Int      @default(7)
-    generationWindow   Int      @default(7)
-    isEnabled          Boolean  @default(false)
-    description        String?  @default("")
-    tone               String?  @default("Professional")
-    createdAt          DateTime @default(now())
-    updatedAt          DateTime @updatedAt
+  region Region @relation(fields: [regionId], references: [id], onDelete: Cascade)
+}
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+model User {
+  id           String @id @default(cuid())
+  email        String @unique
+  username     String @unique
+  passwordHash String
 
-    @@index([regionId])
-  }
+  role     UserRole @default(USER)
+  isActive Boolean  @default(true)
 
-  model LinkedInAccount {
-    id                      String   @id @default(cuid())
-    userId                  String
-    regionId                String?
-    authorUrn               String
-    selectedOrganizationUrn String?
-    accessToken             String
-    refreshToken            String?
-    expiresAt               DateTime
-    createdAt               DateTime @default(now())
-    updatedAt               DateTime @updatedAt
+  // Free-trial tracking (14-day, no card required). Set at self-registration.
+  trialStartedAt DateTime?
+  trialEndsAt    DateTime?
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
-    posts  Post[]
+  regionId String?
+  region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-    @@index([userId])
-    @@index([regionId])
-  }
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  model Schedule {
-    id        String   @id @default(cuid())
-    userId    String
-    regionId  String?
-    timezone  String
-    cron      String
-    active    Boolean  @default(true)
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+  linkedinClientId     String?
+  linkedinClientSecret String?
+  googleClientId       String?
+  googleClientSecret   String?
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  botConfigs       BotConfig?
+  linkedinAccounts LinkedInAccount[]
+  posts            Post[]
+  schedules        Schedule[]
+  sheetConfigs     SheetConfig[]
+  subscriptions    Subscription[]
+  BotGenerationJob BotGenerationJob[]
 
-    @@index([userId])
-    @@index([regionId])
-  }
+  @@index([regionId])
+  @@index([role])
+}
 
-  model Post {
-    id                String    @id @default(cuid())
-    userId            String
-    regionId          String?
-    linkedinAccountId String?
-    source            String    @default("MANUAL")
-    status            String    @default("DRAFT")
-    content           String
-    hashtags          String?
-    scheduledAt       DateTime?
-    publishedAt       DateTime?
-    linkedinPostUrn   String?
-    mediaUrl          String?
-    errorMessage      String?
-    createdAt         DateTime  @default(now())
-    updatedAt         DateTime  @updatedAt
+model BotConfig {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  regionId           String?
+  niches             String
+  sources            String
+  customRssFeeds     String?
+  customLinks        String?
+  customRedditFeeds  String?
+  backgroundImageUrl String?
+  postingSchedule    String?
+  postsPerWeek       Int      @default(7)
+  generationWindow   Int      @default(7)
+  isEnabled          Boolean  @default(false)
+  description        String?  @default("")
+  tone               String?  @default("Professional")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-    linkedinAccount LinkedInAccount? @relation(fields: [linkedinAccountId], references: [id], onDelete: SetNull)
-    user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region          Region?          @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-    @@index([userId])
-    @@index([regionId])
-    @@index([status, regionId])
-  }
+  @@index([regionId])
+}
 
-  model BotGenerationJob {
-    id             String    @id @default(cuid())
-    userId         String?
-    regionId       String?
-    daysWindow     Int
-    status         String    @default("RUNNING")
-    createdAt      DateTime  @default(now())
-    completedAt    DateTime?
-    error          String?
-    completedSlots Int       @default(0)
-    totalSlots     Int       @default(0)
+model LinkedInAccount {
+  id                      String   @id @default(cuid())
+  userId                  String
+  regionId                String?
+  authorUrn               String
+  selectedOrganizationUrn String?
+  accessToken             String
+  refreshToken            String?
+  expiresAt               DateTime
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
-    user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  posts  Post[]
 
-    @@index([userId, createdAt])
-    @@index([regionId, createdAt])
-  }
+  @@index([userId])
+  @@index([regionId])
+}
 
-  model SheetConfig {
-    id            String   @id @default(cuid())
-    userId        String   @unique
-    regionId      String?
-    spreadsheetId String   @default("")
-    range         String   @default("")
-    accessToken   String?
-    refreshToken  String?
-    active        Boolean  @default(true)
-    createdAt     DateTime @default(now())
-    updatedAt     DateTime @updatedAt
+model Schedule {
+  id        String   @id @default(cuid())
+  userId    String
+  regionId  String?
+  timezone  String
+  cron      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-    @@index([regionId])
-  }
+  @@index([userId])
+  @@index([regionId])
+}
 
-  model Plan {
-    id           String  @id @default(cuid())
-    name         String
-    code         String
-    price        Float
-    currency     String
-    billingCycle String
-    isActive     Boolean @default(true)
+model Post {
+  id                String    @id @default(cuid())
+  userId            String
+  regionId          String?
+  linkedinAccountId String?
+  source            String    @default("MANUAL")
+  status            String    @default("DRAFT")
+  content           String
+  hashtags          String?
+  scheduledAt       DateTime?
+  publishedAt       DateTime?
+  linkedinPostUrn   String?
+  mediaUrl          String?
+  errorMessage      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-    regionId String?
-    region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  linkedinAccount LinkedInAccount? @relation(fields: [linkedinAccountId], references: [id], onDelete: SetNull)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region          Region?          @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+  @@index([userId])
+  @@index([regionId])
+  @@index([status, regionId])
+}
 
-    subscriptions Subscription[]
+model BotGenerationJob {
+  id             String    @id @default(cuid())
+  userId         String?
+  regionId       String?
+  daysWindow     Int
+  status         String    @default("RUNNING")
+  createdAt      DateTime  @default(now())
+  completedAt    DateTime?
+  error          String?
+  completedSlots Int       @default(0)
+  totalSlots     Int       @default(0)
 
-    @@unique([code, regionId])
-    @@index([regionId])
-  }
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
-  model Subscription {
-    id        String    @id @default(cuid())
-    userId    String
-    regionId  String?
-    planId    String
-    status    String    @default("ACTIVE")
-    startsAt  DateTime  @default(now())
-    endsAt    DateTime?
-    autoRenew Boolean   @default(true)
-    createdAt DateTime  @default(now())
-    updatedAt DateTime  @updatedAt
+  @@index([userId, createdAt])
+  @@index([regionId, createdAt])
+}
 
-    user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-    region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
-    plan   Plan    @relation(fields: [planId], references: [id], onDelete: Restrict)
+model SheetConfig {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  regionId      String?
+  spreadsheetId String   @default("")
+  range         String   @default("")
+  accessToken   String?
+  refreshToken  String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-    @@index([userId])
-    @@index([regionId])
-    @@index([planId])
-  }
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([regionId])
+}
+
+model Plan {
+  id           String  @id @default(cuid())
+  name         String
+  code         String
+  price        Float
+  currency     String
+  billingCycle String
+  isActive     Boolean @default(true)
+
+  // Optional: useful later if you create Stripe products/prices manually
+  stripePriceId String?
+
+  regionId String?
+  region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@unique([code, regionId])
+  @@index([regionId])
+}
+
+model Subscription {
+  id        String    @id @default(cuid())
+  userId    String
+  regionId  String?
+  planId    String
+
+  status    String    @default("ACTIVE") // ACTIVE | PAST_DUE | CANCELED | INCOMPLETE
+  startsAt  DateTime  @default(now())
+  endsAt    DateTime?
+  autoRenew Boolean   @default(true)
+
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  stripeCheckoutSessionId String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  plan   Plan    @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([regionId])
+  @@index([planId])
+  @@unique([stripeSubscriptionId])
+}
+
+model PaymentEvent {
+  id        String   @id @default(cuid())
+  provider  String   @default("STRIPE")
+  eventId   String   @unique
+  type      String
+  createdAt DateTime @default(now())
+}
