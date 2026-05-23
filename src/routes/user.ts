@@ -1,15 +1,14 @@
-import { Router, Request } from 'express';
-import { prisma } from '../prismaClient';
-import { requireAuth } from '../middleware/auth';
-import { getEntitlement, publishedToday } from '../services/entitlementService';
-import { encryptSecret } from '../services/secretCrypto';
+import { Router, Request } from "express";
+import { prisma } from "../prismaClient";
+import { requireAuth } from "../middleware/auth";
+import { getEntitlement, publishedToday } from "../services/entitlementService";
 
 const router = Router();
-router.get('/me', requireAuth, async (req: Request, res: any) => {
+router.get("/me", requireAuth, async (req: Request, res: any) => {
   const userId = req.userId;
 
   if (!userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
   const user = await prisma.user.findUnique({
@@ -27,17 +26,14 @@ router.get('/me', requireAuth, async (req: Request, res: any) => {
           name: true,
           slug: true,
           code: true,
+          linkedinClientId: true,
+          linkedinClientSecret: true,
         },
       },
-
-      linkedinClientId: true,
-      linkedinClientSecret: true,
-      googleClientId: true,
-      googleClientSecret: true,
     },
   });
 
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user) return res.status(404).json({ error: "User not found" });
 
   const linkedinAccount = await prisma.linkedInAccount.findFirst({
     where: { userId },
@@ -47,10 +43,10 @@ router.get('/me', requireAuth, async (req: Request, res: any) => {
   const activeSubscription = await prisma.subscription.findFirst({
     where: {
       userId,
-      status: 'ACTIVE',
+      status: "ACTIVE",
     },
     orderBy: {
-      createdAt: 'desc',
+      createdAt: "desc",
     },
     select: {
       id: true,
@@ -73,7 +69,8 @@ router.get('/me', requireAuth, async (req: Request, res: any) => {
 
   // Trial / subscription entitlement so the UI can show a banner and limits.
   const entitlement = await getEntitlement(userId);
-  const usedToday = entitlement.status === 'TRIAL' ? await publishedToday(userId) : 0;
+  const usedToday =
+    entitlement.status === "TRIAL" ? await publishedToday(userId) : 0;
 
   res.json({
     id: user.id,
@@ -82,11 +79,24 @@ router.get('/me', requireAuth, async (req: Request, res: any) => {
     role: user.role,
 
     regionId: user.regionId,
-    region: user.region,
+    region: user.region
+      ? {
+          id: user.region.id,
+          name: user.region.name,
+          slug: user.region.slug,
+          code: user.region.code,
+        }
+      : null,
 
-    // configuration keys saved
-    linkedinConfigured: !!(user.linkedinClientId && user.linkedinClientSecret),
-    googleConfigured: !!(user.googleClientId && user.googleClientSecret),
+    // platform-managed app credentials. Users connect accounts via OAuth;
+    // they should not provide their own Google/LinkedIn developer keys.
+    linkedinConfigured: !!(
+      (user.region?.linkedinClientId && user.region?.linkedinClientSecret) ||
+      (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET)
+    ),
+    googleConfigured: !!(
+      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+    ),
 
     // connection token exists
     linkedinConnected: !!linkedinAccount,
@@ -112,29 +122,11 @@ router.get('/me', requireAuth, async (req: Request, res: any) => {
   });
 });
 
-router.put('/config', requireAuth, async (req: Request, res: any) => {
-    const { linkedinClientId, linkedinClientSecret, googleClientId, googleClientSecret } = req.body;
-
-    const updateData: any = {};
-    if (linkedinClientId && linkedinClientSecret) {
-        updateData.linkedinClientId = linkedinClientId;
-        updateData.linkedinClientSecret = encryptSecret(linkedinClientSecret);
-    }
-    if (googleClientId && googleClientSecret) {
-        updateData.googleClientId = googleClientId;
-        updateData.googleClientSecret = encryptSecret(googleClientSecret);
-    }
-
-    if (Object.keys(updateData).length === 0) {
-        return res.status(400).json({ error: 'No configuration provided' });
-    }
-
-    await prisma.user.update({
-        where: { id: req.userId },
-        data: updateData
-    });
-
-    res.json({ success: true });
+router.put("/config", requireAuth, async (_req: Request, res: any) => {
+  return res.status(410).json({
+    error:
+      "API keys are now platform-managed. Configure Google in .env and LinkedIn in the regional admin credentials page.",
+  });
 });
 
 export default router;

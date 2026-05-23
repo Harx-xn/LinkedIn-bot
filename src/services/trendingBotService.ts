@@ -172,7 +172,7 @@ export class TrendingBotService {
                 regionId,
                 content: finalContent,
                 source: "AI_TRENDING",
-                status: "DRAFT",
+                status: "REVIEW",
                 hashtags: hashtags,
                 mediaUrl: imagePath,
               },
@@ -447,7 +447,7 @@ export class TrendingBotService {
         userId,
         regionId,
         content: `${body}\n\n${hashtags}`,
-        status: "QUEUED",
+        status: "REVIEW",
         scheduledAt,
         source: "AI",
         mediaUrl,
@@ -456,7 +456,7 @@ export class TrendingBotService {
       },
     });
 
-    console.log(`Scheduled for ${scheduledAt.toISOString()}`);
+    console.log(`Created review post with proposed slot ${scheduledAt.toISOString()}`);
   }
 
   async previewTrends(userId: string) {

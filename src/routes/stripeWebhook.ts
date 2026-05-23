@@ -160,15 +160,6 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           status: 'PAST_DUE',
         },
       });
-
-      if (promotionId) {
-        await recordPromotionRedemption({
-          promotionId,
-          userId,
-          regionId,
-          subscriptionId: subscription.id,
-        });
-      }
     }
   }
 

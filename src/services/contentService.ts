@@ -239,4 +239,65 @@ Do not include markdown code blocks. Just raw JSON.
       };
     }
   }
+
+  async rewritePost(
+    currentContent: string,
+    suggestions: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+    tone: string = 'Professional',
+    description: string = ''
+  ): Promise<any> {
+    const personaBlock = description?.trim()
+      ? `
+ABOUT THE AUTHOR:
+${description.trim()}
+`
+      : '';
+
+    const prompt = `
+You are rewriting a LinkedIn post for review.
+${personaBlock}
+CURRENT POST:
+${currentContent}
+
+USER SUGGESTIONS:
+${suggestions || 'Improve clarity, hook, and flow while keeping the same topic.'}
+
+TONE: ${tone}
+
+Rules:
+- Keep it under 1500 characters.
+- Keep it suitable for LinkedIn.
+- Apply the user's suggestions directly.
+- Keep useful hashtags, but improve them if needed.
+- Do not invent unverifiable facts.
+
+Output MUST be valid JSON:
+{
+  "headline": "Short headline",
+  "subheadline": "Short supporting insight",
+  "bulletPoints": ["First key insight", "Second key insight", "Third key insight"],
+  "body": "Rewritten LinkedIn post text",
+  "hashtags": "#LinkedIn #RelevantHashtag"
+}
+
+Do not include markdown code blocks. Just raw JSON.
+`;
+
+    let raw = await this.generateWithFallback(prompt, provider);
+    raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {
+        headline: 'Rewritten post',
+        subheadline: '',
+        bulletPoints: [],
+        body: raw,
+        hashtags: '',
+      };
+    }
+  }
+
 }

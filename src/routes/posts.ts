@@ -3,18 +3,56 @@ import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
 import { postToLinkedInFromPostId } from '../services/linkedinService';
 import { canPublish } from '../services/entitlementService';
+import { ImageService } from '../services/imageService';
+import { ContentService } from '../services/contentService';
+import { decryptSecret, decryptSecretArray } from '../services/secretCrypto';
 
 const router = Router();
-
-import { ImageService } from '../services/imageService';
 const imageService = new ImageService();
+
+async function getContentServiceForUser(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
+  });
+
+  return new ContentService({
+    openaiApiKey: decryptSecret(user?.region?.openaiApiKey),
+    geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
+  });
+}
+
+async function getBotVoice(userId: string) {
+  const config = await prisma.botConfig.findUnique({
+    where: { userId },
+    select: { tone: true, description: true, backgroundImageUrl: true },
+  });
+
+  return {
+    tone: config?.tone || 'Professional',
+    description: config?.description || '',
+    backgroundImageUrl: config?.backgroundImageUrl || undefined,
+  };
+}
+
+function normalizeGeneratedContent(generatedContent: any, fallbackContent: string) {
+  const body = generatedContent?.body || fallbackContent;
+  const hashtags = generatedContent?.hashtags || '';
+  return {
+    headline: generatedContent?.headline || body.split('\n')[0] || 'LinkedIn post',
+    subheadline: generatedContent?.subheadline || '',
+    bulletPoints: generatedContent?.bulletPoints || [],
+    body,
+    hashtags,
+    content: `${body}${hashtags ? `\n\n${hashtags}` : ''}`,
+  };
+}
 
 router.post('/', requireAuth, async (req, res) => {
   const { content, hashtags, scheduledAt, source, linkedinAccountId, backgroundImageUrl } = req.body;
 
   if (!content) return res.status(400).json({ error: 'Missing content' });
 
-  // Auto-fetch user's LinkedIn account if not provided
   let finalLinkedInAccountId = linkedinAccountId;
   if (!finalLinkedInAccountId) {
     const linkedInAccount = await prisma.linkedInAccount.findFirst({
@@ -26,13 +64,10 @@ router.post('/', requireAuth, async (req, res) => {
   let mediaUrl = null;
   if (backgroundImageUrl) {
     try {
-      // For manual posts, use the content as simple text overlay
-      // Parse content to extract headline if user provides structured format
       let imageContent;
       try {
         imageContent = JSON.parse(content);
       } catch {
-        // If not JSON, use content as headline
         imageContent = { headline: content.split('\n')[0] };
       }
 
@@ -53,13 +88,31 @@ router.post('/', requireAuth, async (req, res) => {
       hashtags: hashtags || null,
       status: scheduledAt ? 'QUEUED' : 'DRAFT',
       scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
-      source: (source === 'GOOGLE_SHEET' || source === 'AI' || source === 'MANUAL') ? source : 'MANUAL',
+      source: (source === 'GOOGLE_SHEET' || source === 'AI' || source === 'MANUAL' || source === 'AI_TRENDING') ? source : 'MANUAL',
       linkedinAccountId: finalLinkedInAccountId,
       mediaUrl: mediaUrl
     }
   });
 
   res.json(post);
+});
+
+// Confirm all generated review posts, or only selected IDs, into the real publishing queue.
+router.post('/review/confirm', requireAuth, async (req, res) => {
+  const postIds = Array.isArray(req.body?.postIds) ? req.body.postIds : undefined;
+
+  const result = await prisma.post.updateMany({
+    where: {
+      userId: req.userId!,
+      status: 'REVIEW',
+      source: { in: ['AI', 'AI_TRENDING'] },
+      scheduledAt: { not: null },
+      ...(postIds ? { id: { in: postIds } } : {}),
+    },
+    data: { status: 'QUEUED' },
+  });
+
+  res.json({ updated: result.count });
 });
 
 router.get('/queue', requireAuth, async (req, res) => {
@@ -79,6 +132,96 @@ router.get('/', requireAuth, async (req, res) => {
   res.json(posts);
 });
 
+router.patch('/:id', requireAuth, async (req, res) => {
+  const post = await prisma.post.findUnique({ where: { id: req.params.id } });
+
+  if (!post) return res.status(404).json({ error: 'Post not found' });
+  if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
+  if (post.status === 'PUBLISHED') return res.status(400).json({ error: 'Cannot edit published posts' });
+
+  const updateData: any = {};
+  if (typeof req.body.content === 'string') updateData.content = req.body.content;
+  if (typeof req.body.hashtags === 'string') updateData.hashtags = req.body.hashtags;
+  if (typeof req.body.scheduledAt === 'string') updateData.scheduledAt = new Date(req.body.scheduledAt);
+  if (req.body.scheduledAt === null) updateData.scheduledAt = null;
+
+  const updated = await prisma.post.update({
+    where: { id: post.id },
+    data: updateData,
+  });
+
+  res.json(updated);
+});
+
+router.post('/:id/rewrite', requireAuth, async (req, res) => {
+  const suggestions = String(req.body?.suggestions || '').trim();
+  if (!suggestions) return res.status(400).json({ error: 'Missing rewrite suggestions' });
+
+  const post = await prisma.post.findUnique({ where: { id: req.params.id } });
+
+  if (!post) return res.status(404).json({ error: 'Post not found' });
+  if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
+  if (post.status !== 'REVIEW') return res.status(400).json({ error: 'Only review posts can be rewritten' });
+  if (!['AI', 'AI_TRENDING'].includes(post.source)) return res.status(400).json({ error: 'Only bot posts can be rewritten' });
+  if (post.rewriteCount >= 3) return res.status(400).json({ error: 'Rewrite limit reached for this post' });
+
+  const voice = await getBotVoice(req.userId!);
+  const contentService = await getContentServiceForUser(req.userId!);
+  const generated = await contentService.rewritePost(
+    post.content,
+    suggestions,
+    'OPENAI',
+    voice.tone,
+    voice.description,
+  );
+
+  const normalized = normalizeGeneratedContent(generated, post.content);
+
+  let mediaUrl = post.mediaUrl;
+  try {
+    mediaUrl = await imageService.createTopicImage(
+      normalized.headline,
+      voice.backgroundImageUrl,
+      {
+        headline: normalized.headline,
+        subheadline: normalized.subheadline,
+        bulletPoints: normalized.bulletPoints,
+      },
+    );
+  } catch (e) {
+    console.error('Rewrite image generation failed:', e);
+  }
+
+  const updated = await prisma.post.update({
+    where: { id: post.id },
+    data: {
+      content: normalized.content,
+      hashtags: normalized.hashtags || post.hashtags,
+      mediaUrl,
+      rewriteCount: { increment: 1 },
+      errorMessage: null,
+    },
+  });
+
+  res.json(updated);
+});
+
+router.post('/:id/confirm-schedule', requireAuth, async (req, res) => {
+  const post = await prisma.post.findUnique({ where: { id: req.params.id } });
+
+  if (!post) return res.status(404).json({ error: 'Post not found' });
+  if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
+  if (post.status !== 'REVIEW') return res.status(400).json({ error: 'Only review posts can be confirmed' });
+  if (!post.scheduledAt) return res.status(400).json({ error: 'Missing proposed schedule time' });
+
+  const updated = await prisma.post.update({
+    where: { id: post.id },
+    data: { status: 'QUEUED' },
+  });
+
+  res.json(updated);
+});
+
 router.delete('/:id', requireAuth, async (req, res) => {
   const post = await prisma.post.findUnique({
     where: { id: req.params.id }
@@ -87,7 +230,6 @@ router.delete('/:id', requireAuth, async (req, res) => {
   if (!post) return res.status(404).json({ error: 'Post not found' });
   if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
 
-  // Prevent deletion of published posts (optional safety measure)
   if (post.status === 'PUBLISHED') {
     return res.status(400).json({ error: 'Cannot delete published posts' });
   }
@@ -99,7 +241,6 @@ router.delete('/:id', requireAuth, async (req, res) => {
   res.json({ message: 'Post deleted successfully' });
 });
 
-
 router.post('/:id/publish', requireAuth, async (req, res) => {
   const post = await prisma.post.findUnique({
     where: { id: req.params.id }
@@ -108,20 +249,14 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
   if (!post) return res.status(404).json({ error: 'Post not found' });
   if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
 
-  // If it's already published, don't re-publish
   if (post.status === 'PUBLISHED') return res.status(400).json({ error: 'Already published' });
 
-  // Enforce trial / subscription limits (1 published post per day on trial).
   const gate = await canPublish(req.userId!);
   if (!gate.allowed) {
     return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
   }
 
-  // If it's DRAFT or QUEUED or FAILED, try to publish
   try {
-    // If it doesn't have a linkedInAccount attached, try to find one for the user?
-    // The service requires post.linkedinAccountId.
-    // Let's check if we need to update it first.
     let linkedinAccountId = post.linkedinAccountId;
     if (!linkedinAccountId) {
       const userLi = await prisma.linkedInAccount.findFirst({ where: { userId: req.userId! } });
@@ -130,10 +265,8 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
       await prisma.post.update({ where: { id: post.id }, data: { linkedinAccountId } });
     }
 
-    // Now publish using the service
     await postToLinkedInFromPostId(post.id);
 
-    // Fetch updated post
     const updated = await prisma.post.findUnique({ where: { id: post.id } });
     res.json(updated);
   } catch (err: any) {

@@ -32,6 +32,65 @@ function getRegion(req: any): string {
   return resolveRegionId(req.user!, req.body?.regionId ?? req.query?.regionId);
 }
 
+type SettingKind = "boolean" | "integer" | "string";
+
+type SettingRule = {
+  kind: SettingKind;
+  min?: number;
+  max?: number;
+  pattern?: RegExp;
+};
+
+const ALLOWED_PLATFORM_SETTINGS: Record<string, SettingRule> = {
+  "auth.inviteOnly": { kind: "boolean" },
+  "billing.promoCodesEnabled": { kind: "boolean" },
+  "trial.days": { kind: "integer", min: 0, max: 365 },
+  "trial.dailyPublishLimit": { kind: "integer", min: 0, max: 100 },
+  "ui.supportEmail": { kind: "string", pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
+};
+
+function normalizePlatformSetting(key: string, rawValue: any) {
+  const rule = ALLOWED_PLATFORM_SETTINGS[key];
+  if (!rule) {
+    throw new Error(`Unsupported setting key: ${key}`);
+  }
+
+  if (rule.kind === "boolean") {
+    if (typeof rawValue === "boolean") return rawValue;
+    if (typeof rawValue === "string") {
+      const value = rawValue.trim().toLowerCase();
+      if (["true", "1", "yes", "on"].includes(value)) return true;
+      if (["false", "0", "no", "off"].includes(value)) return false;
+    }
+    if (typeof rawValue === "number") {
+      if (rawValue === 1) return true;
+      if (rawValue === 0) return false;
+    }
+    throw new Error(`${key} must be a boolean value`);
+  }
+
+  if (rule.kind === "integer") {
+    const value = typeof rawValue === "number" ? rawValue : Number(rawValue);
+    if (!Number.isInteger(value)) {
+      throw new Error(`${key} must be an integer`);
+    }
+    if (rule.min !== undefined && value < rule.min) {
+      throw new Error(`${key} must be at least ${rule.min}`);
+    }
+    if (rule.max !== undefined && value > rule.max) {
+      throw new Error(`${key} must be at most ${rule.max}`);
+    }
+    return value;
+  }
+
+  const value = String(rawValue).trim();
+  if (!value) throw new Error(`${key} cannot be empty`);
+  if (rule.pattern && !rule.pattern.test(value)) {
+    throw new Error(`${key} is not valid`);
+  }
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // Clients (end users belonging to the sub-admin's region)
 // ---------------------------------------------------------------------------
@@ -283,16 +342,16 @@ router.get("/payment-config", async (req, res) => {
       isActive: cfg.isActive,
       configured: true,
       stripe: {
-        publishableKey: cfg.stripePublishableKey || '',
+        publishableKey: cfg.stripePublishableKey || "",
         secretConfigured: !!stripeSecretKey,
         secretMasked: maskSecret(stripeSecretKey),
         webhookConfigured: !!stripeWebhookSecret,
       },
       paypal: {
-        clientId: cfg.paypalClientId || '',
+        clientId: cfg.paypalClientId || "",
         secretConfigured: !!paypalClientSecret,
         secretMasked: maskSecret(paypalClientSecret),
-        mode: cfg.paypalMode || 'sandbox',
+        mode: cfg.paypalMode || "sandbox",
       },
     });
   } catch (error: any) {
@@ -332,10 +391,18 @@ router.put("/payment-config", async (req, res) => {
       writable.stripeWebhookSecret = encryptSecret(stripeWebhookSecret || null);
     }
 
+    if (paypalClientId !== undefined) {
+      writable.paypalClientId = paypalClientId || null;
+    }
     if (paypalClientSecret !== undefined) {
       writable.paypalClientSecret = encryptSecret(paypalClientSecret || null);
     }
-    if (paypalMode !== undefined) writable.paypalMode = paypalMode || "sandbox";
+    if (paypalMode !== undefined) {
+      if (!["sandbox", "live"].includes(paypalMode)) {
+        return res.status(400).json({ message: "Invalid PayPal mode" });
+      }
+      writable.paypalMode = paypalMode;
+    }
 
     const cfg = await prisma.paymentConfig.upsert({
       where: { regionId },
@@ -399,11 +466,9 @@ router.post("/plans", async (req, res) => {
     return res.status(201).json(plan);
   } catch (error: any) {
     if (error?.code === "P2002") {
-      return res
-        .status(400)
-        .json({
-          message: "A plan with this code already exists in your region",
-        });
+      return res.status(400).json({
+        message: "A plan with this code already exists in your region",
+      });
     }
     return res.status(400).json({ message: error.message });
   }
@@ -577,7 +642,6 @@ router.patch("/subscriptions/:id", async (req, res) => {
   }
 });
 
-
 // ---------------------------------------------------------------------------
 // Platform settings for this region
 // ---------------------------------------------------------------------------
@@ -585,8 +649,15 @@ router.patch("/subscriptions/:id", async (req, res) => {
 router.get("/settings", async (req, res) => {
   try {
     const regionId = getRegion(req);
+    const allowedKeys = Object.keys(ALLOWED_PLATFORM_SETTINGS);
     const settings = await prisma.platformSetting.findMany({
-      where: { OR: [{ scope: "GLOBAL", regionId: null }, { scope: "REGION", regionId }] },
+      where: {
+        key: { in: allowedKeys },
+        OR: [
+          { scope: "GLOBAL", regionId: null },
+          { scope: "REGION", regionId },
+        ],
+      },
       orderBy: [{ scope: "asc" }, { key: "asc" }],
     });
     return res.json(settings);
@@ -602,12 +673,20 @@ router.put("/settings/:key", async (req, res) => {
     const { value } = req.body as { value: any };
 
     if (!key) return res.status(400).json({ message: "Missing setting key" });
-    if (value === undefined) return res.status(400).json({ message: "Missing setting value" });
+    if (value === undefined)
+      return res.status(400).json({ message: "Missing setting value" });
+
+    let normalizedValue: any;
+    try {
+      normalizedValue = normalizePlatformSetting(key, value);
+    } catch (error: any) {
+      return res.status(400).json({ message: error.message });
+    }
 
     const setting = await prisma.platformSetting.upsert({
       where: { scope_regionId_key: { scope: "REGION", regionId, key } },
-      create: { scope: "REGION", regionId, key, value },
-      update: { value },
+      create: { scope: "REGION", regionId, key, value: normalizedValue },
+      update: { value: normalizedValue },
     });
 
     return res.json(setting);
@@ -670,8 +749,12 @@ router.post("/promotions", async (req, res) => {
         type: promoType,
         stripePromotionCodeId: stripePromotionCodeId || null,
         stripeCouponId: stripeCouponId || null,
-        extraTrialDays: extraTrialDays === undefined ? null : Number(extraTrialDays),
-        maxRedemptions: maxRedemptions === undefined || maxRedemptions === null ? null : Number(maxRedemptions),
+        extraTrialDays:
+          extraTrialDays === undefined ? null : Number(extraTrialDays),
+        maxRedemptions:
+          maxRedemptions === undefined || maxRedemptions === null
+            ? null
+            : Number(maxRedemptions),
         startsAt: startsAt ? new Date(startsAt) : null,
         endsAt: endsAt ? new Date(endsAt) : null,
         isActive: typeof isActive === "boolean" ? isActive : true,
@@ -681,7 +764,11 @@ router.post("/promotions", async (req, res) => {
     return res.status(201).json(promotion);
   } catch (error: any) {
     if (error?.code === "P2002") {
-      return res.status(400).json({ message: "A promotion with this code already exists in your region" });
+      return res
+        .status(400)
+        .json({
+          message: "A promotion with this code already exists in your region",
+        });
     }
     return res.status(400).json({ message: error.message });
   }
@@ -691,23 +778,48 @@ router.patch("/promotions/:promotionId", async (req, res) => {
   try {
     const regionId = getRegion(req);
     const { promotionId } = req.params;
-    const existing = await prisma.promotion.findUnique({ where: { id: promotionId } });
+    const existing = await prisma.promotion.findUnique({
+      where: { id: promotionId },
+    });
     if (!existing || existing.regionId !== regionId) {
-      return res.status(404).json({ message: "Promotion not found in your region" });
+      return res
+        .status(404)
+        .json({ message: "Promotion not found in your region" });
     }
 
     const data: any = {};
-    for (const key of ["name", "description", "type", "stripePromotionCodeId", "stripeCouponId"]) {
+    for (const key of [
+      "name",
+      "description",
+      "type",
+      "stripePromotionCodeId",
+      "stripeCouponId",
+    ]) {
       if (req.body[key] !== undefined) data[key] = req.body[key] || null;
     }
-    if (req.body.code !== undefined) data.code = String(req.body.code).trim().toUpperCase();
-    if (req.body.extraTrialDays !== undefined) data.extraTrialDays = req.body.extraTrialDays === null ? null : Number(req.body.extraTrialDays);
-    if (req.body.maxRedemptions !== undefined) data.maxRedemptions = req.body.maxRedemptions === null ? null : Number(req.body.maxRedemptions);
-    if (req.body.startsAt !== undefined) data.startsAt = req.body.startsAt ? new Date(req.body.startsAt) : null;
-    if (req.body.endsAt !== undefined) data.endsAt = req.body.endsAt ? new Date(req.body.endsAt) : null;
-    if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
+    if (req.body.code !== undefined)
+      data.code = String(req.body.code).trim().toUpperCase();
+    if (req.body.extraTrialDays !== undefined)
+      data.extraTrialDays =
+        req.body.extraTrialDays === null
+          ? null
+          : Number(req.body.extraTrialDays);
+    if (req.body.maxRedemptions !== undefined)
+      data.maxRedemptions =
+        req.body.maxRedemptions === null
+          ? null
+          : Number(req.body.maxRedemptions);
+    if (req.body.startsAt !== undefined)
+      data.startsAt = req.body.startsAt ? new Date(req.body.startsAt) : null;
+    if (req.body.endsAt !== undefined)
+      data.endsAt = req.body.endsAt ? new Date(req.body.endsAt) : null;
+    if (typeof req.body.isActive === "boolean")
+      data.isActive = req.body.isActive;
 
-    const promotion = await prisma.promotion.update({ where: { id: promotionId }, data });
+    const promotion = await prisma.promotion.update({
+      where: { id: promotionId },
+      data,
+    });
     return res.json(promotion);
   } catch (error: any) {
     return res.status(400).json({ message: error.message });
@@ -735,14 +847,29 @@ router.get("/invites", async (req, res) => {
 router.post("/invites", async (req, res) => {
   try {
     const regionId = getRegion(req);
-    const { code, email, maxUses, expiresAt, promoCode, roleToAssign, isActive } = req.body as Record<string, any>;
+    const {
+      code,
+      email,
+      maxUses,
+      expiresAt,
+      promoCode,
+      roleToAssign,
+      isActive,
+    } = req.body as Record<string, any>;
     const requestedRole = roleToAssign || UserRole.USER;
 
     if (requestedRole === UserRole.SUPER_ADMIN) {
-      return res.status(400).json({ message: "Invite links cannot create super admins" });
+      return res
+        .status(400)
+        .json({ message: "Invite links cannot create super admins" });
     }
-    if (requestedRole !== UserRole.USER && (req as any).user?.role !== UserRole.SUPER_ADMIN) {
-      return res.status(403).json({ message: "Only a super admin can create admin invite links" });
+    if (
+      requestedRole !== UserRole.USER &&
+      (req as any).user?.role !== UserRole.SUPER_ADMIN
+    ) {
+      return res
+        .status(403)
+        .json({ message: "Only a super admin can create admin invite links" });
     }
 
     const invite = await prisma.inviteLink.create({
@@ -752,7 +879,8 @@ router.post("/invites", async (req, res) => {
         createdByUserId: (req as any).user?.id || null,
         roleToAssign: requestedRole,
         email: email || null,
-        maxUses: maxUses === undefined || maxUses === null ? null : Number(maxUses),
+        maxUses:
+          maxUses === undefined || maxUses === null ? null : Number(maxUses),
         expiresAt: expiresAt ? new Date(expiresAt) : null,
         promoCode: promoCode ? String(promoCode).trim().toUpperCase() : null,
         isActive: typeof isActive === "boolean" ? isActive : true,
@@ -772,19 +900,33 @@ router.patch("/invites/:inviteId", async (req, res) => {
   try {
     const regionId = getRegion(req);
     const { inviteId } = req.params;
-    const existing = await prisma.inviteLink.findUnique({ where: { id: inviteId } });
+    const existing = await prisma.inviteLink.findUnique({
+      where: { id: inviteId },
+    });
     if (!existing || existing.regionId !== regionId) {
-      return res.status(404).json({ message: "Invite not found in your region" });
+      return res
+        .status(404)
+        .json({ message: "Invite not found in your region" });
     }
 
     const data: any = {};
     if (req.body.email !== undefined) data.email = req.body.email || null;
-    if (req.body.maxUses !== undefined) data.maxUses = req.body.maxUses === null ? null : Number(req.body.maxUses);
-    if (req.body.expiresAt !== undefined) data.expiresAt = req.body.expiresAt ? new Date(req.body.expiresAt) : null;
-    if (req.body.promoCode !== undefined) data.promoCode = req.body.promoCode ? String(req.body.promoCode).trim().toUpperCase() : null;
-    if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
+    if (req.body.maxUses !== undefined)
+      data.maxUses =
+        req.body.maxUses === null ? null : Number(req.body.maxUses);
+    if (req.body.expiresAt !== undefined)
+      data.expiresAt = req.body.expiresAt ? new Date(req.body.expiresAt) : null;
+    if (req.body.promoCode !== undefined)
+      data.promoCode = req.body.promoCode
+        ? String(req.body.promoCode).trim().toUpperCase()
+        : null;
+    if (typeof req.body.isActive === "boolean")
+      data.isActive = req.body.isActive;
 
-    const invite = await prisma.inviteLink.update({ where: { id: inviteId }, data });
+    const invite = await prisma.inviteLink.update({
+      where: { id: inviteId },
+      data,
+    });
     return res.json(invite);
   } catch (error: any) {
     return res.status(400).json({ message: error.message });
