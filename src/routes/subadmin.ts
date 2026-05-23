@@ -9,6 +9,7 @@ import { prisma } from "../prismaClient";
 import { authMiddleware } from "../middleware/authMiddleware";
 import { requireRole } from "../middleware/requireRole";
 import { resolveRegionId, maskSecret } from "../services/tenancyService";
+import { generateInviteCode } from "../services/inviteService";
 import {
   encryptSecret,
   decryptSecret,
@@ -571,6 +572,220 @@ router.patch("/subscriptions/:id", async (req, res) => {
       },
     });
     return res.json(sub);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// Platform settings for this region
+// ---------------------------------------------------------------------------
+
+router.get("/settings", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const settings = await prisma.platformSetting.findMany({
+      where: { OR: [{ scope: "GLOBAL", regionId: null }, { scope: "REGION", regionId }] },
+      orderBy: [{ scope: "asc" }, { key: "asc" }],
+    });
+    return res.json(settings);
+  } catch (error: any) {
+    return res.status(403).json({ message: error.message });
+  }
+});
+
+router.put("/settings/:key", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { key } = req.params;
+    const { value } = req.body as { value: any };
+
+    if (!key) return res.status(400).json({ message: "Missing setting key" });
+    if (value === undefined) return res.status(400).json({ message: "Missing setting value" });
+
+    const setting = await prisma.platformSetting.upsert({
+      where: { scope_regionId_key: { scope: "REGION", regionId, key } },
+      create: { scope: "REGION", regionId, key, value },
+      update: { value },
+    });
+
+    return res.json(setting);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Promotions / promo codes
+// ---------------------------------------------------------------------------
+
+router.get("/promotions", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const promotions = await prisma.promotion.findMany({
+      where: { regionId },
+      include: { _count: { select: { redemptions: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    return res.json(promotions);
+  } catch (error: any) {
+    return res.status(403).json({ message: error.message });
+  }
+});
+
+router.post("/promotions", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const {
+      code,
+      name,
+      description,
+      type,
+      stripePromotionCodeId,
+      stripeCouponId,
+      extraTrialDays,
+      maxRedemptions,
+      startsAt,
+      endsAt,
+      isActive,
+    } = req.body as Record<string, any>;
+
+    if (!code || !name) {
+      return res.status(400).json({ message: "Missing code or name" });
+    }
+
+    const allowedTypes = ["STRIPE_PROMO", "INTERNAL_TRIAL", "CAMPAIGN"];
+    const promoType = type || "STRIPE_PROMO";
+    if (!allowedTypes.includes(promoType)) {
+      return res.status(400).json({ message: "Invalid promotion type" });
+    }
+
+    const promotion = await prisma.promotion.create({
+      data: {
+        regionId,
+        code: String(code).trim().toUpperCase(),
+        name,
+        description: description || null,
+        type: promoType,
+        stripePromotionCodeId: stripePromotionCodeId || null,
+        stripeCouponId: stripeCouponId || null,
+        extraTrialDays: extraTrialDays === undefined ? null : Number(extraTrialDays),
+        maxRedemptions: maxRedemptions === undefined || maxRedemptions === null ? null : Number(maxRedemptions),
+        startsAt: startsAt ? new Date(startsAt) : null,
+        endsAt: endsAt ? new Date(endsAt) : null,
+        isActive: typeof isActive === "boolean" ? isActive : true,
+      },
+    });
+
+    return res.status(201).json(promotion);
+  } catch (error: any) {
+    if (error?.code === "P2002") {
+      return res.status(400).json({ message: "A promotion with this code already exists in your region" });
+    }
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+router.patch("/promotions/:promotionId", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { promotionId } = req.params;
+    const existing = await prisma.promotion.findUnique({ where: { id: promotionId } });
+    if (!existing || existing.regionId !== regionId) {
+      return res.status(404).json({ message: "Promotion not found in your region" });
+    }
+
+    const data: any = {};
+    for (const key of ["name", "description", "type", "stripePromotionCodeId", "stripeCouponId"]) {
+      if (req.body[key] !== undefined) data[key] = req.body[key] || null;
+    }
+    if (req.body.code !== undefined) data.code = String(req.body.code).trim().toUpperCase();
+    if (req.body.extraTrialDays !== undefined) data.extraTrialDays = req.body.extraTrialDays === null ? null : Number(req.body.extraTrialDays);
+    if (req.body.maxRedemptions !== undefined) data.maxRedemptions = req.body.maxRedemptions === null ? null : Number(req.body.maxRedemptions);
+    if (req.body.startsAt !== undefined) data.startsAt = req.body.startsAt ? new Date(req.body.startsAt) : null;
+    if (req.body.endsAt !== undefined) data.endsAt = req.body.endsAt ? new Date(req.body.endsAt) : null;
+    if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
+
+    const promotion = await prisma.promotion.update({ where: { id: promotionId }, data });
+    return res.json(promotion);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Invite links
+// ---------------------------------------------------------------------------
+
+router.get("/invites", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const invites = await prisma.inviteLink.findMany({
+      where: { regionId },
+      include: { _count: { select: { redemptions: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    return res.json(invites);
+  } catch (error: any) {
+    return res.status(403).json({ message: error.message });
+  }
+});
+
+router.post("/invites", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { code, email, maxUses, expiresAt, promoCode, roleToAssign, isActive } = req.body as Record<string, any>;
+    const requestedRole = roleToAssign || UserRole.USER;
+
+    if (requestedRole === UserRole.SUPER_ADMIN) {
+      return res.status(400).json({ message: "Invite links cannot create super admins" });
+    }
+    if (requestedRole !== UserRole.USER && (req as any).user?.role !== UserRole.SUPER_ADMIN) {
+      return res.status(403).json({ message: "Only a super admin can create admin invite links" });
+    }
+
+    const invite = await prisma.inviteLink.create({
+      data: {
+        regionId,
+        code: code || generateInviteCode(),
+        createdByUserId: (req as any).user?.id || null,
+        roleToAssign: requestedRole,
+        email: email || null,
+        maxUses: maxUses === undefined || maxUses === null ? null : Number(maxUses),
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        promoCode: promoCode ? String(promoCode).trim().toUpperCase() : null,
+        isActive: typeof isActive === "boolean" ? isActive : true,
+      },
+    });
+
+    return res.status(201).json(invite);
+  } catch (error: any) {
+    if (error?.code === "P2002") {
+      return res.status(400).json({ message: "Invite code already exists" });
+    }
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+router.patch("/invites/:inviteId", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { inviteId } = req.params;
+    const existing = await prisma.inviteLink.findUnique({ where: { id: inviteId } });
+    if (!existing || existing.regionId !== regionId) {
+      return res.status(404).json({ message: "Invite not found in your region" });
+    }
+
+    const data: any = {};
+    if (req.body.email !== undefined) data.email = req.body.email || null;
+    if (req.body.maxUses !== undefined) data.maxUses = req.body.maxUses === null ? null : Number(req.body.maxUses);
+    if (req.body.expiresAt !== undefined) data.expiresAt = req.body.expiresAt ? new Date(req.body.expiresAt) : null;
+    if (req.body.promoCode !== undefined) data.promoCode = req.body.promoCode ? String(req.body.promoCode).trim().toUpperCase() : null;
+    if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
+
+    const invite = await prisma.inviteLink.update({ where: { id: inviteId }, data });
+    return res.json(invite);
   } catch (error: any) {
     return res.status(400).json({ message: error.message });
   }

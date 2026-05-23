@@ -4,6 +4,8 @@ import { prisma } from '../prismaClient';
 import { requireAuth } from '../middleware/auth';
 import { config } from '../config';
 import { decryptSecret } from '../services/secretCrypto';
+import { getBooleanSetting } from '../services/settingsService';
+import { findValidPromotion } from '../services/promotionService';
 
 const router = Router();
 
@@ -19,7 +21,7 @@ function getBillingInterval(billingCycle: string): 'day' | 'week' | 'month' | 'y
 
 router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
   const userId = (req as any).userId;
-  const { planId } = req.body as { planId?: string };
+  const { planId, promoCode, inviteCode } = req.body as { planId?: string; promoCode?: string; inviteCode?: string };
 
   if (!planId) {
     return res.status(400).json({ error: 'Missing planId' });
@@ -67,11 +69,17 @@ router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
 
   const stripe = new Stripe(stripeSecretKey);
 
+  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
+  const promo = promoCodesEnabled
+    ? await findValidPromotion(promoCode, { regionId: user.regionId, requireStripePromotionCode: true })
+    : null;
+
   const unitAmount = Math.round(plan.price * 100);
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     customer_email: user.email,
+    allow_promotion_codes: promo ? undefined : promoCodesEnabled,
     success_url: `${config.frontendUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${config.frontendUrl}/billing/cancelled`,
     line_items: [
@@ -89,16 +97,25 @@ router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
         quantity: 1,
       },
     ],
+    discounts: promo?.stripePromotionCodeId
+      ? [{ promotion_code: promo.stripePromotionCodeId }]
+      : undefined,
     metadata: {
       userId: user.id,
       regionId: user.regionId,
       planId: plan.id,
+      promoCode: promo?.code || promoCode || '',
+      promotionId: promo?.id || '',
+      inviteCode: inviteCode || '',
     },
     subscription_data: {
       metadata: {
         userId: user.id,
         regionId: user.regionId,
         planId: plan.id,
+        promoCode: promo?.code || promoCode || '',
+        promotionId: promo?.id || '',
+        inviteCode: inviteCode || '',
       },
     },
   });

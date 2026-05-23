@@ -4,6 +4,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { TRIAL_DAYS } from '../services/entitlementService';
+import { getNumberSetting, getBooleanSetting } from '../services/settingsService';
+import { findValidPromotion, recordPromotionRedemption } from '../services/promotionService';
+import { findValidInvite, redeemInvite } from '../services/inviteService';
 
 const router = Router();
 
@@ -19,11 +22,13 @@ function isValidUsername(username: string) {
 }
 
 router.post('/register', async (req, res) => {
-  const { email, password, username, regionId } = req.body as {
+  const { email, password, username, regionId, inviteCode, promoCode } = req.body as {
     email?: string;
     password?: string;
     username?: string;
     regionId?: string;
+    inviteCode?: string;
+    promoCode?: string;
   };
 
   if (!email || !password || !username) {
@@ -32,8 +37,11 @@ router.post('/register', async (req, res) => {
       .json({ error: 'Missing email, password, or username' });
   }
 
-  if (!regionId) {
-    return res.status(400).json({ error: 'Please select a region' });
+  const invite = await findValidInvite(inviteCode);
+  const resolvedRegionId = invite?.regionId || regionId;
+
+  if (!resolvedRegionId) {
+    return res.status(400).json({ error: 'Please select a region or use a valid invite link' });
   }
 
   if (!email.includes('@')) {
@@ -55,7 +63,7 @@ router.post('/register', async (req, res) => {
 
   const region = await prisma.region.findFirst({
     where: {
-      id: regionId,
+      id: resolvedRegionId,
       isActive: true,
     },
     select: {
@@ -69,6 +77,18 @@ router.post('/register', async (req, res) => {
   if (!region) {
     return res.status(400).json({ error: 'Invalid region selected' });
   }
+
+  const inviteOnly = await getBooleanSetting('auth.inviteOnly', region.id, false);
+  if (inviteOnly && !invite) {
+    return res.status(403).json({ error: 'This region currently requires an invite link to register' });
+  }
+
+  if (invite?.email && invite.email.toLowerCase() !== email.toLowerCase()) {
+    return res.status(403).json({ error: 'This invite link is restricted to another email address' });
+  }
+
+  const effectivePromoCode = promoCode || invite?.promoCode || undefined;
+  const promo = await findValidPromotion(effectivePromoCode, { regionId: region.id });
 
   // Check email uniqueness
   const existingEmail = await prisma.user.findUnique({ where: { email } });
@@ -85,10 +105,12 @@ router.post('/register', async (req, res) => {
   try {
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Start a 14-day free trial (no card). Enforcement lives in entitlementService.
+    // Start a configurable free trial (no card). Enforcement lives in entitlementService.
+    const trialDays = await getNumberSetting('trial.days', region.id, TRIAL_DAYS);
+    const extraTrialDays = promo?.type === 'INTERNAL_TRIAL' ? promo.extraTrialDays || 0 : 0;
     const trialStartedAt = new Date();
     const trialEndsAt = new Date(
-      trialStartedAt.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000
+      trialStartedAt.getTime() + (trialDays + extraTrialDays) * 24 * 60 * 60 * 1000
     );
 
     const user = await prisma.user.create({
@@ -97,6 +119,7 @@ router.post('/register', async (req, res) => {
         username,
         passwordHash,
         regionId: region.id,
+        role: invite?.roleToAssign || undefined,
         trialStartedAt,
         trialEndsAt,
       },
@@ -117,6 +140,18 @@ router.post('/register', async (req, res) => {
         },
       },
     });
+
+    if (invite) {
+      await redeemInvite(invite.id, user.id);
+    }
+
+    if (promo) {
+      await recordPromotionRedemption({
+        promotionId: promo.id,
+        userId: user.id,
+        regionId: region.id,
+      });
+    }
 
     const token = jwt.sign({ userId: user.id }, config.jwtSecret, signOptions);
 

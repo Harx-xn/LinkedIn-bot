@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { prisma } from '../prismaClient';
 import { decryptSecret } from '../services/secretCrypto';
+import { recordPromotionRedemption } from '../services/promotionService';
 
 function mapStripeStatus(status: string) {
   if (status === 'active' || status === 'trialing') return 'ACTIVE';
@@ -65,6 +66,9 @@ export async function handleStripeWebhook(req: Request, res: Response) {
     const userId = session.metadata?.userId;
     const planId = session.metadata?.planId;
     const sessionRegionId = session.metadata?.regionId;
+    const promotionId = session.metadata?.promotionId || null;
+    const promoCode = session.metadata?.promoCode || null;
+    const inviteCode = session.metadata?.inviteCode || null;
 
     if (userId && planId && sessionRegionId === regionId && session.subscription) {
       const subscriptionId =
@@ -77,7 +81,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           ? session.customer
           : session.customer?.id;
 
-      await prisma.subscription.upsert({
+      const subscription = await prisma.subscription.upsert({
         where: {
           stripeSubscriptionId: subscriptionId,
         },
@@ -89,6 +93,8 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           stripeCustomerId: customerId || null,
           stripeSubscriptionId: subscriptionId,
           stripeCheckoutSessionId: session.id,
+          promotionCode: promoCode || null,
+          inviteCode: inviteCode || null,
           startsAt: new Date(),
           autoRenew: true,
         },
@@ -97,9 +103,20 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           planId,
           stripeCustomerId: customerId || null,
           stripeCheckoutSessionId: session.id,
+          promotionCode: promoCode || null,
+          inviteCode: inviteCode || null,
           autoRenew: true,
         },
       });
+
+      if (promotionId) {
+        await recordPromotionRedemption({
+          promotionId,
+          userId,
+          regionId,
+          subscriptionId: subscription.id,
+        });
+      }
     }
   }
 
@@ -143,6 +160,15 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           status: 'PAST_DUE',
         },
       });
+
+      if (promotionId) {
+        await recordPromotionRedemption({
+          promotionId,
+          userId,
+          regionId,
+          subscriptionId: subscription.id,
+        });
+      }
     }
   }
 

@@ -1,5 +1,6 @@
 import { UserRole } from '@prisma/client';
 import { prisma } from '../prismaClient';
+import { getNumberSetting } from './settingsService';
 
 // 14-day free trial, capped at 1 published post per calendar day.
 export const TRIAL_DAYS = 14;
@@ -28,7 +29,7 @@ function startOfToday(): Date {
 export async function getEntitlement(userId: string): Promise<Entitlement> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { role: true, trialEndsAt: true },
+    select: { role: true, regionId: true, trialEndsAt: true },
   });
 
   if (!user) {
@@ -54,7 +55,7 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
       status: 'TRIAL',
       trialEndsAt: user.trialEndsAt,
       daysLeft,
-      dailyPublishLimit: TRIAL_DAILY_PUBLISH_LIMIT,
+      dailyPublishLimit: await getNumberSetting('trial.dailyPublishLimit', user.regionId, TRIAL_DAILY_PUBLISH_LIMIT),
     };
   }
 
@@ -92,10 +93,11 @@ export async function canPublish(userId: string): Promise<GateResult> {
 
   // TRIAL: enforce the daily publish cap.
   const count = await publishedToday(userId);
-  if (count >= TRIAL_DAILY_PUBLISH_LIMIT) {
+  const dailyLimit = entitlement.dailyPublishLimit ?? TRIAL_DAILY_PUBLISH_LIMIT;
+  if (count >= dailyLimit) {
     return {
       allowed: false,
-      reason: `Free trial allows ${TRIAL_DAILY_PUBLISH_LIMIT} published post per day. Try again tomorrow or subscribe.`,
+      reason: `Free trial allows ${dailyLimit} published post per day. Try again tomorrow or subscribe.`,
       entitlement,
     };
   }

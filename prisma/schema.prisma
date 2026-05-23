@@ -53,6 +53,9 @@ model Region {
   subscriptions    Subscription[]
   plans            Plan[]
   paymentConfig    PaymentConfig?
+  platformSettings PlatformSetting[]
+  promotions       Promotion[]
+  inviteLinks      InviteLink[]
 }
 
 model PaymentConfig {
@@ -109,6 +112,9 @@ model User {
   sheetConfigs     SheetConfig[]
   subscriptions    Subscription[]
   BotGenerationJob BotGenerationJob[]
+  promotionRedemptions PromotionRedemption[]
+  inviteRedemptions InviteRedemption[]
+  createdInviteLinks InviteLink[] @relation("InviteCreatedBy")
 
   @@index([regionId])
   @@index([role])
@@ -277,6 +283,8 @@ model Subscription {
   stripeCustomerId     String?
   stripeSubscriptionId String?
   stripeCheckoutSessionId String?
+  promotionCode String?
+  inviteCode String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -284,11 +292,117 @@ model Subscription {
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
   plan   Plan    @relation(fields: [planId], references: [id], onDelete: Restrict)
+  promotionRedemptions PromotionRedemption[]
 
   @@index([userId])
   @@index([regionId])
   @@index([planId])
   @@unique([stripeSubscriptionId])
+}
+
+
+model PlatformSetting {
+  id        String   @id @default(cuid())
+  scope     String   @default("GLOBAL") // GLOBAL | REGION
+  regionId  String?
+  key       String
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  region Region? @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@unique([scope, regionId, key])
+  @@index([regionId])
+  @@index([key])
+}
+
+model Promotion {
+  id                    String    @id @default(cuid())
+  regionId              String?
+  code                  String
+  name                  String
+  description           String?
+  isActive              Boolean   @default(true)
+
+  // STRIPE_PROMO applies a Stripe promotion_code during Checkout.
+  // INTERNAL_TRIAL adds extra free trial days during registration.
+  // CAMPAIGN is attribution-only.
+  type                  String    @default("STRIPE_PROMO")
+  stripePromotionCodeId String?
+  stripeCouponId        String?
+  extraTrialDays        Int?
+  maxRedemptions        Int?
+  redemptionCount       Int       @default(0)
+  startsAt              DateTime?
+  endsAt                DateTime?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  region      Region? @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  redemptions PromotionRedemption[]
+
+  @@unique([code, regionId])
+  @@index([regionId])
+  @@index([code])
+  @@index([isActive])
+}
+
+model PromotionRedemption {
+  id             String   @id @default(cuid())
+  promotionId    String
+  userId         String
+  regionId       String?
+  subscriptionId String?
+  redeemedAt     DateTime @default(now())
+
+  promotion    Promotion     @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@unique([promotionId, userId])
+  @@index([userId])
+  @@index([regionId])
+}
+
+model InviteLink {
+  id              String   @id @default(cuid())
+  regionId        String?
+  code            String   @unique
+  createdByUserId String?
+  roleToAssign    UserRole @default(USER)
+
+  email           String?
+  maxUses         Int?
+  usedCount       Int      @default(0)
+  expiresAt       DateTime?
+  isActive        Boolean  @default(true)
+  promoCode       String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  region      Region? @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  createdBy   User?   @relation("InviteCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  redemptions InviteRedemption[]
+
+  @@index([regionId])
+  @@index([code])
+  @@index([isActive])
+}
+
+model InviteRedemption {
+  id           String   @id @default(cuid())
+  inviteLinkId String
+  userId       String
+  redeemedAt   DateTime @default(now())
+
+  inviteLink InviteLink @relation(fields: [inviteLinkId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([inviteLinkId, userId])
+  @@index([userId])
 }
 
 model PaymentEvent {
