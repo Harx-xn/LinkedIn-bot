@@ -5,6 +5,7 @@ import { config } from './config';
 import authRouter from './routes/auth';
 import linkedinRouter from './routes/linkedin';
 import linkedinPagesRouter from './routes/linkedinPages';
+import linkedinGrowthRoutes from './routes/linkedinGrowth';
 import sheetsRouter from './routes/sheets';
 import postsRouter from './routes/posts';
 import userRouter from './routes/user';
@@ -63,6 +64,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/linkedin', linkedinRouter);
 app.use('/api/linkedin', linkedinPagesRouter); // For /linkedin/pages
+app.use('/api/linkedin-growth', linkedinGrowthRoutes);
 app.use('/api/sheets', sheetsRouter);
 app.use('/api/posts', postsRouter);
 app.use('/api/user', userRouter);

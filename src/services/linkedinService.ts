@@ -6,19 +6,37 @@ import { decryptSecret } from './secretCrypto';
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
 
-const scopes = [
+// Base scopes are always requested and are covered by LinkedIn's default
+// "Sign In with LinkedIn" + "Share on LinkedIn" products.
+const BASE_SCOPES = [
   'openid',
   'profile',
   'email',
   'w_member_social'
 ];
 
+// Real post-analytics scopes. These belong to LinkedIn's Community Management
+// API product and ONLY work once your app has been approved for it. Requesting
+// them before approval makes LinkedIn reject the entire OAuth request, so they
+// are gated behind LINKEDIN_ENABLE_ANALYTICS_SCOPES. Flip that env var to
+// "true" after approval, then have users re-connect to grant the new scopes.
+const ANALYTICS_SCOPES = [
+  'r_member_postAnalytics',   // member post stats (impressions/reach/engagement), API >= 202506
+  'r_organization_social'     // organization page share statistics
+];
+
+export function getLinkedInScopes(): string[] {
+  return process.env.LINKEDIN_ENABLE_ANALYTICS_SCOPES === 'true'
+    ? [...BASE_SCOPES, ...ANALYTICS_SCOPES]
+    : [...BASE_SCOPES];
+}
+
 export function getLinkedInAuthUrl(clientId: string, state: string, redirectUri?: string) {
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
     redirect_uri: redirectUri || config.linkedin.redirectUri,
-    scope: scopes.join(' '),
+    scope: getLinkedInScopes().join(' '),
     state
   });
 
