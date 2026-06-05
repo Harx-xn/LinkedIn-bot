@@ -6,6 +6,7 @@ import { canPublish } from '../services/entitlementService';
 import { ImageService } from '../services/imageService';
 import { ContentService } from '../services/contentService';
 import { decryptSecret, decryptSecretArray } from '../services/secretCrypto';
+import { finalizeGeneratedPostContent } from '../services/postContentFormatting';
 
 const router = Router();
 const imageService = new ImageService();
@@ -25,27 +26,54 @@ async function getContentServiceForUser(userId: string) {
 async function getBotVoice(userId: string) {
   const config = await prisma.botConfig.findUnique({
     where: { userId },
-    select: { tone: true, description: true, backgroundImageUrl: true },
+    select: {
+      tone: true,
+      description: true,
+      backgroundImageUrl: true,
+      customLinks: true,
+      contactInfo: true,
+      websiteUrl: true,
+      includeContactInfo: true,
+      includeWebsiteLink: true,
+    },
   });
 
   return {
     tone: config?.tone || 'Professional',
     description: config?.description || '',
     backgroundImageUrl: config?.backgroundImageUrl || undefined,
+    customLinks: config?.customLinks || null,
+    contactInfo: config?.contactInfo || null,
+    websiteUrl: config?.websiteUrl || null,
+    includeContactInfo: config?.includeContactInfo ?? false,
+    includeWebsiteLink: config?.includeWebsiteLink ?? false,
   };
 }
 
-function normalizeGeneratedContent(generatedContent: any, fallbackContent: string) {
-  const body = generatedContent?.body || fallbackContent;
-  const hashtags = generatedContent?.hashtags || '';
-  return {
-    headline: generatedContent?.headline || body.split('\n')[0] || 'LinkedIn post',
-    subheadline: generatedContent?.subheadline || '',
-    bulletPoints: generatedContent?.bulletPoints || [],
-    body,
-    hashtags,
-    content: `${body}${hashtags ? `\n\n${hashtags}` : ''}`,
-  };
+interface NormalizeOptions {
+  topic?: string;
+  includeContactInfo?: boolean;
+  includeWebsiteLink?: boolean;
+  contactInfo?: string | null;
+  websiteUrl?: string | null;
+  description?: string | null;
+  customLinks?: string | null;
+}
+
+function normalizeGeneratedContent(
+  generatedContent: any,
+  fallbackContent: string,
+  options: NormalizeOptions = {},
+) {
+  return finalizeGeneratedPostContent(generatedContent, fallbackContent, {
+    topic: options.topic,
+    includeContactInfo: !!options.includeContactInfo,
+    includeWebsiteLink: !!options.includeWebsiteLink,
+    contactInfo: options.contactInfo,
+    websiteUrl: options.websiteUrl,
+    description: options.description,
+    customLinks: options.customLinks,
+  });
 }
 
 router.post('/', requireAuth, async (req, res) => {
@@ -175,7 +203,15 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
     voice.description,
   );
 
-  const normalized = normalizeGeneratedContent(generated, post.content);
+  const normalized = normalizeGeneratedContent(generated, post.content, {
+    topic: post.content.split('\n')[0],
+    includeContactInfo: voice.includeContactInfo,
+    includeWebsiteLink: voice.includeWebsiteLink,
+    contactInfo: voice.contactInfo,
+    websiteUrl: voice.websiteUrl,
+    description: voice.description,
+    customLinks: voice.customLinks,
+  });
 
   let mediaUrl = post.mediaUrl;
   try {

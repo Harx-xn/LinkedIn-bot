@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "BotConfig" ADD COLUMN IF NOT EXISTS "includeContactInfo" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "BotConfig" ADD COLUMN IF NOT EXISTS "includeWebsiteLink" BOOLEAN NOT NULL DEFAULT false;

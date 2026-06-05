@@ -6,6 +6,7 @@ import authRouter from './routes/auth';
 import linkedinRouter from './routes/linkedin';
 import linkedinPagesRouter from './routes/linkedinPages';
 import linkedinGrowthRoutes from './routes/linkedinGrowth';
+import manualPostsRouter from './routes/manualPosts';
 import sheetsRouter from './routes/sheets';
 import postsRouter from './routes/posts';
 import userRouter from './routes/user';
@@ -67,6 +68,7 @@ app.use('/api/linkedin', linkedinPagesRouter); // For /linkedin/pages
 app.use('/api/linkedin-growth', linkedinGrowthRoutes);
 app.use('/api/sheets', sheetsRouter);
 app.use('/api/posts', postsRouter);
+app.use('/api/manual-posts', manualPostsRouter);
 app.use('/api/user', userRouter);
 app.use('/api/bot', botConfigRouter);
 app.use('/api/bot', botActionRouter); // Used for /bot/generate

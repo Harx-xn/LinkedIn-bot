@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "BotConfig" ADD COLUMN IF NOT EXISTS "contactInfo" TEXT;
+ALTER TABLE "BotConfig" ADD COLUMN IF NOT EXISTS "websiteUrl" TEXT;

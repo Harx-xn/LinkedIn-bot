@@ -90,6 +90,7 @@ model User {
 
   role     UserRole @default(USER)
   isActive Boolean  @default(true)
+  themePreference String @default("LIGHT")
 
   // Free-trial tracking (14-day, no card required). Set at self-registration.
   trialStartedAt DateTime?
@@ -137,6 +138,10 @@ model BotConfig {
   isEnabled          Boolean  @default(false)
   description        String?  @default("")
   tone               String?  @default("Professional")
+  includeContactInfo Boolean  @default(false)
+  includeWebsiteLink Boolean  @default(false)
+  contactInfo        String?
+  websiteUrl         String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 

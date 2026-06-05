@@ -3,6 +3,19 @@ import { prisma } from "../prismaClient";
 import { requireAuth } from "../middleware/auth";
 import { getEntitlement, publishedToday } from "../services/entitlementService";
 
+type ThemePreference = "LIGHT" | "DARK";
+
+function normalizeThemePreference(value: unknown): ThemePreference | null {
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim().toUpperCase();
+
+  if (normalized === "LIGHT") return "LIGHT";
+  if (normalized === "DARK") return "DARK";
+
+  return null;
+}
+
 const router = Router();
 router.get("/me", requireAuth, async (req: Request, res: any) => {
   const userId = req.userId;
@@ -18,6 +31,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       email: true,
       username: true,
       role: true,
+      themePreference: true,
 
       regionId: true,
       region: {
@@ -77,6 +91,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     email: user.email,
     username: user.username,
     role: user.role,
+    themePreference: user.themePreference || "LIGHT",
 
     regionId: user.regionId,
     region: user.region
@@ -120,6 +135,75 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       publishedToday: usedToday,
     },
   });
+});
+
+router.patch("/me/theme", requireAuth, async (req: Request, res: any) => {
+  const userId = req.userId;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const themePreference = normalizeThemePreference(req.body?.themePreference);
+
+  if (!themePreference) {
+    return res.status(400).json({
+      error: "Invalid theme preference. Use LIGHT or DARK.",
+    });
+  }
+
+  try {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { themePreference },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        themePreference: true,
+      },
+    });
+
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating theme preference:", err);
+    return res.status(500).json({ error: "Failed to update theme preference" });
+  }
+});
+
+// Alias for settings-style clients.
+router.patch("/preferences", requireAuth, async (req: Request, res: any) => {
+  const userId = req.userId;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const themePreference = normalizeThemePreference(req.body?.themePreference);
+
+  if (!themePreference) {
+    return res.status(400).json({
+      error: "Invalid theme preference. Use LIGHT or DARK.",
+    });
+  }
+
+  try {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { themePreference },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        themePreference: true,
+      },
+    });
+
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating preferences:", err);
+    return res.status(500).json({ error: "Failed to update preferences" });
+  }
 });
 
 router.put("/config", requireAuth, async (_req: Request, res: any) => {

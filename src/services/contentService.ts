@@ -4,6 +4,36 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Shared prompt blocks so generate/mixed/rewrite stay consistent.
+const POST_FORMAT_RULES = `POST FORMAT:
+- Write in a Taplio-style LinkedIn format.
+- Use short, punchy single-line statements.
+- Each sentence or thought should usually be on its own line.
+- Use blank lines between idea blocks.
+- Avoid long paragraphs.
+- Avoid markdown bullets unless the content truly needs a short list.
+- Do not write dense explanation blocks.
+- Do not start with "In today's world" or generic intros.
+- Start with a sharp observation, tension, or contrarian insight.
+- Build with 5-10 short lines.
+- End with a direct question or memorable takeaway.
+- Do not use the "👉" emoji or forced "-" bullet lists.
+- Keep the post under 1200 characters unless the idea truly needs more.`;
+
+const HASHTAG_RULES = `HASHTAG RULES:
+- Generate 3-5 hashtags based specifically on the post content.
+- Hashtags must reflect the actual topic, industry, audience, and angle of the post.
+- Do not use the same default hashtags for every post.
+- Avoid generic hashtags unless truly relevant.
+- Do not include #LinkedIn unless the post is actually about LinkedIn.
+- Put hashtags in the JSON "hashtags" field only, not inside the body.
+- Use TitleCase hashtag formatting.`;
+
+const LANGUAGE_RULES = `LANGUAGE RULE:
+- Write the final post in English only.
+- Do not write in Arabic, Urdu, Hindi, Spanish, or any other language unless the user explicitly selected that language in configuration.
+- If the source content is in another language, translate the insight and write the post in English.`;
+
 export class ContentService {
   private geminiKeys: string[] = [];
   private currentKeyIndex = 0;
@@ -83,28 +113,26 @@ Reference: ${articleLink}
 TONE & STYLE:
 - Requested Tone: ${tone}
 - Professional, insightful, business-focused
-- Emphasize practical business value and strategic thinking
-- Focus on digital transformation, IT strategy, automation, and modernization
-- Connect technology trends to real business challenges
+- Connect ideas to real business challenges
 - Avoid hype - be honest and pragmatic
-- Use short, punchy sentences
 - Include specific, actionable insights
 
-STRUCTURE:
-- Start with a bold observation or insight
-- Connect to business reality (budgets, competition, efficiency)
-- Provide 2-3 specific points or examples
-- End with a strategic takeaway or question
+${POST_FORMAT_RULES}
+
+${HASHTAG_RULES}
+
+${LANGUAGE_RULES}
 
 Output MUST be valid JSON:
 {
-  "headline": "Short, punchy 5-7 word headline aligned with ${tone} tone",
-  "subheadline": "Short supporting insight (max 10 words)",
+  "headline": "Short internal headline, not necessarily shown (5-7 words)",
+  "subheadline": "Short internal supporting insight (max 10 words)",
   "bulletPoints": ["First key insight", "Second key insight", "Third key insight"],
-  "body": "Professional LinkedIn post text (under 1500 chars). Write like the examples: direct, insightful, business-focused. Use bullet points with - symbol. Include a strategic question or call-to-action at the end with 👉 emoji.",
-  "hashtags": "#DigitalTransformation #ITConsulting #TechStrategy #LinkedIn"
+  "body": "Line-by-line Taplio-style LinkedIn post text following the POST FORMAT rules above.",
+  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
 }
 
+The "bulletPoints" are only used internally to render an image; still keep them short.
 Do not include markdown code blocks. Just raw JSON.
 `;
 
@@ -207,19 +235,25 @@ The goal is to find the intersection, contrast, or synergy between these trends.
 TONE & STYLE:
 - Requested Tone: ${tone}
 - Professional, insightful, business-focused
-- Connect technology trends to real business challenges
+- Connect these trends to real business challenges
 - Avoid hype - be honest and pragmatic
-- Use short, punchy sentences
+
+${POST_FORMAT_RULES}
+
+${HASHTAG_RULES}
+
+${LANGUAGE_RULES}
 
 OUTPUT MUST BE VALID JSON:
 {
-  "headline": "Short, punchy headline combining topics (max 7 words)",
-  "subheadline": "Short supporting insight (max 10 words)",
+  "headline": "Short internal headline combining topics (max 7 words)",
+  "subheadline": "Short internal supporting insight (max 10 words)",
   "bulletPoints": ["Insight about topic 1", "Insight about topic 2", "Synthesis/Connection point"],
-  "body": "Professional LinkedIn post text connecting these topics. Use bullet points with - symbol. Include a strategic question or call-to-action at the end with 👉 emoji.",
-  "hashtags": "#TechTrends #LinkedIn"
+  "body": "Line-by-line Taplio-style LinkedIn post connecting these topics, following the POST FORMAT rules above.",
+  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
 }
 
+The "bulletPoints" are only used internally to render an image; still keep them short.
 Do not include markdown code blocks. Just raw JSON.
 `;
 
@@ -266,19 +300,24 @@ ${suggestions || 'Improve clarity, hook, and flow while keeping the same topic.'
 TONE: ${tone}
 
 Rules:
-- Keep it under 1500 characters.
-- Keep it suitable for LinkedIn.
 - Apply the user's suggestions directly.
-- Keep useful hashtags, but improve them if needed.
 - Do not invent unverifiable facts.
+- Keep content-specific hashtags; regenerate them if they are generic or constant.
+- Preserve any existing "Learn more:" website line or "Contact:" line unless the user's suggestions say to remove them.
+
+${POST_FORMAT_RULES}
+
+${HASHTAG_RULES}
+
+${LANGUAGE_RULES}
 
 Output MUST be valid JSON:
 {
-  "headline": "Short headline",
-  "subheadline": "Short supporting insight",
+  "headline": "Short internal headline",
+  "subheadline": "Short internal supporting insight",
   "bulletPoints": ["First key insight", "Second key insight", "Third key insight"],
-  "body": "Rewritten LinkedIn post text",
-  "hashtags": "#LinkedIn #RelevantHashtag"
+  "body": "Rewritten line-by-line Taplio-style LinkedIn post following the POST FORMAT rules above.",
+  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
 }
 
 Do not include markdown code blocks. Just raw JSON.

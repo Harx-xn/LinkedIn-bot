@@ -3,6 +3,14 @@ import { ContentService } from "./contentService";
 import { ImageService } from "./imageService";
 import { prisma } from "../prismaClient";
 import { decryptSecret, decryptSecretArray } from "./secretCrypto";
+import { finalizeGeneratedPostContent } from "./postContentFormatting";
+import {
+  buildBatchScheduleSlots,
+  calculateBatchSlotCount,
+  parsePostingSchedule,
+  validateScheduleForGeneration,
+  BatchScheduleError,
+} from "./batchScheduleService";
 
 export class TrendingBotService {
   private trendsService: TrendsService;
@@ -146,20 +154,31 @@ export class TrendingBotService {
             config.description || "",
           );
 
-          const headline = generatedContent.headline || selectedTrend.title;
-          const subheadline = generatedContent.subheadline || "";
-          const bulletPoints = generatedContent.bulletPoints || [];
-          const body =
-            generatedContent.body || JSON.stringify(generatedContent);
-          const hashtags = generatedContent.hashtags || "";
-
-          const imagePath = await this.imageService.createTopicImage(
-            headline,
-            config.backgroundImageUrl || undefined,
-            { headline, subheadline, bulletPoints },
+          const finalized = finalizeGeneratedPostContent(
+            generatedContent,
+            selectedTrend.title,
+            {
+              topic: selectedTrend.title,
+              includeContactInfo: config.includeContactInfo,
+              includeWebsiteLink: config.includeWebsiteLink,
+              contactInfo: config.contactInfo,
+              websiteUrl: config.websiteUrl,
+              description: config.description,
+              customLinks: config.customLinks,
+            },
           );
 
-          const finalContent = `${body}\n\n${hashtags}`;
+          const imagePath = await this.imageService.createTopicImage(
+            finalized.headline,
+            config.backgroundImageUrl || undefined,
+            {
+              headline: finalized.headline,
+              subheadline: finalized.subheadline,
+              bulletPoints: finalized.bulletPoints,
+            },
+          );
+
+          const finalContent = finalized.content;
 
           if (dryRun) {
             console.log(
@@ -173,7 +192,7 @@ export class TrendingBotService {
                 content: finalContent,
                 source: "AI_TRENDING",
                 status: "REVIEW",
-                hashtags: hashtags,
+                hashtags: finalized.hashtags,
                 mediaUrl: imagePath,
               },
             });
@@ -184,46 +203,6 @@ export class TrendingBotService {
         }
       }
     }
-  }
-
-  // Build the schedule of publish times for a batch. Posts are spread across
-  // `days`, and when a day holds more than one post they are spaced across a
-  // daytime window so they don't all collide at the same timestamp.
-  private calculateTimeSlots(
-    postsPerWeek: number,
-    days: number,
-    startDate: Date,
-  ): Date[] {
-    const slots: Date[] = [];
-    const totalPosts = Math.max(1, Math.ceil((postsPerWeek / 7) * days));
-
-    // Daily posting window (local time): 09:00 - 18:00.
-    const startHour = 9;
-    const endHour = 18;
-
-    const perDay = Math.max(1, Math.round(totalPosts / days));
-    let created = 0;
-
-    for (let day = 0; day < days && created < totalPosts; day++) {
-      const todays = Math.min(perDay, totalPosts - created);
-
-      for (let i = 0; i < todays; i++) {
-        const date = new Date(startDate.getTime());
-        date.setDate(startDate.getDate() + day);
-
-        // Single post -> window start; multiple -> evenly spaced across window.
-        const frac = todays === 1 ? 0 : i / (todays - 1);
-        const hour = startHour + frac * (endHour - startHour);
-        const h = Math.floor(hour);
-        const m = Math.round((hour - h) * 60);
-        date.setHours(h, m, 0, 0);
-
-        slots.push(date);
-        created++;
-      }
-    }
-
-    return slots;
   }
 
   async generateNow(userId: string, daysWindow: number, jobId?: string) {
@@ -263,11 +242,23 @@ export class TrendingBotService {
         : [];
     } catch {}
 
-    const slots = this.calculateTimeSlots(
-      config.postsPerWeek,
-      daysWindow,
-      new Date(),
-    );
+    let schedule;
+    try {
+      schedule = parsePostingSchedule(config.postingSchedule);
+      validateScheduleForGeneration(schedule);
+    } catch (err) {
+      if (err instanceof BatchScheduleError) {
+        throw err;
+      }
+      schedule = parsePostingSchedule(null);
+    }
+
+    const totalPosts = calculateBatchSlotCount(config.postsPerWeek, daysWindow);
+    const slots = buildBatchScheduleSlots({
+      count: totalPosts,
+      schedule,
+      startDate: new Date(),
+    });
     if (jobId) {
       await prisma.botGenerationJob.update({
         where: { id: jobId },
@@ -338,6 +329,7 @@ export class TrendingBotService {
                 generatedContent,
                 currentSlot,
                 [t1.title, t2.title].join(" + "),
+                config,
               );
               success = true;
             } catch (e) {
@@ -375,6 +367,7 @@ export class TrendingBotService {
                 generatedContent,
                 currentSlot,
                 trend.title,
+                config,
               );
               success = true;
               break;
@@ -412,24 +405,36 @@ export class TrendingBotService {
     generatedContent: any,
     scheduledAt: Date,
     sourceTitle: string,
+    config: {
+      backgroundImageUrl?: string | null;
+      description?: string | null;
+      customLinks?: string | null;
+      contactInfo?: string | null;
+      websiteUrl?: string | null;
+      includeContactInfo?: boolean;
+      includeWebsiteLink?: boolean;
+    },
   ) {
-    const headline = generatedContent.headline || sourceTitle;
-    const subheadline = generatedContent.subheadline || "";
-    const bulletPoints = generatedContent.bulletPoints || [];
-    const body = generatedContent.body || JSON.stringify(generatedContent);
-    const hashtags = generatedContent.hashtags || "";
-
-    const botConfig = await prisma.botConfig.findUnique({
-      where: { userId },
-      select: { backgroundImageUrl: true },
+    const finalized = finalizeGeneratedPostContent(generatedContent, sourceTitle, {
+      topic: sourceTitle,
+      includeContactInfo: !!config.includeContactInfo,
+      includeWebsiteLink: !!config.includeWebsiteLink,
+      contactInfo: config.contactInfo,
+      websiteUrl: config.websiteUrl,
+      description: config.description,
+      customLinks: config.customLinks,
     });
 
     let mediaUrl: string | null = null;
     try {
       mediaUrl = await this.imageService.createTopicImage(
-        headline,
-        botConfig?.backgroundImageUrl ?? undefined,
-        { headline, subheadline, bulletPoints },
+        finalized.headline,
+        config.backgroundImageUrl ?? undefined,
+        {
+          headline: finalized.headline,
+          subheadline: finalized.subheadline,
+          bulletPoints: finalized.bulletPoints,
+        },
       );
     } catch (e) {
       console.error("Image generation failed:", e);
@@ -446,12 +451,12 @@ export class TrendingBotService {
       data: {
         userId,
         regionId,
-        content: `${body}\n\n${hashtags}`,
+        content: finalized.content,
         status: "REVIEW",
         scheduledAt,
         source: "AI",
         mediaUrl,
-        hashtags,
+        hashtags: finalized.hashtags,
         linkedinAccountId: linkedInAccount?.id ?? null,
       },
     });
