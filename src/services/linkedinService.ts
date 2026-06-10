@@ -278,5 +278,17 @@ export async function postToLinkedInFromPostId(postId: string) {
     });
   }
 
+  if (post.source === 'MANUAL') {
+    try {
+      const { scheduleManualPostFingerprintSync } = await import('./manualPost/manualPostFingerprintService');
+      scheduleManualPostFingerprintSync(post.id, post.userId);
+    } catch (err) {
+      console.warn('[manual-fingerprint] publish sync failed', {
+        postId: post.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return { urn, data: response.data };
 }

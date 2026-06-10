@@ -40,6 +40,7 @@ import {
 import type { SpecificityResult } from './generationTypes';
 import { buildDeterministicBatchPlan } from './ghostwriterBatchPlanner';
 import { evaluateTopicCombination } from './ghostwriterQualityService';
+import { MANUAL_POST_OPENAI_JSON_SCHEMA } from './manualPost/manualPostSchemas';
 
 dotenv.config();
 
@@ -479,6 +480,69 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     return null;
   }
 
+  /**
+   * Manual-composer only. Returns raw provider text without batch parsing.
+   */
+  async fetchComposerGenerationRaw(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<string> {
+    if (provider === 'OPENAI' && this.openai) {
+      try {
+        return await this.generateOpenAiManualStructuredPost(prompt, OPENAI_WRITE_TEMPERATURE);
+      } catch (err) {
+        console.warn('[manual-post-v2] OpenAI manual structured output failed; falling back', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+  }
+
+  /**
+   * Manual-composer only. Returns raw provider text without batch parsing.
+   */
+  async fetchComposerRewriteRaw(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<string> {
+    return this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+  }
+
+  /**
+   * Manual-composer only. Used for manual JSON repair attempts.
+   */
+  async fetchComposerRepairRaw(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<string> {
+    return this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+  }
+
+  /**
+   * Manual-composer only. Batch generation must not call this method.
+   * Runs a pre-built manual prompt through structured generation + JSON repair.
+   */
+  async executeComposerGenerationPrompt(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<GeneratedPostContent> {
+    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
+
+  /**
+   * Manual-composer only. Batch generation must not call this method.
+   * Runs a pre-built manual rewrite prompt through provider fallback + JSON repair.
+   */
+  async executeComposerRewritePrompt(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<GeneratedPostContent> {
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
+
   async rewritePost(
     currentContent: string,
     suggestions: string,
@@ -509,6 +573,30 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
     const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
     return this.parseWithRepair(raw, provider, prompt);
+  }
+
+  private async generateOpenAiManualStructuredPost(prompt: string, temperature: number): Promise<string> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_CONTENT_MODEL,
+      temperature,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'manual_post',
+          strict: true,
+          schema: MANUAL_POST_OPENAI_JSON_SCHEMA,
+        },
+      },
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a LinkedIn manual post composer. Return JSON only matching the requested schema.',
+        },
+        { role: 'user', content: prompt },
+      ],
+    });
+    return response.choices[0].message.content || '';
   }
 
   private async generateOpenAiStructuredPost(prompt: string, temperature: number): Promise<string> {

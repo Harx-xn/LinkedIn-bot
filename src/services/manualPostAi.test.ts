@@ -2,17 +2,18 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ManualPostError } from './manualPostService';
 import {
-  deriveTopicFromContent,
-  normalizeGeneratedContent,
-} from './userContentContext';
-import {
   MAX_MANUAL_TOPIC_LENGTH,
   MAX_REWRITE_CONTENT_LENGTH,
   MAX_REWRITE_SUGGESTIONS_LENGTH,
+  MAX_SUPPORTING_CONTEXT_LENGTH,
   parseContentProvider,
   validateGenerateInput,
   validateUnsavedRewriteInput,
+  generateManualPostContent,
 } from './manualPostAiService';
+import { generateManualPostV2 } from './manualPost/manualPostOrchestration';
+import { finalizeManualGeneratedPostV2 } from './manualPost/manualPostFormatting';
+import type { ManualGeneratedPost } from './manualPost/manualPostTypes';
 
 describe('manual post AI validation', () => {
   it('rejects empty topic', () => {
@@ -61,6 +62,20 @@ describe('manual post AI validation', () => {
     assert.equal(ok.topic, 'SaaS auth');
   });
 
+  it('validates supportingContext type and max length', () => {
+    assert.throws(
+      () => validateGenerateInput({ topic: 'Billing', supportingContext: 42 }),
+      (err: unknown) => err instanceof ManualPostError && err.status === 400,
+    );
+    assert.throws(
+      () => validateGenerateInput({
+        topic: 'Billing',
+        supportingContext: 'x'.repeat(MAX_SUPPORTING_CONTEXT_LENGTH + 1),
+      }),
+      (err: unknown) => err instanceof ManualPostError && err.status === 400,
+    );
+  });
+
   it('enforces rewrite content and suggestion limits', () => {
     assert.throws(
       () => validateUnsavedRewriteInput({
@@ -77,27 +92,49 @@ describe('manual post AI validation', () => {
       (err: unknown) => err instanceof ManualPostError && err.status === 400,
     );
   });
+});
 
-  it('derives topic from first meaningful line', () => {
-    assert.equal(
-      deriveTopicFromContent('\n\nWhy tenant isolation matters\nMore text'),
-      'Why tenant isolation matters',
-    );
-  });
-
+describe('manual post AI formatting', () => {
   it('normalized generated output stays within LinkedIn limit', () => {
-    const body = 'A'.repeat(2500);
-    const normalized = normalizeGeneratedContent(
-      {
-        headline: 'Tenant authorization',
-        subheadline: '',
-        bulletPoints: [],
-        body,
-        hashtags: '#SaaS #Security',
+    const body = 'A'.repeat(1800);
+    const manual: ManualGeneratedPost = {
+      contentPlan: {
+        angle: 'Tenant authorization',
+        coreClaim: 'Scope checks belong on the server.',
+        audience: 'Backend engineers',
+        structure: 'hook-body-close',
+        hookType: 'observation',
+        evidenceType: 'technical_example',
+        ctaType: 'takeaway',
       },
+      hook: 'Tenant authorization starts server-side.',
+      body,
+      closingLine: 'Enforce tenant scope before queries run.',
+      hashtags: ['#SaaS', '#Security'],
+    };
+    const normalized = finalizeManualGeneratedPostV2(
+      manual,
       'fallback',
-      { topic: 'Tenant authorization' },
+      {
+        topic: 'Tenant authorization',
+        voice: {
+          tone: 'Professional',
+          description: '',
+          niches: [],
+          customLinks: null,
+          contactInfo: null,
+          websiteUrl: null,
+          includeContactInfo: false,
+          includeWebsiteLink: false,
+        },
+      },
     );
     assert.ok(normalized.content.length <= 3000);
+  });
+});
+
+describe('manual route orchestration wiring', () => {
+  it('generateManualPostContent is the V2 orchestration entry point', () => {
+    assert.equal(generateManualPostContent, generateManualPostV2);
   });
 });

@@ -2,6 +2,7 @@ import { prisma } from '../prismaClient';
 import { canPublish } from './entitlementService';
 import { postToLinkedInFromPostId } from './linkedinService';
 import { canPublishToLinkedIn } from './planEntitlementService';
+import { scheduleManualPostFingerprintSync } from './manualPost/manualPostFingerprintService';
 
 /**
  * Manual Posts / Composer service (Taplio-like).
@@ -134,11 +135,16 @@ function parseAiGenerated(raw: unknown): boolean {
   return raw === true || raw === 'true' || raw === 1 || raw === '1';
 }
 
+function afterManualPostPersisted(post: { id: string; userId: string; source: string }) {
+  if (post.source !== MANUAL_SOURCE) return;
+  scheduleManualPostFingerprintSync(post.id, post.userId);
+}
+
 export async function createDraft(userId: string, body: ManualPostInput) {
   const { content, mediaUrl } = validateManualPostInput(body.content, body.mediaUrl);
   const linkedinAccountId = await getLinkedInAccountId(userId);
 
-  return prisma.post.create({
+  const post = await prisma.post.create({
     data: {
       userId,
       content,
@@ -151,6 +157,8 @@ export async function createDraft(userId: string, body: ManualPostInput) {
       linkedinAccountId,
     },
   });
+  afterManualPostPersisted(post);
+  return post;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +217,9 @@ export async function updateManualPost(
     }
   }
 
-  return prisma.post.update({ where: { id: post.id }, data });
+  const updated = await prisma.post.update({ where: { id: post.id }, data });
+  afterManualPostPersisted(updated);
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,10 +238,12 @@ export async function scheduleManualPost(userId: string, postId: string, schedul
 
   const linkedinAccountId = post.linkedinAccountId ?? (await getLinkedInAccountId(userId));
 
-  return prisma.post.update({
+  const scheduled = await prisma.post.update({
     where: { id: post.id },
     data: { scheduledAt, status: SCHEDULED_STATUS, linkedinAccountId },
   });
+  afterManualPostPersisted(scheduled);
+  return scheduled;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +277,9 @@ export async function publishManualPostNow(userId: string, postId: string) {
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
   }
 
-  return prisma.post.findUnique({ where: { id: post.id } });
+  const published = await prisma.post.findUnique({ where: { id: post.id } });
+  if (published) afterManualPostPersisted(published);
+  return published;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +314,9 @@ export async function createAndPublishNow(userId: string, body: ManualPostInput)
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
   }
 
-  return prisma.post.findUnique({ where: { id: post.id } });
+  const published = await prisma.post.findUnique({ where: { id: post.id } });
+  if (published) afterManualPostPersisted(published);
+  return published;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +330,7 @@ export async function createAndSchedule(userId: string, body: ManualPostInput & 
 
   const linkedinAccountId = await getLinkedInAccountId(userId);
 
-  return prisma.post.create({
+  const scheduled = await prisma.post.create({
     data: {
       userId,
       content,
@@ -325,6 +341,8 @@ export async function createAndSchedule(userId: string, body: ManualPostInput & 
       linkedinAccountId,
     },
   });
+  afterManualPostPersisted(scheduled);
+  return scheduled;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +442,7 @@ export async function duplicateManualPost(userId: string, postId: string) {
   const post = await findOwnedManualPost(userId, postId);
   const linkedinAccountId = post.linkedinAccountId ?? (await getLinkedInAccountId(userId));
 
-  return prisma.post.create({
+  const duplicate = await prisma.post.create({
     data: {
       userId,
       content: post.content,
@@ -437,4 +455,6 @@ export async function duplicateManualPost(userId: string, postId: string) {
       linkedinAccountId,
     },
   });
+  afterManualPostPersisted(duplicate);
+  return duplicate;
 }
