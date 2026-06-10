@@ -16,6 +16,10 @@ import {
   encryptSecretArray,
   decryptSecretArray,
 } from "../services/secretCrypto";
+import {
+  SubscriptionAdminError,
+  updateAdminSubscription,
+} from "../services/subscriptionAdminService";
 const router = Router();
 
 // Every route requires a valid token AND a privileged role.
@@ -438,31 +442,111 @@ router.get("/plans", async (req, res) => {
   }
 });
 
+// Validate the plan feature-toggle / usage-limit fields. `partial` mode (PATCH)
+// only validates the keys that are present; create mode requires the core fields.
+function validatePlanFeatureFields(body: Record<string, any>, partial: boolean) {
+  const data: any = {};
+
+  const boolFields = ["fullDashboardUnlock", "imageGenerationEnabled"] as const;
+  const intFields = [
+    "maxRewritesPerPost",
+    "dailyPostLimit",
+    "dailyBatchGenerationLimit",
+    "dailyImageGenerationLimit",
+  ] as const;
+
+  for (const key of boolFields) {
+    if (body[key] === undefined) continue;
+    if (typeof body[key] !== "boolean") {
+      throw new Error(`${key} must be a boolean`);
+    }
+    data[key] = body[key];
+  }
+
+  for (const key of intFields) {
+    if (body[key] === undefined) continue;
+    const value =
+      typeof body[key] === "number" ? body[key] : Number(body[key]);
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${key} must be an integer >= 0`);
+    }
+    data[key] = value;
+  }
+
+  return data;
+}
+
 router.post("/plans", async (req, res) => {
   try {
     const regionId = getRegion(req);
-    const { name, code, price, currency, billingCycle } = req.body as {
-      name?: string;
-      code?: string;
-      price?: number;
-      currency?: string;
-      billingCycle?: string;
-    };
+    const body = req.body as Record<string, any>;
+    const { name, code, price, currency, billingCycle } = body;
 
-    if (!name || !code || price === undefined) {
-      return res.status(400).json({ message: "Missing name, code, or price" });
+    // Core required fields.
+    if (!name || typeof name !== "string") {
+      return res.status(400).json({ message: "name is required" });
     }
+    if (!code || typeof code !== "string") {
+      return res.status(400).json({ message: "code is required" });
+    }
+    const priceNum = price === undefined ? NaN : Number(price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
+      return res.status(400).json({ message: "price must be a number >= 0" });
+    }
+    if (!currency || typeof currency !== "string") {
+      return res.status(400).json({ message: "currency is required" });
+    }
+    if (!billingCycle || typeof billingCycle !== "string") {
+      return res.status(400).json({ message: "billingCycle is required" });
+    }
+
+    let featureData: any;
+    try {
+      featureData = validatePlanFeatureFields(body, false);
+    } catch (err: any) {
+      return res.status(400).json({ message: err.message });
+    }
+
+    const stripePriceId =
+      typeof body.stripePriceId === 'string' && body.stripePriceId.trim()
+        ? body.stripePriceId.trim()
+        : undefined;
 
     const plan = await prisma.plan.create({
       data: {
         name,
         code,
-        price: Number(price),
-        currency: currency || "USD",
-        billingCycle: billingCycle || "monthly",
+        price: priceNum,
+        currency,
+        billingCycle,
         regionId,
+        stripePriceId,
+        ...featureData,
       },
     });
+
+    if (body.syncStripe === true && !stripePriceId) {
+      try {
+        const { syncPlanToStripe } = await import('../services/billing/stripePlanService');
+        const newPriceId = await syncPlanToStripe({
+          regionId,
+          planId: plan.id,
+          name,
+          code,
+          price: priceNum,
+          currency,
+          billingCycle,
+        });
+        const synced = await prisma.plan.findUnique({ where: { id: plan.id } });
+        return res.status(201).json({ ...synced, stripePriceId: newPriceId });
+      } catch (stripeErr: any) {
+        return res.status(201).json({
+          ...plan,
+          stripeSyncWarning: stripeErr?.message || 'Stripe sync failed',
+        });
+      }
+    }
+
     return res.status(201).json(plan);
   } catch (error: any) {
     if (error?.code === "P2002") {
@@ -484,18 +568,91 @@ router.patch("/plans/:planId", async (req, res) => {
       return res.status(404).json({ message: "Plan not found in your region" });
     }
 
-    const { name, price, currency, billingCycle, isActive } =
-      req.body as Record<string, any>;
+    const body = req.body as Record<string, any>;
+    const { name, code, price, currency, billingCycle, isActive } = body;
     const data: any = {};
-    if (name !== undefined) data.name = name;
-    if (price !== undefined) data.price = Number(price);
-    if (currency !== undefined) data.currency = currency;
-    if (billingCycle !== undefined) data.billingCycle = billingCycle;
+
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ message: "name is required" });
+      }
+      data.name = name;
+    }
+    if (code !== undefined) {
+      if (typeof code !== "string" || !code.trim()) {
+        return res.status(400).json({ message: "code is required" });
+      }
+      data.code = code;
+    }
+    if (price !== undefined) {
+      const priceNum = Number(price);
+      if (!Number.isFinite(priceNum) || priceNum < 0) {
+        return res.status(400).json({ message: "price must be a number >= 0" });
+      }
+      data.price = priceNum;
+    }
+    if (currency !== undefined) {
+      if (typeof currency !== "string" || !currency.trim()) {
+        return res.status(400).json({ message: "currency is required" });
+      }
+      data.currency = currency;
+    }
+    if (billingCycle !== undefined) {
+      if (typeof billingCycle !== "string" || !billingCycle.trim()) {
+        return res.status(400).json({ message: "billingCycle is required" });
+      }
+      data.billingCycle = billingCycle;
+    }
     if (typeof isActive === "boolean") data.isActive = isActive;
+
+    let featureData: any;
+    try {
+      featureData = validatePlanFeatureFields(body, true);
+    } catch (err: any) {
+      return res.status(400).json({ message: err.message });
+    }
+    if (typeof body.stripePriceId === 'string' && body.stripePriceId.trim()) {
+      data.stripePriceId = body.stripePriceId.trim();
+    }
+
+    Object.assign(data, featureData);
+
+    const priceChanged =
+      data.price !== undefined &&
+      Number(data.price) !== existing.price;
+    const currencyChanged =
+      data.currency !== undefined &&
+      String(data.currency).toLowerCase() !== existing.currency.toLowerCase();
+
+    if (body.syncStripe === true && (priceChanged || currencyChanged) && !data.stripePriceId) {
+      try {
+        const { syncPlanToStripe } = await import('../services/billing/stripePlanService');
+        const newPriceId = await syncPlanToStripe({
+          regionId,
+          planId,
+          name: (data.name as string) ?? existing.name,
+          code: (data.code as string) ?? existing.code,
+          price: (data.price as number) ?? existing.price,
+          currency: (data.currency as string) ?? existing.currency,
+          billingCycle: (data.billingCycle as string) ?? existing.billingCycle,
+          previousStripePriceId: existing.stripePriceId,
+        });
+        data.stripePriceId = newPriceId;
+      } catch (stripeErr: any) {
+        return res.status(400).json({
+          message: stripeErr?.message || 'Stripe price sync failed',
+        });
+      }
+    }
 
     const plan = await prisma.plan.update({ where: { id: planId }, data });
     return res.json(plan);
   } catch (error: any) {
+    if (error?.code === "P2002") {
+      return res.status(400).json({
+        message: "A plan with this code already exists in your region",
+      });
+    }
     return res.status(400).json({ message: error.message });
   }
 });
@@ -532,6 +689,19 @@ router.delete("/plans/:planId", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Subscriptions (assign plans to clients)
 // ---------------------------------------------------------------------------
+
+router.post("/billing/reconcile", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { reconcileOpenSubscriptions } = await import(
+      "../services/billing/billingReconciliationService"
+    );
+    const results = await reconcileOpenSubscriptions(regionId);
+    return res.json({ results });
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
 
 router.get("/subscriptions", async (req, res) => {
   try {
@@ -607,38 +777,19 @@ router.patch("/subscriptions/:id", async (req, res) => {
   try {
     const regionId = getRegion(req);
     const { id } = req.params;
-    const { status, autoRenew, endsAt } = req.body as {
-      status?: string;
-      autoRenew?: boolean;
-      endsAt?: string;
-    };
 
-    const existing = await prisma.subscription.findUnique({
-      where: { id },
-      select: { regionId: true },
-    });
-    if (!existing || existing.regionId !== regionId) {
-      return res
-        .status(404)
-        .json({ message: "Subscription not found in your region" });
-    }
-
-    const data: any = {};
-    if (status !== undefined) data.status = status;
-    if (typeof autoRenew === "boolean") data.autoRenew = autoRenew;
-    if (endsAt !== undefined) data.endsAt = endsAt ? new Date(endsAt) : null;
-
-    const sub = await prisma.subscription.update({
-      where: { id },
-      data,
-      include: {
-        plan: true,
-        user: { select: { id: true, email: true, username: true } },
-      },
+    const sub = await updateAdminSubscription({
+      regionId,
+      subscriptionId: id,
+      body: req.body,
     });
     return res.json(sub);
-  } catch (error: any) {
-    return res.status(400).json({ message: error.message });
+  } catch (error: unknown) {
+    if (error instanceof SubscriptionAdminError) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    const message = error instanceof Error ? error.message : "Update failed";
+    return res.status(400).json({ message });
   }
 });
 

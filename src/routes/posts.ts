@@ -4,76 +4,31 @@ import { prisma } from '../prismaClient';
 import { postToLinkedInFromPostId } from '../services/linkedinService';
 import { canPublish } from '../services/entitlementService';
 import { ImageService } from '../services/imageService';
-import { ContentService } from '../services/contentService';
-import { decryptSecret, decryptSecretArray } from '../services/secretCrypto';
-import { finalizeGeneratedPostContent } from '../services/postContentFormatting';
+import {
+  getBotVoice,
+  getContentServiceForUser,
+  normalizeGeneratedContent,
+} from '../services/userContentContext';
+import {
+  PlanLimitError,
+  canPublishToLinkedIn,
+  canRewritePost,
+  canUseImageGeneration,
+  isImageGenerationAllowed,
+  recordImageGeneration,
+} from '../services/planEntitlementService';
+import { safeUpdateTopicHistoryStatus } from '../services/topicHistoryService';
 
 const router = Router();
 const imageService = new ImageService();
 
-async function getContentServiceForUser(userId: string) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
-  });
-
-  return new ContentService({
-    openaiApiKey: decryptSecret(user?.region?.openaiApiKey),
-    geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
-  });
-}
-
-async function getBotVoice(userId: string) {
-  const config = await prisma.botConfig.findUnique({
-    where: { userId },
-    select: {
-      tone: true,
-      description: true,
-      backgroundImageUrl: true,
-      customLinks: true,
-      contactInfo: true,
-      websiteUrl: true,
-      includeContactInfo: true,
-      includeWebsiteLink: true,
-    },
-  });
-
-  return {
-    tone: config?.tone || 'Professional',
-    description: config?.description || '',
-    backgroundImageUrl: config?.backgroundImageUrl || undefined,
-    customLinks: config?.customLinks || null,
-    contactInfo: config?.contactInfo || null,
-    websiteUrl: config?.websiteUrl || null,
-    includeContactInfo: config?.includeContactInfo ?? false,
-    includeWebsiteLink: config?.includeWebsiteLink ?? false,
-  };
-}
-
-interface NormalizeOptions {
-  topic?: string;
-  includeContactInfo?: boolean;
-  includeWebsiteLink?: boolean;
-  contactInfo?: string | null;
-  websiteUrl?: string | null;
-  description?: string | null;
-  customLinks?: string | null;
-}
-
-function normalizeGeneratedContent(
-  generatedContent: any,
-  fallbackContent: string,
-  options: NormalizeOptions = {},
-) {
-  return finalizeGeneratedPostContent(generatedContent, fallbackContent, {
-    topic: options.topic,
-    includeContactInfo: !!options.includeContactInfo,
-    includeWebsiteLink: !!options.includeWebsiteLink,
-    contactInfo: options.contactInfo,
-    websiteUrl: options.websiteUrl,
-    description: options.description,
-    customLinks: options.customLinks,
-  });
+// Map a PlanLimitError to the spec response shape; rethrow anything else.
+function sendIfPlanLimit(res: any, err: unknown): boolean {
+  if (err instanceof PlanLimitError) {
+    res.status(err.status).json({ error: err.message, code: err.code });
+    return true;
+  }
+  return false;
 }
 
 router.post('/', requireAuth, async (req, res) => {
@@ -91,6 +46,13 @@ router.post('/', requireAuth, async (req, res) => {
 
   let mediaUrl = null;
   if (backgroundImageUrl) {
+    // Image generation is an explicit, user-triggered action here -> enforce.
+    try {
+      await canUseImageGeneration(req.userId!);
+    } catch (err) {
+      if (sendIfPlanLimit(res, err)) return;
+      throw err;
+    }
     try {
       let imageContent;
       try {
@@ -104,6 +66,7 @@ router.post('/', requireAuth, async (req, res) => {
         backgroundImageUrl,
         imageContent
       );
+      await recordImageGeneration(req.userId!);
     } catch (e) {
       console.error('Failed to generate image:', e);
     }
@@ -129,16 +92,27 @@ router.post('/', requireAuth, async (req, res) => {
 router.post('/review/confirm', requireAuth, async (req, res) => {
   const postIds = Array.isArray(req.body?.postIds) ? req.body.postIds : undefined;
 
+  const where = {
+    userId: req.userId!,
+    status: 'REVIEW',
+    source: { in: ['AI', 'AI_TRENDING'] },
+    scheduledAt: { not: null },
+    ...(postIds ? { id: { in: postIds } } : {}),
+  };
+
+  const toConfirm = await prisma.post.findMany({
+    where,
+    select: { id: true },
+  });
+
   const result = await prisma.post.updateMany({
-    where: {
-      userId: req.userId!,
-      status: 'REVIEW',
-      source: { in: ['AI', 'AI_TRENDING'] },
-      scheduledAt: { not: null },
-      ...(postIds ? { id: { in: postIds } } : {}),
-    },
+    where,
     data: { status: 'QUEUED' },
   });
+
+  for (const p of toConfirm) {
+    await safeUpdateTopicHistoryStatus(p.id, 'SCHEDULED');
+  }
 
   res.json({ updated: result.count });
 });
@@ -191,7 +165,14 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
   if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
   if (post.status !== 'REVIEW') return res.status(400).json({ error: 'Only review posts can be rewritten' });
   if (!['AI', 'AI_TRENDING'].includes(post.source)) return res.status(400).json({ error: 'Only bot posts can be rewritten' });
-  if (post.rewriteCount >= 3) return res.status(400).json({ error: 'Rewrite limit reached for this post' });
+
+  // Per-plan rewrite limit (replaces the previous hardcoded cap of 3).
+  try {
+    await canRewritePost(req.userId!, post.id);
+  } catch (err) {
+    if (sendIfPlanLimit(res, err)) return;
+    throw err;
+  }
 
   const voice = await getBotVoice(req.userId!);
   const contentService = await getContentServiceForUser(req.userId!);
@@ -213,19 +194,25 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
     customLinks: voice.customLinks,
   });
 
+  // Image regeneration is secondary to the text rewrite. Only regenerate when
+  // the plan allows it and the user is under their daily image limit; otherwise
+  // keep the existing image so the text rewrite is never blocked.
   let mediaUrl = post.mediaUrl;
-  try {
-    mediaUrl = await imageService.createTopicImage(
-      normalized.headline,
-      voice.backgroundImageUrl,
-      {
-        headline: normalized.headline,
-        subheadline: normalized.subheadline,
-        bulletPoints: normalized.bulletPoints,
-      },
-    );
-  } catch (e) {
-    console.error('Rewrite image generation failed:', e);
+  if (await isImageGenerationAllowed(req.userId!)) {
+    try {
+      mediaUrl = await imageService.createTopicImage(
+        normalized.headline,
+        voice.backgroundImageUrl,
+        {
+          headline: normalized.headline,
+          subheadline: normalized.subheadline,
+          bulletPoints: normalized.bulletPoints,
+        },
+      );
+      await recordImageGeneration(req.userId!);
+    } catch (e) {
+      console.error('Rewrite image generation failed:', e);
+    }
   }
 
   const updated = await prisma.post.update({
@@ -255,6 +242,8 @@ router.post('/:id/confirm-schedule', requireAuth, async (req, res) => {
     data: { status: 'QUEUED' },
   });
 
+  await safeUpdateTopicHistoryStatus(post.id, 'SCHEDULED');
+
   res.json(updated);
 });
 
@@ -269,6 +258,8 @@ router.delete('/:id', requireAuth, async (req, res) => {
   if (post.status === 'PUBLISHED') {
     return res.status(400).json({ error: 'Cannot delete published posts' });
   }
+
+  await safeUpdateTopicHistoryStatus(post.id, 'REJECTED');
 
   await prisma.post.delete({
     where: { id: req.params.id }
@@ -290,6 +281,13 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
   const gate = await canPublish(req.userId!);
   if (!gate.allowed) {
     return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
+  }
+
+  try {
+    await canPublishToLinkedIn(req.userId!, 1);
+  } catch (err) {
+    if (sendIfPlanLimit(res, err)) return;
+    throw err;
   }
 
   try {

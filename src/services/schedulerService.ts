@@ -2,7 +2,9 @@ import cron from "node-cron";
 import { prisma } from "../prismaClient";
 import { postToLinkedInFromPostId } from "./linkedinService";
 import { fetchPostsFromSheet } from "./sheetsService";
+import { handleSheetSyncError, isGoogleInvalidGrantError } from "./sheetsSyncService";
 import { canPublish } from "./entitlementService";
+import { canPublishToLinkedIn } from "./planEntitlementService";
 
 import { TrendingBotService } from "./trendingBotService";
 
@@ -36,7 +38,7 @@ export function startScheduler() {
     }
 
     const configs = await prisma.sheetConfig.findMany({
-      where: { active: true },
+      where: { active: true, authStatus: { not: "REAUTH_REQUIRED" } },
     });
 
     for (const config of configs) {
@@ -103,8 +105,13 @@ export function startScheduler() {
             console.log("Imported post from sheet for user", config.userId);
           }
         }
-      } catch (err: any) {
-        console.error("Sheet sync failed for config", config.id, err?.message);
+      } catch (err: unknown) {
+        const outcome = await handleSheetSyncError(config.id, config.userId, err);
+        if (outcome === "reauth") {
+          console.warn("[sheets] sync disabled until reconnect", { configId: config.id, userId: config.userId });
+        } else if (!isGoogleInvalidGrantError(err)) {
+          console.error("Sheet sync failed for config", config.id, err instanceof Error ? err.message : err);
+        }
       }
     }
   });
@@ -130,6 +137,13 @@ export function startScheduler() {
 
       if (!gate.allowed) {
         console.log(`Skipping post ${post.id}: ${gate.reason}`);
+        continue;
+      }
+
+      try {
+        await canPublishToLinkedIn(post.userId, 1);
+      } catch (err: any) {
+        console.log(`Skipping post ${post.id}: ${err?.message || "Daily post limit reached"}`);
         continue;
       }
 

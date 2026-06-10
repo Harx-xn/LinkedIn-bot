@@ -11,6 +11,8 @@ import {
   parsePostingScheduleSafe,
   serializePostingSchedule,
 } from '../services/batchScheduleService';
+import { NicheExpansionService, normalizeNicheKey } from '../services/nicheExpansionService';
+import { decryptSecret } from '../services/secretCrypto';
 
 const router = Router();
 
@@ -38,7 +40,7 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
         : {
             userId: req.userId,
             niches: '[]',
-            sources: '[]',
+            sources: '["google"]',
             backgroundImageUrl: '',
             isEnabled: false,
             description: '', // ✅
@@ -172,6 +174,52 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
   } catch (error) {
     console.error('Error saving bot config:', error);
     res.status(500).json({ error: 'Failed to save config' });
+  }
+});
+
+router.get('/niches/expansions', requireAuth, async (req: Request, res: any) => {
+  try {
+    const plans = await prisma.userNicheSearchPlan.findMany({
+      where: { userId: req.userId! },
+      orderBy: { updatedAt: 'desc' },
+    });
+    res.json(
+      plans.map((p) => ({
+        niche: p.niche,
+        domain: p.domain,
+        confidence: p.confidence,
+        subtopics: p.subtopics,
+        queryCount: Array.isArray(p.queries) ? (p.queries as string[]).length : 0,
+        generatedAt: p.generatedAt.toISOString(),
+      })),
+    );
+  } catch (error) {
+    console.error('Error fetching niche expansions:', error);
+    res.status(500).json({ error: 'Failed to fetch niche expansions' });
+  }
+});
+
+router.post('/niches/:niche/refresh-expansion', requireAuth, async (req: Request, res: any) => {
+  try {
+    const niche = decodeURIComponent(req.params.niche);
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId! },
+      select: { region: { select: { openaiApiKey: true } } },
+    });
+    const service = new NicheExpansionService(decryptSecret(user?.region?.openaiApiKey));
+    const plan = await service.getOrCreatePlan(req.userId!, niche, true);
+    res.json({
+      niche: plan.niche,
+      domain: plan.domain,
+      confidence: plan.confidence,
+      subtopics: plan.subtopics,
+      queryCount: plan.queries.length,
+      generatedAt: (plan.generatedAt ?? new Date()).toISOString(),
+      normalizedKey: normalizeNicheKey(niche),
+    });
+  } catch (error) {
+    console.error('Error refreshing niche expansion:', error);
+    res.status(500).json({ error: 'Failed to refresh niche expansion' });
   }
 });
 

@@ -1,38 +1,54 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import type {
+  AuthorContext,
+  BatchPostPlan,
+  GeneratedPostContent,
+  ImageContent,
+  PostLayout,
+  QualityIssue,
+  TechnicalReviewIssue,
+  TechnicalReviewResult,
+  TrendCandidate,
+} from './generationTypes';
+import {
+  GHOSTWRITER_SYSTEM,
+  HASHTAG_RULES,
+  LANGUAGE_RULES,
+  SPECIFICITY_RULES,
+  VARIED_FORMAT_RULES,
+  buildAuthorBlock,
+  buildExpandSpecificityPrompt,
+  buildImageCopyPrompt,
+  buildImageRepairPrompt,
+  buildJsonRepairPrompt,
+  buildPlanBlock,
+  buildRepairPrompt,
+  buildTechnicalReviewPrompt,
+} from './ghostwriterPrompts';
+import {
+  GeneratedOutputParseError,
+  parseGeneratedJsonDetailed,
+} from './ghostwriterJsonParser';
+import {
+  batchPlanSchema,
+  GENERATED_POST_OPENAI_JSON_SCHEMA,
+  imageContentSchema,
+  technicalReviewSchema,
+} from './ghostwriterSchemas';
+import type { SpecificityResult } from './generationTypes';
+import { buildDeterministicBatchPlan } from './ghostwriterBatchPlanner';
+import { evaluateTopicCombination } from './ghostwriterQualityService';
 
 dotenv.config();
 
-// Shared prompt blocks so generate/mixed/rewrite stay consistent.
-const POST_FORMAT_RULES = `POST FORMAT:
-- Write in a Taplio-style LinkedIn format.
-- Use short, punchy single-line statements.
-- Each sentence or thought should usually be on its own line.
-- Use blank lines between idea blocks.
-- Avoid long paragraphs.
-- Avoid markdown bullets unless the content truly needs a short list.
-- Do not write dense explanation blocks.
-- Do not start with "In today's world" or generic intros.
-- Start with a sharp observation, tension, or contrarian insight.
-- Build with 5-10 short lines.
-- End with a direct question or memorable takeaway.
-- Do not use the "👉" emoji or forced "-" bullet lists.
-- Keep the post under 1200 characters unless the idea truly needs more.`;
-
-const HASHTAG_RULES = `HASHTAG RULES:
-- Generate 3-5 hashtags based specifically on the post content.
-- Hashtags must reflect the actual topic, industry, audience, and angle of the post.
-- Do not use the same default hashtags for every post.
-- Avoid generic hashtags unless truly relevant.
-- Do not include #LinkedIn unless the post is actually about LinkedIn.
-- Put hashtags in the JSON "hashtags" field only, not inside the body.
-- Use TitleCase hashtag formatting.`;
-
-const LANGUAGE_RULES = `LANGUAGE RULE:
-- Write the final post in English only.
-- Do not write in Arabic, Urdu, Hindi, Spanish, or any other language unless the user explicitly selected that language in configuration.
-- If the source content is in another language, translate the insight and write the post in English.`;
+const OPENAI_CONTENT_MODEL = process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini';
+const GEMINI_CONTENT_MODEL = process.env.GEMINI_CONTENT_MODEL || 'gemini-flash-latest';
+const OPENAI_PLAN_TEMPERATURE = Number(process.env.OPENAI_PLAN_TEMPERATURE ?? 0.3);
+const OPENAI_WRITE_TEMPERATURE = Number(process.env.OPENAI_WRITE_TEMPERATURE ?? 0.65);
+const OPENAI_REPAIR_TEMPERATURE = Number(process.env.OPENAI_REPAIR_TEMPERATURE ?? 0.25);
+const MAX_JSON_REPAIRS = 2;
 
 export class ContentService {
   private geminiKeys: string[] = [];
@@ -40,13 +56,11 @@ export class ContentService {
   private openai: OpenAI | null = null;
 
   constructor(keys?: { openaiApiKey?: string | null; geminiApiKeys?: string[] | null }) {
-    // Region-provided Gemini keys take priority; otherwise fall back to env.
     if (keys?.geminiApiKeys && keys.geminiApiKeys.length) {
       this.geminiKeys = keys.geminiApiKeys.filter(Boolean) as string[];
     } else {
       if (process.env.GEMINI_API_KEY) this.geminiKeys.push(process.env.GEMINI_API_KEY);
       if (process.env.GEMINI_API_KEY_2) this.geminiKeys.push(process.env.GEMINI_API_KEY_2);
-
       let i = 3;
       while (process.env[`GEMINI_API_KEY_${i}`]) {
         this.geminiKeys.push(process.env[`GEMINI_API_KEY_${i}`] as string);
@@ -54,35 +68,273 @@ export class ContentService {
       }
     }
 
-    // Region-provided OpenAI key takes priority; otherwise fall back to env.
     const openaiKey = keys?.openaiApiKey || process.env.OPENAI_API_KEY;
-    if (openaiKey) {
-      this.openai = new OpenAI({ apiKey: openaiKey });
-    }
+    if (openaiKey) this.openai = new OpenAI({ apiKey: openaiKey });
   }
 
   private getGeminiModel() {
     const key = this.geminiKeys[this.currentKeyIndex] || 'dummy_key';
     const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+    return genAI.getGenerativeModel({ model: GEMINI_CONTENT_MODEL });
   }
 
-  private async generateWithFallback(prompt: string, provider: 'GEMINI' | 'OPENAI'): Promise<string> {
+  private async generateWithFallback(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI',
+    temperature: number,
+  ): Promise<string> {
     try {
-      if (provider === 'GEMINI') {
-        return await this.generateGeminiPost(prompt);
-      } else {
-        return await this.generateOpensAiPost(prompt);
-      }
+      if (provider === 'GEMINI') return await this.generateGeminiPost(prompt, temperature);
+      return await this.generateOpensAiPost(prompt, temperature);
     } catch (error) {
-      console.warn(`Primary provider ${provider} failed, attempting fallback...`);
+      console.warn(`[ghostwriter] Primary provider ${provider} failed, attempting fallback`);
       if (provider === 'GEMINI' && this.openai) {
-        return await this.generateOpensAiPost(prompt);
-      } else if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
-        return await this.generateGeminiPost(prompt);
+        return await this.generateOpensAiPost(prompt, temperature);
+      }
+      if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
+        return await this.generateGeminiPost(prompt, temperature);
       }
       throw error;
     }
+  }
+
+  private logRejectedProviderOutput(
+    provider: 'GEMINI' | 'OPENAI',
+    result: Extract<ReturnType<typeof parseGeneratedJsonDetailed>, { ok: false }>,
+    raw: string,
+  ) {
+    console.warn('[ghostwriter] provider output rejected', {
+      provider,
+      stage: result.stage,
+      message: result.message,
+      issues: result.issues,
+      rawPreview: raw.slice(0, 240),
+    });
+  }
+
+  private toGeneratedPostContent(
+    parsed: Extract<ReturnType<typeof parseGeneratedJsonDetailed>, { ok: true }>['data'],
+  ): GeneratedPostContent {
+    return {
+      ...parsed,
+      bulletPoints: parsed.bulletPoints ?? [],
+      layout: parsed.layout as PostLayout | undefined,
+    };
+  }
+
+  async parseProviderOutput(
+    raw: string,
+    provider: 'GEMINI' | 'OPENAI',
+    repairContext: string,
+  ): Promise<{ content: GeneratedPostContent; jsonRepairAttempts: number }> {
+    let result = parseGeneratedJsonDetailed(raw);
+    if (result.ok) {
+      return { content: this.toGeneratedPostContent(result.data), jsonRepairAttempts: 0 };
+    }
+
+    this.logRejectedProviderOutput(provider, result, raw);
+    let jsonRepairAttempts = 0;
+    let lastFailure = result;
+
+    for (; jsonRepairAttempts < MAX_JSON_REPAIRS; jsonRepairAttempts++) {
+      const repairPrompt = buildJsonRepairPrompt({
+        repairContext,
+        stage: lastFailure.stage,
+        message: lastFailure.message,
+        issues: lastFailure.issues,
+        invalidOutput: raw,
+      });
+      const repairedRaw = await this.generateWithFallback(repairPrompt, provider, OPENAI_REPAIR_TEMPERATURE);
+      result = parseGeneratedJsonDetailed(repairedRaw);
+      if (result.ok) {
+        return { content: this.toGeneratedPostContent(result.data), jsonRepairAttempts: jsonRepairAttempts + 1 };
+      }
+      this.logRejectedProviderOutput(provider, result, repairedRaw);
+      lastFailure = result;
+      raw = repairedRaw;
+    }
+
+    throw new GeneratedOutputParseError(
+      lastFailure.stage,
+      lastFailure.message,
+      lastFailure.issues ?? [],
+    );
+  }
+
+  private async parseWithRepair(
+    raw: string,
+    provider: 'GEMINI' | 'OPENAI',
+    repairContext: string,
+  ): Promise<GeneratedPostContent> {
+    const { content } = await this.parseProviderOutput(raw, provider, repairContext);
+    return content;
+  }
+
+  async planBatch(
+    trends: TrendCandidate[],
+    author: AuthorContext,
+    count: number,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<BatchPostPlan[]> {
+    const deterministic = buildDeterministicBatchPlan(trends.slice(0, count), count);
+
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+
+Create a batch plan for ${count} LinkedIn posts.
+
+Available trends (inspiration only):
+${trends.slice(0, count + 3).map((t, i) => `${i}: ${t.topic}`).join('\n')}
+
+Rules:
+- Distribute angles: technical_mistake, practical_tutorial, architecture_tradeoff, defensible_opinion, debugging_story, product_lesson, reflection
+- No more than 2 question endings in ${count} posts
+- No hook style repeated more than twice
+- At least 2 takeaway endings
+- Do not repeat source topics unless necessary
+
+Output JSON array only:
+[
+  {
+    "trendIndex": 0,
+    "sourceTopic": "...",
+    "angle": "technical_mistake",
+    "hookStyle": "observation",
+    "endingStyle": "takeaway",
+    "layout": "problem_mechanism_fix",
+    "rationale": "..."
+  }
+]`;
+
+    try {
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE);
+      const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const json = JSON.parse(cleaned);
+      const validated = batchPlanSchema.safeParse(json);
+      if (validated.success && validated.data.length >= count) {
+        console.log('[ghostwriter] AI batch plan accepted', { count: validated.data.length });
+        return validated.data.slice(0, count) as BatchPostPlan[];
+      }
+      console.warn('[ghostwriter] AI batch plan invalid; using deterministic plan');
+    } catch (err) {
+      console.warn('[ghostwriter] AI batch plan failed; using deterministic plan', err);
+    }
+
+    return deterministic;
+  }
+
+  async generatePlannedPost(
+    plan: BatchPostPlan,
+    author: AuthorContext,
+    sourceLink = '',
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+    trend?: TrendCandidate | null,
+  ): Promise<GeneratedPostContent> {
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+${buildPlanBlock(plan, sourceLink, trend)}
+
+${SPECIFICITY_RULES}
+${VARIED_FORMAT_RULES}
+${HASHTAG_RULES}
+${LANGUAGE_RULES}
+
+Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic, angle, layout.`;
+
+    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const parsed = await this.parseWithRepair(raw, provider, prompt);
+    return {
+      ...parsed,
+      sourceTopic: plan.sourceTopic,
+      angle: plan.angle,
+      layout: plan.layout,
+    };
+  }
+
+  async expandSpecificity(
+    post: GeneratedPostContent,
+    specificity: SpecificityResult | undefined,
+    author: AuthorContext,
+    plan: BatchPostPlan,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<GeneratedPostContent> {
+    const prompt = buildExpandSpecificityPrompt(post, specificity, author, plan);
+    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
+
+  private async generateStructuredPost(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI',
+    temperature: number,
+  ): Promise<string> {
+    if (provider === 'OPENAI' && this.openai) {
+      try {
+        return await this.generateOpenAiStructuredPost(prompt, temperature);
+      } catch (err) {
+        console.warn('[ghostwriter] OpenAI structured output failed; falling back', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return this.generateWithFallback(prompt, provider, temperature);
+  }
+
+  hasProvider(provider: 'GEMINI' | 'OPENAI'): boolean {
+    if (provider === 'OPENAI') return !!this.openai;
+    return this.geminiKeys.length > 0;
+  }
+
+  async generateManualPost(
+    input: {
+      topic: string;
+      additionalInstructions?: string;
+      tone: string;
+      description: string;
+      niches?: string[];
+    },
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<GeneratedPostContent> {
+    const author: AuthorContext = {
+      description: input.description,
+      tone: input.tone,
+      niches: input.niches ?? [],
+    };
+
+    const extraInstructions = input.additionalInstructions?.trim()
+      ? `\nAdditional user instructions:\n${input.additionalInstructions.trim()}`
+      : '';
+
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+
+Write an original LinkedIn post for the manual composer based on this topic or instruction:
+${input.topic.trim()}
+${extraInstructions}
+
+Requirements:
+- Follow the configured author voice and expertise.
+- Use a strong but non-clickbait hook in the first lines.
+- Provide useful specificity and practical insight.
+- Do not invent statistics, customers, incidents, or personal experiences.
+- Avoid excessive one-line fragments and unnecessary emojis.
+- Avoid repetitive generic AI phrasing.
+- Keep the final formatted post within LinkedIn's 3,000-character limit.
+- Use hashtags only when they add value.
+
+${SPECIFICITY_RULES}
+${VARIED_FORMAT_RULES}
+${HASHTAG_RULES}
+${LANGUAGE_RULES}
+
+Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic.`;
+
+    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const parsed = await this.parseWithRepair(raw, provider, prompt);
+    return {
+      ...parsed,
+      sourceTopic: input.topic.trim(),
+    };
   }
 
   async generatePost(
@@ -90,188 +342,141 @@ export class ContentService {
     articleLink: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     tone: string = 'Professional',
-    description: string = ''
-  ): Promise<any> {
-    const personaBlock = description?.trim()
-      ? `
-ABOUT THE AUTHOR:
-${description.trim()}
-
-Use this to:
-- match the user's voice and perspective
-- tailor examples to the user's audience and industry
-- avoid claims the user wouldn't credibly make
-`
-      : '';
-
-    const prompt = `
-You are a professional content creator.
-${personaBlock}
-Write a thought-leadership post about: "${topic}"
-Reference: ${articleLink}
-
-TONE & STYLE:
-- Requested Tone: ${tone}
-- Professional, insightful, business-focused
-- Connect ideas to real business challenges
-- Avoid hype - be honest and pragmatic
-- Include specific, actionable insights
-
-${POST_FORMAT_RULES}
-
-${HASHTAG_RULES}
-
-${LANGUAGE_RULES}
-
-Output MUST be valid JSON:
-{
-  "headline": "Short internal headline, not necessarily shown (5-7 words)",
-  "subheadline": "Short internal supporting insight (max 10 words)",
-  "bulletPoints": ["First key insight", "Second key insight", "Third key insight"],
-  "body": "Line-by-line Taplio-style LinkedIn post text following the POST FORMAT rules above.",
-  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
-}
-
-The "bulletPoints" are only used internally to render an image; still keep them short.
-Do not include markdown code blocks. Just raw JSON.
-`;
-
-    let raw = await this.generateWithFallback(prompt, provider);
-    raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    try {
-      return JSON.parse(raw);
-    } catch (e) {
-      console.warn('Failed to parse JSON content, returning raw text as body');
-      return {
-        headline: topic,
-        subheadline: '',
-        bulletPoints: [],
-        body: raw,
-        hashtags: '',
-      };
-    }
-  }
-
-  private async generateGeminiPost(prompt: string, retryCount = 0): Promise<string> {
-    if (this.geminiKeys.length === 0) {
-      return `[MOCK] Gemini Post. (Set GEMINI_API_KEY)`;
-    }
-
-    try {
-      const model = this.getGeminiModel();
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      return response.text();
-    } catch (error: any) {
-      // Check for 429 Too Many Requests
-      if (error?.status === 429) {
-        // If we have more keys, try the next one immediately
-        if (this.geminiKeys.length > 1 && retryCount < this.geminiKeys.length) {
-          this.currentKeyIndex = (this.currentKeyIndex + 1) % this.geminiKeys.length;
-          console.warn(`Gemini 429 Rate Limit hit. Rotating to key ${this.currentKeyIndex + 1}...`);
-          return this.generateGeminiPost(prompt, retryCount + 1);
-        }
-
-        // If all keys failed or only one key, wait and retry
-        if (retryCount < 3) {
-          const waitTime = 30000;
-          console.warn(`All Gemini keys hit rate limits. Waiting ${waitTime / 1000}s before final retries...`);
-          await new Promise((r) => setTimeout(r, waitTime));
-          return this.generateGeminiPost(prompt, retryCount + 1);
-        }
-      }
-      console.error('Gemini Generation Error:', error);
-      throw error;
-    }
-  }
-
-  private async generateOpensAiPost(prompt: string): Promise<string> {
-    if (!this.openai) {
-      throw new Error('OPENAI_API_KEY not found');
-    }
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-      });
-      return response.choices[0].message.content || '';
-    } catch (error) {
-      console.error('OpenAI Generation Error:', error);
-      throw new Error('OpenAI generation failed');
-    }
+    description: string = '',
+    niches: string[] = [],
+  ): Promise<GeneratedPostContent> {
+    const author: AuthorContext = { description, tone, niches };
+    const plan: BatchPostPlan = {
+      trendIndex: 0,
+      sourceTopic: topic,
+      angle: 'product_lesson',
+      hookStyle: 'observation',
+      endingStyle: 'takeaway',
+      layout: 'short_observation',
+      rationale: 'Single-post generation fallback',
+    };
+    return this.generatePlannedPost(plan, author, articleLink, provider);
   }
 
   async generateMixedPost(
     trends: { topic: string; link: string }[],
-    provider: 'GEMINI' | 'OPENAI' = 'GEMINI',
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     tone: string = 'Professional',
-    description: string = ''
-  ): Promise<any> {
-    const topicsList = trends.map((t) => `"${t.topic}"`).join(' and ');
-    const references = trends.map((t) => `- ${t.topic}: ${t.link}`).join('\n');
+    description: string = '',
+    niches: string[] = [],
+  ): Promise<GeneratedPostContent> {
+    const author: AuthorContext = { description, tone, niches };
+    if (trends.length < 2) {
+      const t = trends[0];
+      return this.generatePost(t.topic, t.link, provider, tone, description, niches);
+    }
 
-    const personaBlock = description?.trim()
-      ? `
-ABOUT THE AUTHOR:
-${description.trim()}
+    const combine = evaluateTopicCombination(trends[0].topic, trends[1].topic, author);
+    if (!combine.canCombine) {
+      console.warn('[ghostwriter] Mixed topics rejected', { reason: combine.reason });
+      return this.generatePost(trends[0].topic, trends[0].link, provider, tone, description, niches);
+    }
 
-Use this to:
-- match the user's voice and perspective
-- tailor examples to the user's audience and industry
-- avoid claims the user wouldn't credibly make
-`
-      : '';
+    const plan: BatchPostPlan = {
+      trendIndex: null,
+      sourceTopic: `${trends[0].topic} + ${trends[1].topic}`,
+      angle: 'architecture_tradeoff',
+      hookStyle: 'comparison',
+      endingStyle: 'takeaway',
+      layout: 'comparison',
+      rationale: combine.connection ?? 'Related topics with defensible connection',
+    };
 
-    const prompt = `
-You are a professional content creator.
-${personaBlock}
-Write a strategic post that connects the following topics: ${topicsList}
+    const links = trends.map((t) => `- ${t.topic}: ${t.link}`).join('\n');
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+${buildPlanBlock(plan)}
+
+Only combine these topics because: ${combine.connection}
 References:
-${references}
+${links}
 
-The goal is to find the intersection, contrast, or synergy between these trends.
-
-TONE & STYLE:
-- Requested Tone: ${tone}
-- Professional, insightful, business-focused
-- Connect these trends to real business challenges
-- Avoid hype - be honest and pragmatic
-
-${POST_FORMAT_RULES}
-
+${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
-
 ${LANGUAGE_RULES}
 
-OUTPUT MUST BE VALID JSON:
-{
-  "headline": "Short internal headline combining topics (max 7 words)",
-  "subheadline": "Short internal supporting insight (max 10 words)",
-  "bulletPoints": ["Insight about topic 1", "Insight about topic 2", "Synthesis/Connection point"],
-  "body": "Line-by-line Taplio-style LinkedIn post connecting these topics, following the POST FORMAT rules above.",
-  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
-}
+Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
-The "bulletPoints" are only used internally to render an image; still keep them short.
-Do not include markdown code blocks. Just raw JSON.
-`;
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
 
-    let raw = await this.generateWithFallback(prompt, provider);
-    raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+  async repairPost(
+    post: GeneratedPostContent,
+    reasons: Array<string | QualityIssue | TechnicalReviewIssue>,
+    author: AuthorContext,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+    plan?: BatchPostPlan,
+  ): Promise<GeneratedPostContent> {
+    const prompt = buildRepairPrompt(post, reasons, author, plan);
+    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
 
+  async reviewTechnicalClaims(
+    post: GeneratedPostContent,
+    author: AuthorContext,
+    plan: BatchPostPlan,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<TechnicalReviewResult> {
+    const prompt = buildTechnicalReviewPrompt(post, author, plan);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
-      return JSON.parse(raw);
-    } catch (e) {
-      console.warn('Failed to parse JSON content for mixed post, returning raw text');
-      return {
-        headline: `${topicsList} Trends`,
-        subheadline: 'Strategic Analysis',
-        bulletPoints: [],
-        body: raw,
-        hashtags: '',
-      };
+      const parsed = technicalReviewSchema.safeParse(JSON.parse(cleaned));
+      if (parsed.success) {
+        const issues = parsed.data.issues as TechnicalReviewIssue[];
+        return {
+          passed: !issues.some((i) => i.severity === 'error'),
+          confidence: parsed.data.confidence,
+          issues,
+        };
+      }
+    } catch {
+      // fall through
     }
+
+    return { passed: true, confidence: 0.5, issues: [] };
+  }
+
+  async generateImageCopy(
+    approvedBody: string,
+    plan: BatchPostPlan,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<ImageContent | null> {
+    const prompt = buildImageCopyPrompt(approvedBody, plan);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    try {
+      const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
+      if (parsed.success) return parsed.data;
+    } catch {
+      // fall through
+    }
+    return null;
+  }
+
+  async repairImageCopy(
+    approvedBody: string,
+    image: ImageContent,
+    issues: QualityIssue[],
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<ImageContent | null> {
+    const prompt = buildImageRepairPrompt(approvedBody, image, issues);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+    try {
+      const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
+      if (parsed.success) return parsed.data;
+    } catch {
+      // fall through
+    }
+    return null;
   }
 
   async rewritePost(
@@ -279,64 +484,96 @@ Do not include markdown code blocks. Just raw JSON.
     suggestions: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     tone: string = 'Professional',
-    description: string = ''
-  ): Promise<any> {
-    const personaBlock = description?.trim()
-      ? `
-ABOUT THE AUTHOR:
-${description.trim()}
-`
-      : '';
+    description: string = '',
+  ): Promise<GeneratedPostContent> {
+    const author: AuthorContext = { description, tone };
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
 
-    const prompt = `
-You are rewriting a LinkedIn post for review.
-${personaBlock}
 CURRENT POST:
 ${currentContent}
 
 USER SUGGESTIONS:
-${suggestions || 'Improve clarity, hook, and flow while keeping the same topic.'}
-
-TONE: ${tone}
+${suggestions || 'Improve clarity, specificity, and technical accuracy while keeping the same topic.'}
 
 Rules:
-- Apply the user's suggestions directly.
-- Do not invent unverifiable facts.
-- Keep content-specific hashtags; regenerate them if they are generic or constant.
-- Preserve any existing "Learn more:" website line or "Contact:" line unless the user's suggestions say to remove them.
+- Apply suggestions directly.
+- Do not invent unverifiable facts or unsupported first-person claims.
+- Contact/website lines are controlled by app settings; do not add or preserve them unless suggestions explicitly ask.
 
-${POST_FORMAT_RULES}
-
+${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
-
 ${LANGUAGE_RULES}
 
-Output MUST be valid JSON:
-{
-  "headline": "Short internal headline",
-  "subheadline": "Short internal supporting insight",
-  "bulletPoints": ["First key insight", "Second key insight", "Third key insight"],
-  "body": "Rewritten line-by-line Taplio-style LinkedIn post following the POST FORMAT rules above.",
-  "hashtags": "#SpecificHashtag #AnotherRelevantTag #ThirdRelevantTag"
-}
+Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
-Do not include markdown code blocks. Just raw JSON.
-`;
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    return this.parseWithRepair(raw, provider, prompt);
+  }
 
-    let raw = await this.generateWithFallback(prompt, provider);
-    raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+  private async generateOpenAiStructuredPost(prompt: string, temperature: number): Promise<string> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_CONTENT_MODEL,
+      temperature,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'generated_post',
+          strict: true,
+          schema: GENERATED_POST_OPENAI_JSON_SCHEMA,
+        },
+      },
+      messages: [
+        { role: 'system', content: GHOSTWRITER_SYSTEM },
+        { role: 'user', content: prompt },
+      ],
+    });
+    return response.choices[0].message.content || '';
+  }
+
+  private async generateGeminiPost(prompt: string, temperature: number, retryCount = 0): Promise<string> {
+    if (this.geminiKeys.length === 0) {
+      return `[MOCK] Gemini Post. (Set GEMINI_API_KEY)`;
+    }
 
     try {
-      return JSON.parse(raw);
-    } catch {
-      return {
-        headline: 'Rewritten post',
-        subheadline: '',
-        bulletPoints: [],
-        body: raw,
-        hashtags: '',
-      };
+      const model = this.getGeminiModel();
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature,
+          responseMimeType: 'application/json',
+        },
+      });
+      const response = await result.response;
+      return response.text();
+    } catch (error: any) {
+      if (error?.status === 429) {
+        if (this.geminiKeys.length > 1 && retryCount < this.geminiKeys.length) {
+          this.currentKeyIndex = (this.currentKeyIndex + 1) % this.geminiKeys.length;
+          return this.generateGeminiPost(prompt, temperature, retryCount + 1);
+        }
+        if (retryCount < 3) {
+          await new Promise((r) => setTimeout(r, 30000));
+          return this.generateGeminiPost(prompt, temperature, retryCount + 1);
+        }
+      }
+      throw error;
     }
   }
 
+  private async generateOpensAiPost(prompt: string, temperature: number): Promise<string> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_CONTENT_MODEL,
+      temperature,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: GHOSTWRITER_SYSTEM },
+        { role: 'user', content: prompt },
+      ],
+    });
+    return response.choices[0].message.content || '';
+  }
 }

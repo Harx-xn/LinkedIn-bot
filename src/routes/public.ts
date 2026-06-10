@@ -42,6 +42,12 @@ router.get('/plans', async (req, res) => {
       price: true,
       currency: true,
       billingCycle: true,
+      fullDashboardUnlock: true,
+      maxRewritesPerPost: true,
+      dailyPostLimit: true,
+      dailyBatchGenerationLimit: true,
+      imageGenerationEnabled: true,
+      dailyImageGenerationLimit: true,
     },
     orderBy: {
       price: 'asc',

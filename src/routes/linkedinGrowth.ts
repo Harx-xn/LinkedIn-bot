@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { getLinkedInGrowthDashboard } from '../services/linkedinGrowthDashboardService';
 import { invalidateAnalyticsCache } from '../services/linkedinAnalyticsService';
+import { PlanLimitError, requireFullDashboardAccess } from '../services/planEntitlementService';
 
 const router = Router();
 
@@ -13,9 +14,14 @@ router.get('/dashboard', requireAuth, async (req, res) => {
   }
 
   try {
+    // Full dashboard gate (trial users + privileged roles still allowed).
+    await requireFullDashboardAccess(userId);
     const dashboard = await getLinkedInGrowthDashboard(userId);
     return res.json(dashboard);
   } catch (err) {
+    if (err instanceof PlanLimitError) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
     console.error('LinkedIn growth dashboard error:', err);
     return res.status(500).json({ error: 'Failed to load LinkedIn growth dashboard' });
   }
@@ -31,9 +37,13 @@ router.get('/summary', requireAuth, async (req, res) => {
   }
 
   try {
+    await requireFullDashboardAccess(userId);
     const dashboard = await getLinkedInGrowthDashboard(userId);
     return res.json(dashboard);
   } catch (err) {
+    if (err instanceof PlanLimitError) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
     console.error('LinkedIn growth dashboard error:', err);
     return res.status(500).json({ error: 'Failed to load LinkedIn growth dashboard' });
   }

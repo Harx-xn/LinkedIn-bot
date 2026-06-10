@@ -1,126 +1,85 @@
 import { Router, Request, Response } from 'express';
-import Stripe from 'stripe';
-import { prisma } from '../prismaClient';
 import { requireAuth } from '../middleware/auth';
-import { config } from '../config';
-import { decryptSecret } from '../services/secretCrypto';
-import { getBooleanSetting } from '../services/settingsService';
-import { findValidPromotion } from '../services/promotionService';
+import { BillingError, sanitizeExternalError } from '../services/billing/billingError';
+import {
+  createPaidCheckoutSession,
+  createTrialCheckoutSession,
+  getCheckoutStatus,
+} from '../services/billing/stripeCheckoutService';
 
 const router = Router();
 
-function getBillingInterval(billingCycle: string): 'day' | 'week' | 'month' | 'year' {
-  const normalized = billingCycle.toLowerCase();
-
-  if (normalized.includes('year')) return 'year';
-  if (normalized.includes('week')) return 'week';
-  if (normalized.includes('day')) return 'day';
-
-  return 'month';
+function handleBillingError(res: Response, err: unknown) {
+  if (err instanceof BillingError) {
+    return res.status(err.status).json({ code: err.code, message: err.message });
+  }
+  console.error('[payments]', sanitizeExternalError(err));
+  return res.status(500).json({ code: 'CHECKOUT_FAILED', message: 'Payment request failed' });
 }
 
-router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
-  const userId = (req as any).userId;
-  const { planId, promoCode, inviteCode } = req.body as { planId?: string; promoCode?: string; inviteCode?: string };
+router.post('/trial-checkout', requireAuth, async (req: Request, res: Response) => {
+  const { planId, promoCode, inviteCode } = req.body as {
+    planId?: string;
+    promoCode?: string;
+    inviteCode?: string;
+  };
 
   if (!planId) {
-    return res.status(400).json({ error: 'Missing planId' });
+    return res.status(400).json({ code: 'PLAN_NOT_FOUND', message: 'planId is required' });
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      email: true,
-      regionId: true,
-    },
-  });
+  try {
+    const userId = (req as any).userId;
+    const result = await createTrialCheckoutSession({
+      userId,
+      planId,
+      promoCode,
+      inviteCode,
+      mode: 'trial',
+    });
+    return res.json({ url: result.url, sessionId: result.sessionId });
+  } catch (err) {
+    return handleBillingError(res, err);
+  }
+});
 
-  if (!user || !user.regionId) {
-    return res.status(404).json({ error: 'User or region not found' });
+router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
+  const { planId, promoCode, inviteCode } = req.body as {
+    planId?: string;
+    promoCode?: string;
+    inviteCode?: string;
+  };
+
+  if (!planId) {
+    return res.status(400).json({ code: 'PLAN_NOT_FOUND', message: 'planId is required' });
   }
 
-  const plan = await prisma.plan.findFirst({
-    where: {
-      id: planId,
-      regionId: user.regionId,
-      isActive: true,
-    },
-  });
-
-  if (!plan) {
-    return res.status(404).json({ error: 'Plan not found' });
+  try {
+    const userId = (req as any).userId;
+    const result = await createPaidCheckoutSession({
+      userId,
+      planId,
+      promoCode,
+      inviteCode,
+      mode: 'paid',
+    });
+    return res.json({ url: result.url });
+  } catch (err) {
+    return handleBillingError(res, err);
   }
+});
 
-  const paymentConfig = await prisma.paymentConfig.findUnique({
-    where: { regionId: user.regionId },
-  });
-
-  const stripeSecretKey = decryptSecret(paymentConfig?.stripeSecretKey);
-
-  if (
-    !paymentConfig ||
-    paymentConfig.provider !== 'STRIPE' ||
-    !paymentConfig.isActive ||
-    !stripeSecretKey
-  ) {
-    return res.status(400).json({ error: 'Stripe is not configured for this region' });
+router.get('/checkout-status/:sessionId', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const result = await getCheckoutStatus({
+      userId,
+      sessionId: req.params.sessionId,
+    });
+    return res.json(result);
+  } catch (err) {
+    return handleBillingError(res, err);
   }
-
-  const stripe = new Stripe(stripeSecretKey);
-
-  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
-  const promo = promoCodesEnabled
-    ? await findValidPromotion(promoCode, { regionId: user.regionId, requireStripePromotionCode: true })
-    : null;
-
-  const unitAmount = Math.round(plan.price * 100);
-
-  const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
-    customer_email: user.email,
-    allow_promotion_codes: promo ? undefined : promoCodesEnabled,
-    success_url: `${config.frontendUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${config.frontendUrl}/billing/cancelled`,
-    line_items: [
-      {
-        price_data: {
-          currency: plan.currency.toLowerCase(),
-          product_data: {
-            name: plan.name,
-          },
-          unit_amount: unitAmount,
-          recurring: {
-            interval: getBillingInterval(plan.billingCycle),
-          },
-        },
-        quantity: 1,
-      },
-    ],
-    discounts: promo?.stripePromotionCodeId
-      ? [{ promotion_code: promo.stripePromotionCodeId }]
-      : undefined,
-    metadata: {
-      userId: user.id,
-      regionId: user.regionId,
-      planId: plan.id,
-      promoCode: promo?.code || promoCode || '',
-      promotionId: promo?.id || '',
-      inviteCode: inviteCode || '',
-    },
-    subscription_data: {
-      metadata: {
-        userId: user.id,
-        regionId: user.regionId,
-        planId: plan.id,
-        promoCode: promo?.code || promoCode || '',
-        promotionId: promo?.id || '',
-        inviteCode: inviteCode || '',
-      },
-    },
-  });
-
-  return res.json({ url: session.url });
 });
 
 export default router;

@@ -1,3 +1,5 @@
+import { normalizeLinkedInLineBody } from './linkedinLineFormatting';
+
 /**
  * Post content shaping helpers shared by the bot generation flow and the
  * rewrite flow. These run AFTER the AI returns JSON and BEFORE we save a post:
@@ -416,12 +418,11 @@ function sameSet(a: string[], b: string[]): boolean {
 function fallbackTags(text: string): string[] {
   const found: string[] = [];
   for (const [re, tag] of KEYWORD_TAGS) {
-    if (found.length >= 5) break;
+    if (found.length >= 2) break;
     if (re.test(text) && !found.some((t) => tagKey(t) === tagKey(tag))) {
-      found.push(tag);
+      if (!GENERIC_ONLY_TAGS.has(tagKey(tag))) found.push(tag);
     }
   }
-  if (found.length === 0) return ['#Growth', '#Innovation', '#Strategy'];
   return found;
 }
 
@@ -432,67 +433,36 @@ function isStaleOrGenericOnly(tags: string[]): boolean {
   return false;
 }
 
-// Produce 3-5 clean hashtags. Preserves valid AI tags; fallback only when needed.
+// Produce 0-3 specific hashtags. No forced minimum; empty string is valid.
 export function normalizeHashtags(hashtags: string, body: string, topic?: string): string {
   const context = `${topic || ''} ${body || ''}`;
-  let tags = dedupeTags(parseHashtagTokens(hashtags));
+  let tags = dedupeTags(parseHashtagTokens(hashtags)).filter(
+    (t) => !GENERIC_ONLY_TAGS.has(tagKey(t)),
+  );
 
   if (isStaleOrGenericOnly(tags)) {
-    console.warn('[content-formatting] Replaced stale/generic hashtags');
-    tags = fallbackTags(context);
-  } else if (tags.length < 3) {
-    for (const t of fallbackTags(context)) {
-      if (tags.length >= 3) break;
-      if (!tags.some((x) => tagKey(x) === tagKey(t))) tags.push(t);
-    }
+    console.warn('[content-formatting] Dropped stale/generic hashtags');
+    tags = [];
   }
 
-  return dedupeTags(tags).slice(0, 5).join(' ');
+  if (tags.length === 0) {
+    tags = fallbackTags(context).slice(0, 2);
+  }
+
+  return dedupeTags(tags)
+    .filter((t) => !GENERIC_ONLY_TAGS.has(tagKey(t)))
+    .slice(0, 3)
+    .join(' ');
 }
 
 // ---------------------------------------------------------------------------
 // Taplio-style body normalization
 // ---------------------------------------------------------------------------
 
-const MAX_LINE_LENGTH = 140;
-
 export function normalizeTaplioStyleBody(body: string): string {
   if (!body) return '';
-
-  const normalized = stripRawJsonIfNeeded(body).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-
-  const cleanedLines = normalized.split('\n').map((rawLine) => {
-    let line = rawLine.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+$/, '');
-    // Drop forced markdown bullets and leading pointer emoji.
-    line = line.replace(/^\s*[-*•]\s+/, '');
-    line = line.replace(/^\s*👉\s*/, '');
-    return line;
-  });
-
-  // Split overly long lines on sentence boundaries to keep it punchy.
-  const wrapped: string[] = [];
-  for (const line of cleanedLines) {
-    if (line.length <= MAX_LINE_LENGTH) {
-      wrapped.push(line);
-      continue;
-    }
-    const sentences = line.split(/(?<=[.!?])\s+/);
-    let buffer = '';
-    for (const sentence of sentences) {
-      if (!buffer) {
-        buffer = sentence;
-      } else if ((buffer + ' ' + sentence).length <= MAX_LINE_LENGTH) {
-        buffer += ' ' + sentence;
-      } else {
-        wrapped.push(buffer);
-        buffer = sentence;
-      }
-    }
-    if (buffer) wrapped.push(buffer);
-  }
-
-  // Collapse 3+ blank lines into at most 2.
-  return wrapped.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const normalized = stripRawJsonIfNeeded(body);
+  return normalizeLinkedInLineBody(normalized);
 }
 
 // ---------------------------------------------------------------------------

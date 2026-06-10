@@ -3,9 +3,9 @@ import { prisma } from '../prismaClient';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
-import { TRIAL_DAYS } from '../services/entitlementService';
-import { getNumberSetting, getBooleanSetting } from '../services/settingsService';
-import { findValidPromotion, recordPromotionRedemption } from '../services/promotionService';
+import { BillingAccessStatus } from '@prisma/client';
+import { getBooleanSetting } from '../services/settingsService';
+import { findValidPromotion } from '../services/promotionService';
 import { findValidInvite, redeemInvite } from '../services/inviteService';
 
 const router = Router();
@@ -88,7 +88,12 @@ router.post('/register', async (req, res) => {
   }
 
   const effectivePromoCode = promoCode || invite?.promoCode || undefined;
-  const promo = await findValidPromotion(effectivePromoCode, { regionId: region.id });
+  if (effectivePromoCode) {
+    const promo = await findValidPromotion(effectivePromoCode, { regionId: region.id });
+    if (!promo) {
+      return res.status(400).json({ error: 'Promotion code is not valid' });
+    }
+  }
 
   // Check email uniqueness
   const existingEmail = await prisma.user.findUnique({ where: { email } });
@@ -105,14 +110,6 @@ router.post('/register', async (req, res) => {
   try {
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Start a configurable free trial (no card). Enforcement lives in entitlementService.
-    const trialDays = await getNumberSetting('trial.days', region.id, TRIAL_DAYS);
-    const extraTrialDays = promo?.type === 'INTERNAL_TRIAL' ? promo.extraTrialDays || 0 : 0;
-    const trialStartedAt = new Date();
-    const trialEndsAt = new Date(
-      trialStartedAt.getTime() + (trialDays + extraTrialDays) * 24 * 60 * 60 * 1000
-    );
-
     const user = await prisma.user.create({
       data: {
         email,
@@ -120,8 +117,7 @@ router.post('/register', async (req, res) => {
         passwordHash,
         regionId: region.id,
         role: invite?.roleToAssign || undefined,
-        trialStartedAt,
-        trialEndsAt,
+        billingAccessStatus: BillingAccessStatus.BILLING_REQUIRED,
       },
       select: {
         id: true,
@@ -143,14 +139,6 @@ router.post('/register', async (req, res) => {
 
     if (invite) {
       await redeemInvite(invite.id, user.id);
-    }
-
-    if (promo) {
-      await recordPromotionRedemption({
-        promotionId: promo.id,
-        userId: user.id,
-        regionId: region.id,
-      });
     }
 
     const token = jwt.sign({ userId: user.id }, config.jwtSecret, signOptions);

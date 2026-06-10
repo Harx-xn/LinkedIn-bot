@@ -12,6 +12,12 @@ import {
   deleteManualPost,
   duplicateManualPost,
 } from '../services/manualPostService';
+import { PlanLimitError } from '../services/planEntitlementService';
+import {
+  generateManualPostContent,
+  rewriteSavedManualPost,
+  rewriteUnsavedManualContent,
+} from '../services/manualPostAiService';
 
 const router = Router();
 
@@ -28,6 +34,10 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
     try {
       await fn(req, res);
     } catch (err) {
+      if (err instanceof PlanLimitError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
+        return;
+      }
       if (err instanceof ManualPostError) {
         const body: Record<string, unknown> = { error: err.message };
         if (err.details !== undefined) body.entitlement = err.details;
@@ -39,6 +49,28 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
     }
   };
 }
+
+// AI: generate post content without saving.
+router.post(
+  '/generate',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const result = await generateManualPostContent(userId, req.body || {});
+    res.json(result);
+  }),
+);
+
+// AI: rewrite unsaved generated/edited content.
+router.post(
+  '/rewrite',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const result = await rewriteUnsavedManualContent(userId, req.body || {});
+    res.json(result);
+  }),
+);
 
 // 1. Create a manual draft.
 router.post(
@@ -82,6 +114,17 @@ router.get(
     const { status, from, to } = req.query as { status?: string; from?: string; to?: string };
     const posts = await listManualPosts(userId, { status, from, to });
     res.json(posts);
+  }),
+);
+
+// AI: rewrite a saved manual draft or scheduled post.
+router.post(
+  '/:postId/rewrite',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const post = await rewriteSavedManualPost(userId, req.params.postId, req.body || {});
+    res.json(post);
   }),
 );
 

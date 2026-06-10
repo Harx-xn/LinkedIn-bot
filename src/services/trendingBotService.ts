@@ -1,9 +1,8 @@
-import { TrendsService, Trend } from "./trendsService";
+import { TrendsService, Trend, parseTrendSources } from "./trendsService";
 import { ContentService } from "./contentService";
 import { ImageService } from "./imageService";
 import { prisma } from "../prismaClient";
 import { decryptSecret, decryptSecretArray } from "./secretCrypto";
-import { finalizeGeneratedPostContent } from "./postContentFormatting";
 import {
   buildBatchScheduleSlots,
   calculateBatchSlotCount,
@@ -11,6 +10,30 @@ import {
   validateScheduleForGeneration,
   BatchScheduleError,
 } from "./batchScheduleService";
+import {
+  isImageGenerationAllowed,
+  recordImageGeneration,
+} from "./planEntitlementService";
+import {
+  generateSlotPostUntilSuccess,
+  planBatchForGeneration,
+  prepareBatchContextV2,
+  type GhostwriterBotConfig,
+} from "./ghostwriterPipeline";
+import { evaluateTopicCombination } from "./ghostwriterQualityService";
+import { buildDeterministicBatchPlan } from "./ghostwriterBatchPlanner";
+import type { PreviewTrendsResponse, TopicFingerprint, TrendCandidate } from "./generationTypes";
+import {
+  rankedToLegacyTrends,
+  rankedToPreviewItems,
+  TrendOrchestrationService,
+} from "./trendOrchestrationService";
+import {
+  buildTrendConfigHash,
+  saveTrendPreviewPool,
+} from "./trendPreviewPoolStore";
+import { createGeneratedTopicHistory, loadRecentTopicHistory } from "./topicHistoryService";
+import { fingerprintFromBody } from "./topicFingerprintService";
 
 export class TrendingBotService {
   private trendsService: TrendsService;
@@ -83,9 +106,7 @@ export class TrendingBotService {
       for (const niche of niches) {
         console.log(`--- Processing Niche: ${niche} ---`);
         try {
-          const sources = config.sources
-            ? JSON.parse(config.sources)
-            : ["google"];
+          const sources = parseTrendSources(config.sources);
           let customRssFeeds: string[] = [];
           try {
             customRssFeeds = config.customRssFeeds
@@ -117,87 +138,127 @@ export class TrendingBotService {
             continue;
           }
 
-          let selectedTrend: Trend | null = null;
-          for (const trend of trends) {
-            const exists = await prisma.post.findFirst({
-              where: {
-                userId: config.userId,
-                content: { contains: trend.title },
-              },
-            });
+          const botConfig: GhostwriterBotConfig = {
+            tone: config.tone,
+            description: config.description,
+            niches: [niche],
+            backgroundImageUrl: config.backgroundImageUrl,
+            customLinks: config.customLinks,
+            contactInfo: config.contactInfo,
+            websiteUrl: config.websiteUrl,
+            includeContactInfo: config.includeContactInfo,
+            includeWebsiteLink: config.includeWebsiteLink,
+          };
 
-            if (!exists) {
-              selectedTrend = trend;
-              break;
-            }
-          }
+          const author = {
+            description: config.description || '',
+            tone: config.tone || 'Professional',
+            niches: [niche],
+          };
+
+          const openaiKey = decryptSecret(
+            (await prisma.user.findUnique({
+              where: { id: config.userId },
+              select: { region: { select: { openaiApiKey: true } } },
+            }))?.region?.openaiApiKey,
+          );
+          const orchestrator = new TrendOrchestrationService(openaiKey);
+          const pool = await orchestrator.buildTrendPoolForBatch({
+            userId: config.userId,
+            niches: [niche],
+            author,
+            sources,
+            customFeeds: customRssFeeds,
+            customLinks,
+            customRedditFeeds,
+            slotCount: 1,
+          });
+          const selectedRanked = pool.ranked[0];
+          const selectedTrend: Trend | null = selectedRanked
+            ? {
+                title: selectedRanked.trend.topic,
+                link: selectedRanked.trend.link ?? '',
+                pubDate: String(selectedRanked.trend.publishedAt ?? ''),
+                source: selectedRanked.trend.source ?? '',
+                niche,
+              }
+            : null;
 
           if (!selectedTrend) {
-            console.log(
-              `All top trends for ${niche} are already posted. Skipping.`,
-            );
+            console.log(`No eligible trends for ${niche}. Skipping.`);
             continue;
           }
 
-          console.log(
-            `Selected Trend: ${selectedTrend.title} (${selectedTrend.source})`,
-          );
-
-          // ✅ FORCE OPENAI
           const provider: "OPENAI" = "OPENAI";
+          const plan = buildDeterministicBatchPlan(
+            [{ topic: selectedTrend.title, link: selectedTrend.link, source: selectedTrend.source, fingerprint: selectedRanked?.fingerprint }],
+            1,
+          )[0];
+          if (selectedRanked?.fingerprint) {
+            plan.topicCluster = selectedRanked.fingerprint.topicCluster;
+            plan.normalizedTopic = selectedRanked.fingerprint.normalizedTopic;
+            plan.coreClaim = selectedRanked.fingerprint.coreClaim;
+            plan.mechanismFocus = selectedRanked.fingerprint.mechanisms;
+          }
 
-          const generatedContent = await contentService.generatePost(
-            selectedTrend.title,
-            selectedTrend.link,
+          const history = await loadRecentTopicHistory(config.userId);
+          const result = await generateSlotPostUntilSuccess(
+            contentService,
+            plan,
+            { topic: selectedTrend.title, link: selectedTrend.link, source: selectedTrend.source, fingerprint: selectedRanked?.fingerprint },
+            author,
+            botConfig,
+            [],
             provider,
-            config.tone || "Professional",
-            config.description || "",
+            { batchFingerprints: [], recentTopicHistory: history },
           );
-
-          const finalized = finalizeGeneratedPostContent(
-            generatedContent,
-            selectedTrend.title,
-            {
-              topic: selectedTrend.title,
-              includeContactInfo: config.includeContactInfo,
-              includeWebsiteLink: config.includeWebsiteLink,
-              contactInfo: config.contactInfo,
-              websiteUrl: config.websiteUrl,
-              description: config.description,
-              customLinks: config.customLinks,
-            },
-          );
-
-          const imagePath = await this.imageService.createTopicImage(
-            finalized.headline,
-            config.backgroundImageUrl || undefined,
-            {
-              headline: finalized.headline,
-              subheadline: finalized.subheadline,
-              bulletPoints: finalized.bulletPoints,
-            },
-          );
-
-          const finalContent = finalized.content;
 
           if (dryRun) {
-            console.log(
-              `[DRY RUN] Generated for ${config.userId}:\n${finalContent}`,
-            );
-          } else {
-            await prisma.post.create({
-              data: {
-                userId: config.userId,
-                regionId,
-                content: finalContent,
-                source: "AI_TRENDING",
-                status: "REVIEW",
-                hashtags: finalized.hashtags,
-                mediaUrl: imagePath,
-              },
-            });
-            console.log(`Draft created for user ${config.userId}`);
+            console.log(`[DRY RUN] Generated for ${config.userId}:\n${result.finalized.content}`);
+            continue;
           }
+
+          let imagePath: string | null = null;
+          if (await isImageGenerationAllowed(config.userId) && result.imageContent?.mode !== 'none') {
+            try {
+              const imagePayload = result.imageContent ?? null;
+              imagePath = await this.imageService.createTopicImage(
+                imagePayload?.headline ?? result.finalized.headline,
+                config.backgroundImageUrl || undefined,
+                {
+                  headline: imagePayload?.headline ?? result.finalized.headline,
+                  subheadline: imagePayload?.supportingText,
+                  bulletPoints: (imagePayload?.bulletPoints ?? []).slice(0, 3),
+                  mode: imagePayload?.mode ?? 'single_insight',
+                },
+              );
+              await recordImageGeneration(config.userId);
+            } catch (e) {
+              console.error("Image generation failed:", e);
+            }
+          }
+
+          const created = await prisma.post.create({
+            data: {
+              userId: config.userId,
+              regionId,
+              content: result.finalized.content,
+              source: "AI_TRENDING",
+              status: "REVIEW",
+              hashtags: result.finalized.hashtags,
+              mediaUrl: imagePath,
+            },
+          });
+          const fp = selectedRanked?.fingerprint
+            ?? fingerprintFromBody(result.finalized.body, selectedTrend.title, plan.angle);
+          await createGeneratedTopicHistory({
+            userId: config.userId,
+            postId: created.id,
+            sourceTitle: selectedTrend.title,
+            fingerprint: fp,
+            angle: plan.angle,
+          });
+          console.log(`Draft created for user ${config.userId}`);
         } catch (error) {
           console.error(`Error processing niche ${niche}:`, error);
         }
@@ -205,7 +266,12 @@ export class TrendingBotService {
     }
   }
 
-  async generateNow(userId: string, daysWindow: number, jobId?: string) {
+  async generateNow(
+    userId: string,
+    daysWindow: number,
+    jobId?: string,
+    options?: { previewId?: string },
+  ) {
     const config = await prisma.botConfig.findUnique({ where: { userId } });
     if (!config || !config.isEnabled) return;
 
@@ -222,7 +288,7 @@ export class TrendingBotService {
       niches = ["Technology"];
     }
 
-    const sources = config.sources ? JSON.parse(config.sources) : ["google"];
+    const sources = parseTrendSources(config.sources);
     let customRssFeeds: string[] = [];
     try {
       customRssFeeds = config.customRssFeeds
@@ -265,129 +331,113 @@ export class TrendingBotService {
         data: { totalSlots: slots.length, completedSlots: 0 },
       });
     }
-    const nicheTrendsMap: Record<string, Trend[]> = {};
-    const totalNeeded = slots.length;
-    const buffer = Math.max(5, Math.ceil(totalNeeded * 0.3));
-    const perNicheNeeded = Math.max(
-      5,
-      Math.ceil((totalNeeded + buffer) / Math.max(1, niches.length)),
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { region: { select: { openaiApiKey: true } } },
+    });
+    const openaiKey = decryptSecret(user?.region?.openaiApiKey);
+
+    const botConfig: GhostwriterBotConfig = {
+      tone: config.tone,
+      description: config.description,
+      niches,
+      backgroundImageUrl: config.backgroundImageUrl,
+      customLinks: config.customLinks,
+      contactInfo: config.contactInfo,
+      websiteUrl: config.websiteUrl,
+      includeContactInfo: config.includeContactInfo,
+      includeWebsiteLink: config.includeWebsiteLink,
+    };
+
+    const configHash = buildTrendConfigHash({
+      niches,
+      sources,
+      customFeeds: customRssFeeds,
+      customLinks,
+      customRedditFeeds,
+    });
+
+    const { author, eligible, ranked } = await prepareBatchContextV2({
+      userId,
+      niches,
+      config: botConfig,
+      slotCount: slots.length,
+      sources,
+      customFeeds: customRssFeeds,
+      customLinks,
+      customRedditFeeds,
+      openaiApiKey: openaiKey,
+      previewId: options?.previewId,
+      configHash,
+    });
+
+    const provider: "OPENAI" = "OPENAI";
+    const batchPlan = await planBatchForGeneration(
+      contentService,
+      eligible,
+      author,
+      slots.length,
+      provider,
+      ranked,
     );
 
-    for (const niche of niches) {
-      try {
-        nicheTrendsMap[niche] = await this.trendsService.fetchTrends(
-          niche,
-          sources,
-          customRssFeeds,
-          customLinks,
-          customRedditFeeds,
-          perNicheNeeded,
-        );
-        await new Promise((r) => setTimeout(r, 1000));
-      } catch (e) {
-        nicheTrendsMap[niche] = [];
-      }
-    }
-
-    let slotIndex = 0;
-    let nicheIndex = 0;
+    const acceptedBodies: string[] = [];
+    const batchFingerprints: TopicFingerprint[] = [];
+    const history = await loadRecentTopicHistory(userId);
     let postsCreated = 0;
 
-    while (slotIndex < slots.length) {
+    for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
       const currentSlot = slots[slotIndex];
+      const plan = batchPlan[slotIndex];
+      const trend: TrendCandidate | null = eligible[slotIndex] ?? null;
+
       const shouldMix = niches.length > 1 && (slotIndex + 1) % 4 === 0;
-      let success = false;
-
-      if (shouldMix) {
-        const availableNiches = niches.filter(
-          (n) => nicheTrendsMap[n].length > 0,
-        );
-        if (availableNiches.length >= 2) {
-          const n1 = availableNiches[0];
-          const n2 = availableNiches[1];
-          const t1 = nicheTrendsMap[n1].shift();
-          const t2 = nicheTrendsMap[n2].shift();
-
-          if (t1 && t2) {
-            try {
-              // ✅ FORCE OPENAI
-              const provider: "OPENAI" = "OPENAI";
-
-              const generatedContent =
-                await contentService.generateMixedPost(
-                  [
-                    { topic: t1.title, link: t1.link },
-                    { topic: t2.title, link: t2.link },
-                  ],
-                  provider,
-                  config.tone || "Professional",
-                  config.description || "",
-                );
-
-              await this.createPostInDb(
-                userId,
-                generatedContent,
-                currentSlot,
-                [t1.title, t2.title].join(" + "),
-                config,
-              );
-              success = true;
-            } catch (e) {
-              console.error("Mixed post generation failed", e);
-            }
-          }
+      if (shouldMix && eligible.length >= 2) {
+        const t1 = eligible[slotIndex];
+        const t2 = eligible[(slotIndex + 1) % eligible.length];
+        const combine = evaluateTopicCombination(t1.topic, t2.topic, author);
+        if (!combine.canCombine) {
+          console.warn('[ghostwriter] skipping weak mixed slot', { reason: combine.reason });
         }
       }
 
-      if (!success) {
-        let attempts = 0;
-        while (attempts < niches.length) {
-          const niche = niches[nicheIndex % niches.length];
-          nicheIndex++;
-          attempts++;
+      const result = await generateSlotPostUntilSuccess(
+        contentService,
+        plan,
+        trend,
+        author,
+        botConfig,
+        acceptedBodies,
+        provider,
+        { batchFingerprints, recentTopicHistory: history },
+      );
 
-          if (nicheTrendsMap[niche] && nicheTrendsMap[niche].length > 0) {
-            const trend = nicheTrendsMap[niche].shift();
-            if (!trend) continue;
-
-            try {
-              // ✅ FORCE OPENAI
-              const provider: "OPENAI" = "OPENAI";
-
-              const generatedContent = await contentService.generatePost(
-                trend.title,
-                trend.link,
-                provider,
-                config.tone || "Professional",
-                config.description || "",
-              );
-
-              await this.createPostInDb(
-                userId,
-                generatedContent,
-                currentSlot,
-                trend.title,
-                config,
-              );
-              success = true;
-              break;
-            } catch (e) {
-              console.error(`Post generation failed for ${niche}`, e);
-            }
-          }
-        }
-      }
-
-      if (success) {
-        postsCreated++;
-      } else {
-        console.log(
-          `Could not fill slot ${slotIndex + 1}. No trends or AI failure.`,
-        );
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-
-      slotIndex++;
+      await this.saveReviewPost(
+        userId,
+        result.finalized,
+        result.imageContent,
+        currentSlot,
+        botConfig,
+        {
+          batchId: jobId,
+          sourceTitle: trend?.topic ?? plan.sourceTopic ?? undefined,
+          fingerprint: trend?.fingerprint
+            ?? (plan.normalizedTopic
+              ? {
+                  normalizedTopic: plan.normalizedTopic,
+                  topicCluster: plan.topicCluster ?? 'other',
+                  coreClaim: plan.coreClaim ?? plan.normalizedTopic,
+                  entities: [],
+                  mechanisms: plan.mechanismFocus ?? [],
+                }
+              : fingerprintFromBody(result.finalized.body, trend?.topic, plan.angle)),
+          angle: plan.angle,
+        },
+      );
+      acceptedBodies.push(result.finalized.body);
+      const postFp = fingerprintFromBody(result.finalized.body, trend?.topic ?? plan.sourceTopic ?? undefined, plan.angle);
+      batchFingerprints.push(postFp);
+      postsCreated++;
 
       if (jobId) {
         await prisma.botGenerationJob.update({
@@ -400,44 +450,43 @@ export class TrendingBotService {
     console.log(`Batch complete. Created ${postsCreated} posts.`);
   }
 
-  private async createPostInDb(
+  private async saveReviewPost(
     userId: string,
-    generatedContent: any,
+    finalized: {
+      content: string;
+      hashtags: string;
+      headline: string;
+      subheadline: string;
+      bulletPoints: string[];
+      body: string;
+    },
+    imageContent: { mode: string; headline: string; supportingText?: string; bulletPoints?: string[] } | null,
     scheduledAt: Date,
-    sourceTitle: string,
-    config: {
-      backgroundImageUrl?: string | null;
-      description?: string | null;
-      customLinks?: string | null;
-      contactInfo?: string | null;
-      websiteUrl?: string | null;
-      includeContactInfo?: boolean;
-      includeWebsiteLink?: boolean;
+    config: GhostwriterBotConfig,
+    topicMeta?: {
+      batchId?: string;
+      sourceTitle?: string;
+      fingerprint: TopicFingerprint;
+      angle?: import('./generationTypes').PostAngle;
     },
   ) {
-    const finalized = finalizeGeneratedPostContent(generatedContent, sourceTitle, {
-      topic: sourceTitle,
-      includeContactInfo: !!config.includeContactInfo,
-      includeWebsiteLink: !!config.includeWebsiteLink,
-      contactInfo: config.contactInfo,
-      websiteUrl: config.websiteUrl,
-      description: config.description,
-      customLinks: config.customLinks,
-    });
-
     let mediaUrl: string | null = null;
-    try {
-      mediaUrl = await this.imageService.createTopicImage(
-        finalized.headline,
-        config.backgroundImageUrl ?? undefined,
-        {
-          headline: finalized.headline,
-          subheadline: finalized.subheadline,
-          bulletPoints: finalized.bulletPoints,
-        },
-      );
-    } catch (e) {
-      console.error("Image generation failed:", e);
+    if (await isImageGenerationAllowed(userId) && imageContent?.mode !== 'none') {
+      try {
+        mediaUrl = await this.imageService.createTopicImage(
+          imageContent?.headline ?? finalized.headline,
+          config.backgroundImageUrl ?? undefined,
+          {
+            headline: imageContent?.headline ?? finalized.headline,
+            subheadline: imageContent?.supportingText,
+            bulletPoints: (imageContent?.bulletPoints ?? []).slice(0, 3),
+            mode: (imageContent?.mode as 'single_insight' | 'checklist' | 'comparison' | 'quote' | 'none') ?? 'single_insight',
+          },
+        );
+        await recordImageGeneration(userId);
+      } catch (e) {
+        console.error("Image generation failed:", e);
+      }
     }
 
     const linkedInAccount = await prisma.linkedInAccount.findFirst({
@@ -447,7 +496,7 @@ export class TrendingBotService {
 
     const regionId = await this.getUserRegionId(userId);
 
-    await prisma.post.create({
+    const created = await prisma.post.create({
       data: {
         userId,
         regionId,
@@ -461,57 +510,128 @@ export class TrendingBotService {
       },
     });
 
+    if (topicMeta?.fingerprint) {
+      await createGeneratedTopicHistory({
+        userId,
+        postId: created.id,
+        batchId: topicMeta.batchId,
+        sourceTitle: topicMeta.sourceTitle,
+        fingerprint: topicMeta.fingerprint,
+        angle: topicMeta.angle,
+      });
+    }
+
     console.log(`Created review post with proposed slot ${scheduledAt.toISOString()}`);
+    return created;
   }
 
-  async previewTrends(userId: string) {
+  private parseStringArrayConfig(
+    rawValue: string | null | undefined,
+    fieldName: string,
+    userId: string,
+  ): string[] {
+    if (!rawValue) return [];
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (!Array.isArray(parsed)) {
+        console.warn(`[previewTrends] ${fieldName} is not an array`, { userId });
+        return [];
+      }
+      return parsed.filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+    } catch (error) {
+      console.error(`[previewTrends] Failed to parse ${fieldName}`, {
+        userId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  }
+
+  async previewTrends(
+    userId: string,
+    options?: { debug?: boolean; enriched?: boolean; limit?: number },
+  ): Promise<Trend[] | PreviewTrendsResponse> {
     const config = await prisma.botConfig.findUnique({ where: { userId } });
-    if (!config) return [];
+    if (!config) {
+      console.warn("[previewTrends] Bot config not found", { userId });
+      return options?.debug ? { trends: [] } : [];
+    }
 
     let niches: string[] = [];
     try {
-      niches = JSON.parse(config.niches);
-    } catch {
+      const parsedNiches = config.niches ? JSON.parse(config.niches) : ["Technology"];
+      niches = Array.isArray(parsedNiches)
+        ? parsedNiches.filter((v): v is string => typeof v === "string").map((v) => v.trim()).filter(Boolean)
+        : typeof parsedNiches === "string" && parsedNiches.trim()
+          ? [parsedNiches.trim()]
+          : ["Technology"];
+    } catch (error) {
+      console.error("[previewTrends] Failed to parse niches", {
+        userId,
+        message: error instanceof Error ? error.message : String(error),
+      });
       niches = ["Technology"];
     }
+    if (niches.length === 0) niches = ["Technology"];
 
-    const sources = config.sources ? JSON.parse(config.sources) : ["google"];
-    let customRssFeeds: string[] = [];
-    try {
-      customRssFeeds = config.customRssFeeds
-        ? JSON.parse(config.customRssFeeds)
-        : [];
-    } catch {}
-    let customLinks: string[] = [];
-    try {
-      customLinks = (config as any).customLinks
-        ? JSON.parse((config as any).customLinks)
-        : [];
-    } catch {}
-    let customRedditFeeds: string[] = [];
-    try {
-      customRedditFeeds = (config as any).customRedditFeeds
-        ? JSON.parse((config as any).customRedditFeeds)
-        : [];
-    } catch {}
-
-    let allTrends: Trend[] = [];
-    for (const niche of niches) {
-      try {
-        allTrends.push(
-          ...(await this.trendsService.fetchTrends(
-            niche,
-            sources,
-            customRssFeeds,
-            customLinks,
-            customRedditFeeds,
-          )),
-        );
-      } catch (e) {}
+    const sources = parseTrendSources(config.sources);
+    if (config.sources?.trim() === "[]") {
+      console.warn("[previewTrends] No trend sources configured; defaulting to Google News", { userId });
     }
 
-    return Array.from(
-      new Map(allTrends.map((item) => [item.title, item])).values(),
-    ).slice(0, 20);
+    const customRssFeeds = this.parseStringArrayConfig(config.customRssFeeds, "customRssFeeds", userId);
+    const customLinks = this.parseStringArrayConfig(config.customLinks, "customLinks", userId);
+    const customRedditFeeds = this.parseStringArrayConfig(config.customRedditFeeds, "customRedditFeeds", userId);
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { region: { select: { openaiApiKey: true } } },
+    });
+    const openaiKey = decryptSecret(user?.region?.openaiApiKey);
+
+    const limit = options?.limit ?? 20;
+    const configHash = buildTrendConfigHash({
+      niches,
+      sources,
+      customFeeds: customRssFeeds,
+      customLinks,
+      customRedditFeeds,
+    });
+
+    const orchestrator = new TrendOrchestrationService(openaiKey);
+    const pool = await orchestrator.getRankedTrendPool({
+      userId,
+      niches,
+      author: {
+        description: config.description || "",
+        tone: config.tone || "Professional",
+        niches,
+      },
+      sources,
+      customFeeds: customRssFeeds,
+      customLinks,
+      customRedditFeeds,
+      limit,
+      mode: "preview",
+    });
+
+    const stored = saveTrendPreviewPool({
+      userId,
+      configHash,
+      candidates: pool.ranked,
+    });
+
+    if (options?.debug || options?.enriched) {
+      return {
+        trends: rankedToPreviewItems(pool.ranked),
+        previewId: stored.id,
+        stats: pool.stats,
+        timingMs: pool.timingMs,
+      };
+    }
+
+    return rankedToLegacyTrends(pool.ranked);
   }
 }

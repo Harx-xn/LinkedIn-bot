@@ -258,14 +258,25 @@ export async function postToLinkedInFromPostId(postId: string) {
 
   const urn = response.headers['x-restli-id'] as string | undefined;
 
+  const publishedAt = new Date();
   await prisma.post.update({
     where: { id: post.id },
     data: {
       status: 'PUBLISHED',
-      publishedAt: new Date(),
+      publishedAt,
       linkedinPostUrn: urn ?? null
     }
   });
+
+  try {
+    const { safeUpdateTopicHistoryStatus } = await import('./topicHistoryService');
+    await safeUpdateTopicHistoryStatus(post.id, 'PUBLISHED', publishedAt);
+  } catch (err) {
+    console.warn('[topic-history] publish status update failed', {
+      postId: post.id,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   return { urn, data: response.data };
 }

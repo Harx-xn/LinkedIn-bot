@@ -102,6 +102,8 @@ router.get("/callback", async (req: any, res: any) => {
         accessToken: tokens.access_token || undefined,
         refreshToken: tokens.refresh_token || undefined,
         active: true,
+        authStatus: 'CONNECTED',
+        lastSyncError: null,
       },
       create: {
         userId,
@@ -111,6 +113,7 @@ router.get("/callback", async (req: any, res: any) => {
         accessToken: tokens.access_token || null,
         refreshToken: tokens.refresh_token || null,
         active: true,
+        authStatus: 'CONNECTED',
       },
     });
 
@@ -207,6 +210,8 @@ router.get("/config", requireAuth, async (req: any, res: any) => {
         accessToken: true,
         refreshToken: true,
         active: true,
+        authStatus: true,
+        lastSyncError: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -219,6 +224,9 @@ router.get("/config", requireAuth, async (req: any, res: any) => {
             spreadsheetId: configRow.spreadsheetId,
             range: configRow.range,
             active: configRow.active,
+            authStatus: configRow.authStatus,
+            lastSyncError: configRow.lastSyncError,
+            reconnectRequired: configRow.authStatus === 'REAUTH_REQUIRED',
             connected: Boolean(configRow.accessToken || configRow.refreshToken),
             createdAt: configRow.createdAt,
             updatedAt: configRow.updatedAt,

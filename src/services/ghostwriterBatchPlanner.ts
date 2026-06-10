@@ -1,0 +1,134 @@
+import type {
+  AuthorContext,
+  BatchPostPlan,
+  HookStyle,
+  PostAngle,
+  PostLayout,
+  RankedTrendCandidate,
+  TrendCandidate,
+} from './generationTypes';
+import { resolvePlanAngle } from './ghostwriterValidationService';
+
+const DEFAULT_ANGLE_SEQUENCE: PostAngle[] = [
+  'technical_mistake',
+  'practical_tutorial',
+  'architecture_tradeoff',
+  'defensible_opinion',
+  'debugging_story',
+  'product_lesson',
+  'reflection',
+];
+
+const HOOK_ROTATION: HookStyle[] = [
+  'observation',
+  'contrarian',
+  'mistake',
+  'lesson',
+  'comparison',
+  'story',
+  'question',
+];
+
+const LAYOUT_BY_ANGLE: Record<PostAngle, PostLayout> = {
+  technical_mistake: 'problem_mechanism_fix',
+  practical_tutorial: 'technical_walkthrough',
+  architecture_tradeoff: 'comparison',
+  defensible_opinion: 'opinion_with_reasoning',
+  debugging_story: 'story_then_lesson',
+  product_lesson: 'short_observation',
+  reflection: 'short_observation',
+};
+
+const ENDING_BY_ANGLE: Record<PostAngle, BatchPostPlan['endingStyle']> = {
+  technical_mistake: 'takeaway',
+  practical_tutorial: 'action',
+  architecture_tradeoff: 'takeaway',
+  defensible_opinion: 'specific_question',
+  debugging_story: 'summary',
+  product_lesson: 'takeaway',
+  reflection: 'takeaway',
+};
+
+export function buildTopicDiverseBatchPlan(
+  ranked: RankedTrendCandidate[],
+  count: number,
+): BatchPostPlan[] {
+  const trends = ranked.map((r) => r.trend);
+  const plans = buildDeterministicBatchPlan(trends, count);
+  return plans.map((plan, i) => {
+    const fp = ranked[i]?.fingerprint;
+    if (!fp) return plan;
+    return {
+      ...plan,
+      topicCluster: fp.topicCluster,
+      normalizedTopic: fp.normalizedTopic,
+      coreClaim: fp.coreClaim,
+      mechanismFocus: fp.mechanisms,
+    };
+  });
+}
+
+export function buildDeterministicBatchPlan(
+  trends: TrendCandidate[],
+  count: number,
+): BatchPostPlan[] {
+  const plans: BatchPostPlan[] = [];
+  let questionEndings = 0;
+
+  for (let i = 0; i < count; i++) {
+    const trend = trends[i] ?? null;
+    const requestedAngle = DEFAULT_ANGLE_SEQUENCE[i % DEFAULT_ANGLE_SEQUENCE.length];
+    const topic = trend?.topic ?? '';
+    const angle = topic ? resolvePlanAngle(topic, requestedAngle) : requestedAngle;
+    const hookStyle = HOOK_ROTATION[i % HOOK_ROTATION.length];
+    let endingStyle = ENDING_BY_ANGLE[angle];
+
+    if (endingStyle === 'specific_question') {
+      if (questionEndings >= 2) endingStyle = 'takeaway';
+      else questionEndings++;
+    }
+
+    plans.push({
+      trendIndex: trend ? i : null,
+      sourceTopic: trend?.topic ?? null,
+      angle,
+      hookStyle,
+      endingStyle,
+      layout: LAYOUT_BY_ANGLE[angle],
+      rationale: trend
+        ? `Use trend as inspiration for a ${angle.replace(/_/g, ' ')} post`
+        : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
+      evergreen: !trend,
+    });
+  }
+
+  return plans;
+}
+
+export function assignTrendsToPlan(
+  plan: BatchPostPlan[],
+  trends: TrendCandidate[],
+): BatchPostPlan[] {
+  return plan.map((p, i) => {
+    const trend = trends[i] ?? null;
+    return {
+      ...p,
+      trendIndex: trend ? i : null,
+      sourceTopic: trend?.topic ?? p.sourceTopic,
+      evergreen: !trend,
+    };
+  });
+}
+
+export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext) {
+  return {
+    count: plan.length,
+    niches: author.niches ?? [],
+    angles: plan.map((p) => p.angle),
+    hooks: plan.map((p) => p.hookStyle),
+    endings: plan.map((p) => p.endingStyle),
+    evergreenCount: plan.filter((p) => p.evergreen).length,
+    topicClusters: plan.map((p) => p.topicCluster ?? null),
+    normalizedTopics: plan.map((p) => p.normalizedTopic ?? null),
+  };
+}

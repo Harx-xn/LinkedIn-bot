@@ -9,6 +9,10 @@
     serializePostingSchedule,
     validateScheduleForGeneration,
   } from '../services/batchScheduleService';
+  import {
+    PlanLimitError,
+    canStartBatchGeneration,
+  } from '../services/planEntitlementService';
 
   const router = Router();
   const botService = new TrendingBotService();
@@ -30,6 +34,16 @@
     const gate = await canGenerate(req.userId!);
     if (!gate.allowed) {
       return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
+    }
+
+    // Per-plan daily batch generation limit.
+    try {
+      await canStartBatchGeneration(req.userId!);
+    } catch (err) {
+      if (err instanceof PlanLimitError) {
+        return res.status(err.status).json({ error: err.message, code: err.code });
+      }
+      throw err;
     }
 
     const scheduleInput =
@@ -84,8 +98,10 @@
       },
     });
 
+    const previewId = typeof req.body.previewId === 'string' ? req.body.previewId : undefined;
+
     botService
-      .generateNow(req.userId!, Number(daysWindow), job.id)
+      .generateNow(req.userId!, Number(daysWindow), job.id, { previewId })
       .then(async () => {
         await prisma.botGenerationJob.update({
           where: { id: job.id },
@@ -105,8 +121,10 @@
   // GET /bot/trends/preview - Preview top trends for current config
   router.get('/trends/preview', requireAuth, async (req, res) => {
       try {
-          const trends = await botService.previewTrends(req.userId!);
-          res.json(trends);
+          const debug = req.query.debug === 'true' || req.query.debug === '1';
+          const enriched = req.query.enriched === 'true' || req.query.enriched === '1';
+          const result = await botService.previewTrends(req.userId!, { debug, enriched: debug || enriched });
+          res.json(result);
       } catch (error) {
           console.error('Error fetching trend preview:', error);
           res.status(500).json({ error: 'Failed to fetch trend preview' });

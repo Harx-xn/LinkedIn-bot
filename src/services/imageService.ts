@@ -8,6 +8,7 @@ interface PostContent {
   headline: string;
   subheadline?: string;
   bulletPoints?: string[];
+  mode?: "quote" | "single_insight" | "checklist" | "comparison" | "none";
 }
 
 export class ImageService {
@@ -111,11 +112,36 @@ export class ImageService {
       // -------------------------
       // 4) Layout text inside a SAFE BOX
       // -------------------------
+      const imageMode = postContent.mode ?? "single_insight";
       const headlineRaw = (postContent.headline || text).trim();
-      const subheadlineRaw = (postContent.subheadline || "").trim();
-      const bulletsRaw = (postContent.bulletPoints || [])
+      let subheadlineRaw = (postContent.subheadline || "").trim();
+
+      const countWords = (value: string) =>
+        value.trim().split(/\s+/).filter(Boolean).length;
+      const MAX_SUBHEADING_WORDS = 7;
+      const MAX_SUBHEADING_CHARS = 55;
+
+      if (
+        subheadlineRaw &&
+        (countWords(subheadlineRaw) > MAX_SUBHEADING_WORDS ||
+          subheadlineRaw.length > MAX_SUBHEADING_CHARS)
+      ) {
+        subheadlineRaw = "";
+      }
+      let bulletsRaw = (postContent.bulletPoints || [])
         .filter(Boolean)
-        .map((s) => String(s).trim());
+        .map((s) => String(s).trim())
+        .slice(0, 3);
+
+      if (imageMode === "quote") {
+        subheadlineRaw = "";
+        bulletsRaw = [];
+      } else if (imageMode === "single_insight") {
+        bulletsRaw = [];
+      } else if (imageMode === "none") {
+        subheadlineRaw = "";
+        bulletsRaw = [];
+      }
 
       const safe = {
         left: hasCustomBackground ? 90 : 140,
@@ -278,28 +304,22 @@ export class ImageService {
 
       const fitSubheadline = () => {
         if (!subheadlineRaw) return [];
-
-        // ALWAYS keep it to one line.
-        // Shrink shSize until our estimate says it fits; if still too long at min,
-        // we render with SVG textLength to force-fit without wrapping.
-        for (let tries = 0; tries < 30; tries++) {
-          const w = estimateTextWidth(subheadlineRaw, shSize, 0.46);
-          if (w <= subMaxWidth) {
-            subUseTextLength = false;
-            return [subheadlineRaw];
-          }
-
-          if (shSize > min.sh) {
-            shSize -= 1;
-            continue;
-          }
-
-          subUseTextLength = true;
-          return [subheadlineRaw];
+        if (
+          countWords(subheadlineRaw) > MAX_SUBHEADING_WORDS ||
+          subheadlineRaw.length > MAX_SUBHEADING_CHARS
+        ) {
+          return [];
         }
 
-        subUseTextLength = true;
-        return [subheadlineRaw];
+        const wrapped = wrapByPixelWidth(subheadlineRaw, subMaxWidth, shSize, 0.46);
+        if (wrapped.length > 2) return [];
+        for (const line of wrapped) {
+          const w = estimateTextWidth(line, shSize, 0.46);
+          if (w <= subMaxWidth && shSize >= min.sh) {
+            return wrapped;
+          }
+        }
+        return [];
       };
 
       const buildLines = () => {

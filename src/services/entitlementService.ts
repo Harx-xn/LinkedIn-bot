@@ -1,8 +1,8 @@
-import { UserRole } from '@prisma/client';
+import { BillingAccessStatus, UserRole } from '@prisma/client';
 import { prisma } from '../prismaClient';
+import { hasDashboardAccess } from './billing/billingAccessService';
 import { getNumberSetting } from './settingsService';
 
-// 14-day free trial, capped at 1 published post per calendar day.
 export const TRIAL_DAYS = 14;
 export const TRIAL_DAILY_PUBLISH_LIMIT = 1;
 
@@ -11,8 +11,8 @@ export type EntitlementStatus = 'ADMIN' | 'SUBSCRIBED' | 'TRIAL' | 'EXPIRED';
 export interface Entitlement {
   status: EntitlementStatus;
   trialEndsAt: Date | null;
-  daysLeft: number; // whole days remaining in trial (0 unless TRIAL)
-  dailyPublishLimit: number | null; // null = unlimited
+  daysLeft: number;
+  dailyPublishLimit: number | null;
 }
 
 function startOfToday(): Date {
@@ -21,15 +21,15 @@ function startOfToday(): Date {
   return d;
 }
 
-// Determine what a user is currently entitled to:
-//  - ADMIN: privileged roles are never throttled
-//  - SUBSCRIBED: has an ACTIVE subscription -> unlimited
-//  - TRIAL: no active sub but still inside the trial window -> 1 post/day
-//  - EXPIRED: no active sub and the trial window has passed -> blocked
 export async function getEntitlement(userId: string): Promise<Entitlement> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { role: true, regionId: true, trialEndsAt: true },
+    select: {
+      role: true,
+      regionId: true,
+      trialEndsAt: true,
+      billingAccessStatus: true,
+    },
   });
 
   if (!user) {
@@ -49,20 +49,28 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
   }
 
   const now = new Date();
-  if (user.trialEndsAt && user.trialEndsAt.getTime() > now.getTime()) {
-    const daysLeft = Math.ceil((user.trialEndsAt.getTime() - now.getTime()) / 86_400_000);
+  const trialing =
+    user.billingAccessStatus === BillingAccessStatus.TRIALING &&
+    user.trialEndsAt &&
+    user.trialEndsAt.getTime() > now.getTime();
+
+  if (trialing) {
+    const daysLeft = Math.ceil((user.trialEndsAt!.getTime() - now.getTime()) / 86_400_000);
     return {
       status: 'TRIAL',
       trialEndsAt: user.trialEndsAt,
       daysLeft,
-      dailyPublishLimit: await getNumberSetting('trial.dailyPublishLimit', user.regionId, TRIAL_DAILY_PUBLISH_LIMIT),
+      dailyPublishLimit: await getNumberSetting(
+        'trial.dailyPublishLimit',
+        user.regionId,
+        TRIAL_DAILY_PUBLISH_LIMIT,
+      ),
     };
   }
 
   return { status: 'EXPIRED', trialEndsAt: user.trialEndsAt ?? null, daysLeft: 0, dailyPublishLimit: 0 };
 }
 
-// Posts already published today (used to enforce the trial daily cap).
 export async function publishedToday(userId: string): Promise<number> {
   return prisma.post.count({
     where: { userId, status: 'PUBLISHED', publishedAt: { gte: startOfToday() } },
@@ -75,12 +83,19 @@ export interface GateResult {
   entitlement: Entitlement;
 }
 
-// Can this user publish another post right now?
 export async function canPublish(userId: string): Promise<GateResult> {
   const entitlement = await getEntitlement(userId);
 
   if (entitlement.status === 'ADMIN' || entitlement.status === 'SUBSCRIBED') {
     return { allowed: true, entitlement };
+  }
+
+  if (!(await hasDashboardAccess(userId))) {
+    return {
+      allowed: false,
+      reason: 'Complete billing setup to keep publishing.',
+      entitlement,
+    };
   }
 
   if (entitlement.status === 'EXPIRED') {
@@ -91,7 +106,6 @@ export async function canPublish(userId: string): Promise<GateResult> {
     };
   }
 
-  // TRIAL: enforce the daily publish cap.
   const count = await publishedToday(userId);
   const dailyLimit = entitlement.dailyPublishLimit ?? TRIAL_DAILY_PUBLISH_LIMIT;
   if (count >= dailyLimit) {
@@ -105,9 +119,16 @@ export async function canPublish(userId: string): Promise<GateResult> {
   return { allowed: true, entitlement };
 }
 
-// Can this user generate/queue content? Allowed on trial; blocked once expired.
 export async function canGenerate(userId: string): Promise<GateResult> {
   const entitlement = await getEntitlement(userId);
+
+  if (!(await hasDashboardAccess(userId))) {
+    return {
+      allowed: false,
+      reason: 'Complete billing setup to keep generating posts.',
+      entitlement,
+    };
+  }
 
   if (entitlement.status === 'EXPIRED') {
     return {

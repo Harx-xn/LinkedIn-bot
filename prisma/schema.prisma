@@ -15,6 +15,18 @@ enum UserRole {
   USER
 }
 
+enum BillingAccessStatus {
+  BILLING_REQUIRED
+  TRIAL_PENDING
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  PAYMENT_ACTION_REQUIRED
+  PAUSED
+  CANCELED
+  INCOMPLETE
+}
+
 model Region {
   id       String  @id @default(cuid())
   name     String
@@ -57,6 +69,8 @@ model Region {
   platformSettings PlatformSetting[]
   promotions       Promotion[]
   inviteLinks      InviteLink[]
+  imageGenerationUsages ImageGenerationUsage[]
+  manualAiRewriteUsages ManualAiRewriteUsage[]
 }
 
 model PaymentConfig {
@@ -92,9 +106,12 @@ model User {
   isActive Boolean  @default(true)
   themePreference String @default("LIGHT")
 
-  // Free-trial tracking (14-day, no card required). Set at self-registration.
-  trialStartedAt DateTime?
-  trialEndsAt    DateTime?
+  // Trial tracking — trial starts only after Stripe Checkout + webhook confirmation.
+  trialStartedAt   DateTime?
+  trialEndsAt      DateTime?
+  trialRedeemedAt  DateTime?
+  billingAccessStatus BillingAccessStatus @default(BILLING_REQUIRED)
+  stripeCustomerId String?
 
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
@@ -116,10 +133,65 @@ model User {
   BotGenerationJob BotGenerationJob[]
   promotionRedemptions PromotionRedemption[]
   inviteRedemptions InviteRedemption[]
+  notifications Notification[]
   createdInviteLinks InviteLink[] @relation("InviteCreatedBy")
+  imageGenerationUsages ImageGenerationUsage[]
+  manualAiRewriteUsages ManualAiRewriteUsage[]
+  nicheSearchPlans    UserNicheSearchPlan[]
+  topicHistory        GeneratedTopicHistory[]
 
   @@index([regionId])
   @@index([role])
+}
+
+enum TopicHistoryStatus {
+  GENERATED
+  APPROVED
+  SCHEDULED
+  PUBLISHED
+  REJECTED
+}
+
+model UserNicheSearchPlan {
+  id          String   @id @default(cuid())
+  userId      String
+  niche       String
+  domain      String
+  confidence  Float
+  subtopics   Json
+  queries     Json
+  exclusions  Json
+  version     Int      @default(1)
+  generatedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, niche])
+  @@index([userId])
+}
+
+model GeneratedTopicHistory {
+  id              String             @id @default(cuid())
+  userId          String
+  postId          String?
+  batchId         String?
+  sourceTitle     String?
+  normalizedTopic String
+  topicCluster    String
+  coreClaim       String?
+  angle           String?
+  status          TopicHistoryStatus
+  generatedAt     DateTime           @default(now())
+  publishedAt     DateTime?
+  updatedAt       DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, generatedAt])
+  @@index([userId, topicCluster])
+  @@index([userId, normalizedTopic])
+  @@index([postId])
 }
 
 model BotConfig {
@@ -203,6 +275,8 @@ model Post {
   mediaUrl          String?
   errorMessage      String?
   rewriteCount      Int       @default(0)
+  manualTopic       String?
+  aiGenerated       Boolean   @default(false)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -243,6 +317,8 @@ model SheetConfig {
   accessToken   String?
   refreshToken  String?
   active        Boolean  @default(true)
+  authStatus    String   @default("CONNECTED")
+  lastSyncError String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -264,6 +340,14 @@ model Plan {
   // Optional: useful later if you create Stripe products/prices manually
   stripePriceId String?
 
+  // Feature toggles / usage limits enforced server-side per active subscription.
+  fullDashboardUnlock       Boolean @default(true)
+  maxRewritesPerPost        Int     @default(3)
+  dailyPostLimit            Int     @default(5)
+  dailyBatchGenerationLimit Int     @default(1)
+  imageGenerationEnabled    Boolean @default(false)
+  dailyImageGenerationLimit Int     @default(0)
+
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
@@ -282,16 +366,29 @@ model Subscription {
   regionId  String?
   planId    String
 
-  status    String    @default("ACTIVE") // ACTIVE | PAST_DUE | CANCELED | INCOMPLETE
+  status    String    @default("ACTIVE") // TRIALING | ACTIVE | PAST_DUE | PAYMENT_ACTION_REQUIRED | INCOMPLETE | PAUSED | CANCELED
   startsAt  DateTime  @default(now())
   endsAt    DateTime?
   autoRenew Boolean   @default(true)
 
-  stripeCustomerId     String?
-  stripeSubscriptionId String?
-  stripeCheckoutSessionId String?
+  stripeCustomerId           String?
+  stripeSubscriptionId       String? @unique
+  stripeCheckoutSessionId    String?
+  stripeSubscriptionItemId   String?
+  stripeLatestInvoiceId      String?
+  stripeDefaultPaymentMethodId String?
   promotionCode String?
   inviteCode String?
+
+  cancelAtPeriodEnd          Boolean   @default(false)
+  canceledAt                 DateTime?
+  currentPeriodStart         DateTime?
+  currentPeriodEnd           DateTime?
+  trialStart                 DateTime?
+  trialEnd                   DateTime?
+  paymentFailedAt            DateTime?
+  paymentActionRequiredAt    DateTime?
+  lastStripeEventCreatedAt   DateTime?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -304,7 +401,6 @@ model Subscription {
   @@index([userId])
   @@index([regionId])
   @@index([planId])
-  @@unique([stripeSubscriptionId])
 }
 
 
@@ -413,9 +509,61 @@ model InviteRedemption {
 }
 
 model PaymentEvent {
+  id              String    @id @default(cuid())
+  provider        String    @default("STRIPE")
+  eventId         String    @unique
+  type            String
+  stripeCreatedAt DateTime?
+  status          String    @default("RECEIVED")
+  attempts        Int       @default(0)
+  processedAt     DateTime?
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Notification {
   id        String   @id @default(cuid())
-  provider  String   @default("STRIPE")
-  eventId   String   @unique
+  userId    String
   type      String
+  title     String
+  message   String
+  metadata  Json?
+  readAt    DateTime?
   createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+// One row per successfully generated AI image. Used to enforce the per-plan
+// daily image generation limit (counted by createdAt within the UTC day).
+model ImageGenerationUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  regionId  String?
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([regionId, createdAt])
+}
+
+// Tracks successful manual-composer AI generate/rewrite operations for daily limits.
+model ManualAiRewriteUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  regionId  String?
+  kind      String
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([regionId, createdAt])
 }

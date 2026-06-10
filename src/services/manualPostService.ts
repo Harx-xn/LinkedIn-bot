@@ -1,6 +1,7 @@
 import { prisma } from '../prismaClient';
 import { canPublish } from './entitlementService';
 import { postToLinkedInFromPostId } from './linkedinService';
+import { canPublishToLinkedIn } from './planEntitlementService';
 
 /**
  * Manual Posts / Composer service (Taplio-like).
@@ -24,7 +25,7 @@ export const MANUAL_SOURCE = 'MANUAL';
 const MAX_CONTENT_LENGTH = 3000;
 
 // Statuses a manual post may be edited/scheduled/deleted in (i.e. not published).
-const MUTABLE_STATUSES = ['DRAFT', 'QUEUED', 'FAILED'];
+export const MUTABLE_STATUSES = ['DRAFT', 'QUEUED', 'FAILED'];
 
 // Error type that carries an HTTP status so the route layer can respond cleanly.
 export class ManualPostError extends Error {
@@ -41,6 +42,9 @@ export class ManualPostError extends Error {
 export interface ManualPostInput {
   content?: unknown;
   mediaUrl?: unknown;
+  hashtags?: unknown;
+  manualTopic?: unknown;
+  aiGenerated?: unknown;
 }
 
 interface ValidatedInput {
@@ -112,6 +116,24 @@ async function findOwnedManualPost(userId: string, postId: string) {
 // ---------------------------------------------------------------------------
 // 1. Create draft
 // ---------------------------------------------------------------------------
+function parseOptionalHashtags(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseOptionalTopic(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 500) : null;
+}
+
+function parseAiGenerated(raw: unknown): boolean {
+  return raw === true || raw === 'true' || raw === 1 || raw === '1';
+}
+
 export async function createDraft(userId: string, body: ManualPostInput) {
   const { content, mediaUrl } = validateManualPostInput(body.content, body.mediaUrl);
   const linkedinAccountId = await getLinkedInAccountId(userId);
@@ -121,6 +143,9 @@ export async function createDraft(userId: string, body: ManualPostInput) {
       userId,
       content,
       mediaUrl,
+      hashtags: parseOptionalHashtags(body.hashtags),
+      manualTopic: parseOptionalTopic(body.manualTopic),
+      aiGenerated: parseAiGenerated(body.aiGenerated),
       status: 'DRAFT',
       source: MANUAL_SOURCE,
       linkedinAccountId,
@@ -134,7 +159,14 @@ export async function createDraft(userId: string, body: ManualPostInput) {
 export async function updateManualPost(
   userId: string,
   postId: string,
-  body: { content?: unknown; mediaUrl?: unknown; scheduledAt?: unknown },
+  body: {
+    content?: unknown;
+    mediaUrl?: unknown;
+    scheduledAt?: unknown;
+    hashtags?: unknown;
+    manualTopic?: unknown;
+    aiGenerated?: unknown;
+  },
 ) {
   const post = await findOwnedManualPost(userId, postId);
 
@@ -151,6 +183,16 @@ export async function updateManualPost(
     const validated = validateManualPostInput(nextContent, nextMedia);
     if (body.content !== undefined) data.content = validated.content;
     if (body.mediaUrl !== undefined) data.mediaUrl = validated.mediaUrl;
+  }
+
+  if (body.hashtags !== undefined) {
+    data.hashtags = parseOptionalHashtags(body.hashtags);
+  }
+  if (body.manualTopic !== undefined) {
+    data.manualTopic = parseOptionalTopic(body.manualTopic);
+  }
+  if (body.aiGenerated !== undefined) {
+    data.aiGenerated = parseAiGenerated(body.aiGenerated);
   }
 
   if (body.scheduledAt !== undefined) {
@@ -182,6 +224,7 @@ export async function scheduleManualPost(userId: string, postId: string, schedul
 
   const scheduledAt = parseFutureDate(scheduledAtRaw);
   await ensureCanPublishOrSchedule(userId);
+  // Scheduling does not publish to LinkedIn; daily limit is checked at publish time.
 
   const linkedinAccountId = post.linkedinAccountId ?? (await getLinkedInAccountId(userId));
 
@@ -202,6 +245,7 @@ export async function publishManualPostNow(userId: string, postId: string) {
   }
 
   await ensureCanPublishOrSchedule(userId);
+  await canPublishToLinkedIn(userId, 1);
 
   let linkedinAccountId = post.linkedinAccountId;
   if (!linkedinAccountId) {
@@ -232,6 +276,7 @@ export async function createAndPublishNow(userId: string, body: ManualPostInput)
 
   // Gate before creating anything so we don't leave orphan drafts.
   await ensureCanPublishOrSchedule(userId);
+  await canPublishToLinkedIn(userId, 1);
 
   const linkedinAccountId = await getLinkedInAccountId(userId);
   if (!linkedinAccountId) {
@@ -313,6 +358,9 @@ export async function listManualPosts(userId: string, filters: ListFilters) {
       mediaUrl: true,
       source: true,
       hashtags: true,
+      manualTopic: true,
+      aiGenerated: true,
+      rewriteCount: true,
       scheduledAt: true,
       publishedAt: true,
       createdAt: true,
@@ -382,6 +430,8 @@ export async function duplicateManualPost(userId: string, postId: string) {
       content: post.content,
       mediaUrl: post.mediaUrl,
       hashtags: post.hashtags,
+      manualTopic: post.manualTopic,
+      aiGenerated: post.aiGenerated,
       status: 'DRAFT',
       source: MANUAL_SOURCE,
       linkedinAccountId,

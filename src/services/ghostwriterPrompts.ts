@@ -1,0 +1,529 @@
+import type { AuthorContext, BatchPostPlan, GeneratedPostContent, QualityIssue, SpecificityResult, TechnicalReviewIssue, TrendCandidate } from './generationTypes';
+
+export const TECHNICAL_DISTINCTIONS = `TECHNICAL ACCURACY DISTINCTIONS:
+
+- Authentication proves identity. Authorization determines allowed actions.
+- Tenant isolation requires tenant-scoped authorization and data access.
+- Client-side restrictions improve UX; they are not a security boundary.
+- Server-side entitlement checks enforce access. Audit trails require explicit logs.
+- Access controls may support compliance goals but do not establish compliance alone.
+- Environment parity does not require shared infrastructure or shared databases.
+- Environment consistency and scalability are not opposing goals.
+- Queue concurrency settings can reduce overlap but do not guarantee exactly-once execution.
+- Critical publishing actions should be idempotent.
+- Locks are safeguards, not substitutes for idempotency and atomic state transitions.
+- Usage limits should be validated and incremented atomically during protected actions.
+- Background tasks are suitable for reconciliation, resets, and aggregation.
+- Token authentication does not automatically solve tenant isolation or session management.`;
+
+export const LINKEDIN_LINE_FORMAT_RULES = `FORMAT AND RHYTHM: Write in a clear, conversational LinkedIn format that is easy to scan on mobile.
+ - Open with a specific observation, mistake, consequence, or useful distinction.
+ - The first two lines should create curiosity without using clickbait.
+ - Prefer short paragraphs separated by blank lines.
+ - Most paragraphs should contain one sentence.
+ - Two closely connected sentences may stay together when that improves flow.
+ - Avoid paragraphs containing three or more sentences.
+ - Use short standalone lines selectively for emphasis. 
+ - Do not make every sentence sound dramatic. 
+ - Build a natural progression: hook, problem, mechanism, example, action, takeaway.
+ - Use numbered lists only for ordered steps or clearly separated reasons. 
+ - Use hyphen bullets only for practical checks, actions, or examples.
+ - Keep list items concise and structurally consistent.
+ - Vary sentence length so the post does not feel robotic. 
+ - Avoid repeating the headline, image text, or the same conclusion in different words.
+ - The caption should add depth beyond what appears in the image. - End with a useful takeaway, decision rule, or specific question.
+ - Do not copy the wording or subject matter of any supplied example.
+ - Do not invent personal stories, clients, incidents, metrics, or results.
+
+ The final post should feel written by an experienced practitioner, not like a textbook, documentation page, or generic AI summary.`;
+
+
+ export const SPECIFICITY_RULES = `SPECIFICITY REQUIREMENTS: The post must contain at least three of these signal types: 
+ 1. A named technical mechanism
+ 2. A clear implementation boundary
+ 3. A concrete failure mode 
+ 4. An actionable implementation step 
+ 5. A meaningful trade-off or condition
+ 6. A cause-and-effect explanation 
+ 
+ At least one paragraph must explain how a mechanism creates or prevents a specific outcome.
+ 
+ Prefer concrete statements such as:
+  - where a check belongs - what can fail
+  - what condition must be enforced 
+  - what implementation choice reduces the risk 
+  - when one approach is preferable to another
+   
+   Do not add technical terminology only to increase specificity.
+   
+   Do not repeat definitions that are already obvious from the headline or image. Do not invent metrics, customers, incidents, implementation history, or personal experience.`;
+
+ export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
+- Write as a ghostwriter for the supplied author profile.
+- Write an original LinkedIn post, not a summary of the source article.
+- Use the assigned angle, hook style, ending style, and layout as guidance.
+- Aim for roughly 600 to 1,300 characters when the subject supports it.
+- Prioritize substance over reaching a target length.
+- Avoid repeating the same point in the introduction, middle, and conclusion.
+- Every section should move the idea forward.
+
+Recommended progression:
+
+1. Hook: 
+  Introduce a specific tension, mistake, distinction, or consequence.
+
+2. Context:
+   Explain why the issue matters without using generic industry statements.  
+
+3. Mechanism:
+   Explain what actually happens at the implementation or system boundary.    
+
+4. Example or failure mode:
+   Show one realistic scenario without inventing personal experience.
+
+5. Practical response:
+   Give a useful action, checklist, implementation rule, or decision principle.
+   
+6. Ending:
+   Finish with a concise takeaway or a genuinely specific question.
+   
+   
+Additional rules: - Use bullets only for genuine checklists, actions, or comparisons.
+ - Use no more than four bullets unless the assigned layout requires ordered steps.
+ - Do not use engagement bait.
+ - Do not use phrases such as "In today's world", "game changer", or "unlock your potential".
+ - Do not begin with broad phrases such as "When building a SaaS platform".
+ - Do not restate the headline as the final sentence.
+ - Do not write a generic conclusion about importance, security, growth, or success.
+ - Use qualified technical language where appropriate: can, may, often, depending on, in some systems.
+ - The body should complement the accompanying image rather than paraphrase it.   
+
+${LINKEDIN_LINE_FORMAT_RULES}`;
+
+export const HASHTAG_RULES = `HASHTAG RULES:
+- Zero to three hashtags only. Target two specific hashtags.
+- Hashtags must match this exact post topic and angle.
+- No generic filler (#Growth, #Innovation, #Strategy).
+- Put hashtags only in the JSON "hashtags" field, not in the body.
+- TitleCase formatting. Empty string is valid.`;
+
+export const LANGUAGE_RULES = `LANGUAGE RULE:
+- English only unless the author configuration explicitly requests another language.`;
+
+export const GHOSTWRITER_SYSTEM = `You are a ghostwriter for this author, not a news summarizer.
+
+Priority order:
+1. Author credibility and supplied profile
+2. Selected niches and audience
+3. Assigned batch angle
+4. Relevant insight from the source (inspiration only)
+5. Writing style
+
+Never invent:
+- personal experiences
+- customer results, revenue, user numbers, benchmarks
+- project history or opinions attributed to the author
+- locations or communities the author did not mention
+
+Do not use first-person experience unless that exact experience exists in the supplied author context.
+Mentioning a project name from the profile does NOT authorize a debugging story or implementation anecdote.
+
+When personal evidence is unavailable:
+- write as an observation
+- explain a technical mechanism
+- present a conditional recommendation
+- discuss a trade-off
+
+Internally distinguish verified author facts, source facts, general technical knowledge, opinion, and conditional recommendations — but do NOT label them in the final post.
+
+${TECHNICAL_DISTINCTIONS}`;
+
+export function buildAuthorBlock(author: AuthorContext): string {
+  const niches = (author.niches ?? []).join(', ') || 'general technology';
+  const audience = (author.targetAudience ?? []).join(', ') || 'builders and operators';
+  return `
+AUTHOR PROFILE (highest priority):
+${author.description.trim() || 'Professional operator in the selected niches.'}
+
+NICHES: ${niches}
+AUDIENCE: ${audience}
+TONE: ${author.tone}
+`;
+}
+
+
+export function buildAngleSpecificityBlock(
+  plan: BatchPostPlan,
+): string {
+  switch (plan.angle) {
+    case 'practical_tutorial':
+      return `ANGLE REQUIREMENTS (practical_tutorial):
+- Start with the problem the implementation solves.
+- Include 3 to 5 ordered implementation steps.
+- Name the relevant layers, such as API, service, database, middleware, or worker.
+- Show one incorrect implementation and the failure it can cause.
+- End with a concise implementation rule.
+- Do not turn the entire post into a generic checklist.`;
+
+    case 'architecture_tradeoff':
+      return `ANGLE REQUIREMENTS (architecture_tradeoff):
+- Introduce the decision that must be made.
+- Name two genuinely different approaches.
+- Explain where each approach fits.
+- Include one operational or maintenance risk for each side when relevant.
+- Explain the deciding condition rather than declaring one universal winner.
+- End with a practical decision rule.`;
+
+    case 'technical_mistake':
+      return `ANGLE REQUIREMENTS (technical_mistake):
+- Open with the mistaken assumption or implementation.
+- Explain why it appears reasonable.
+- Describe the mechanism that makes it fail.
+- Include one concrete failure scenario.
+- Provide an implementation-level correction.
+- End with the principle engineers should remember.`;
+
+    case 'debugging_story':
+      return `ANGLE REQUIREMENTS (debugging_story):
+- Do not fabricate a personal experience.
+- Present it as a common or hypothetical debugging sequence.
+- Include the visible symptom.
+- Include the underlying cause.
+- Include one diagnostic check.
+- Include the fix and one prevention lesson.
+- Keep the sequence clear and easy to follow.`;
+
+    case 'product_lesson':
+      return `ANGLE REQUIREMENTS (product_lesson):
+- Start with a product or implementation decision.
+- Connect that decision to a named technical mechanism.
+- Explain the user-facing or system consequence.
+- Avoid generic business lessons.
+- End with one actionable product or engineering principle.`;
+
+    case 'reflection':
+      return `ANGLE REQUIREMENTS (reflection):
+- Begin with a specific observation, not a motivational statement.
+- Include at least one concrete example or distinction.
+- Explain why the observation changes a decision or implementation.
+- Lower technical density than a tutorial is acceptable.
+- End with a concise takeaway rather than repeating the opening.`;
+
+    case 'defensible_opinion':
+      return `ANGLE REQUIREMENTS (defensible_opinion):
+- State a clear but qualified position.
+- Explain the reasoning behind it.
+- Include one realistic counterargument or limitation.
+- Use a concrete example or mechanism.
+- End with a specific question or decision point, not generic engagement bait.`;
+
+    default:
+      return `ANGLE REQUIREMENTS (${plan.angle}):
+- Open with a specific idea.
+- Explain the mechanism or reasoning.
+- Include a concrete consequence.
+- End with an actionable takeaway.`;
+  }
+}
+
+
+export function buildSourceEvidenceBlock(trend?: TrendCandidate | null): string {
+  if (!trend) {
+    return `SOURCE EVIDENCE:
+Title: (evergreen author expertise)
+Summary: (none — write general technical guidance clearly labeled as general guidance)
+Key points: (none)`;
+  }
+
+  const summary = trend.summary?.trim() || '(not available — do not imply you read the article)';
+  const keyPoints = (trend.keyPoints ?? []).length
+    ? trend.keyPoints!.map((p) => `- ${p}`).join('\n')
+    : '(not available)';
+
+  return `SOURCE EVIDENCE:
+Title: ${trend.topic}
+Summary: ${summary}
+Key points:
+${keyPoints}
+
+Rules:
+- Use source evidence when present.
+- Do not invent article details.
+- General technical guidance is allowed when clearly phrased as general guidance.
+- When evidence is missing, do not imply the post summarizes the article.`;
+}
+
+export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null): string {
+  return `
+${buildSourceEvidenceBlock(trend)}
+${buildAngleSpecificityBlock(plan)}
+
+ASSIGNED BATCH PLAN:
+- Angle: ${plan.angle}
+- Hook style: ${plan.hookStyle}
+- Ending style: ${plan.endingStyle}
+- Layout: ${plan.layout}
+- Source topic (inspiration only): ${plan.sourceTopic ?? 'evergreen author expertise'}
+- Rationale: ${plan.rationale}
+${sourceLink ? `- Reference link (do not summarize unless directly relevant): ${sourceLink}` : ''}
+
+The source is inspiration only. Transform it into an author-relevant ${plan.angle.replace(/_/g, ' ')} post.
+Do NOT write a headline summary of the trend.
+`;
+}
+
+function formatStructuredIssues(issues: Array<QualityIssue | TechnicalReviewIssue>): string {
+  return issues
+    .map((issue) => {
+      const lines = [`- code: ${issue.code}`, `  severity: ${issue.severity}`];
+      if ('excerpt' in issue && issue.excerpt) lines.push(`  excerpt: ${issue.excerpt}`);
+      if ('explanation' in issue && issue.explanation) lines.push(`  explanation: ${issue.explanation}`);
+      if ('repairInstruction' in issue && issue.repairInstruction) lines.push(`  repair: ${issue.repairInstruction}`);
+      if ('instruction' in issue && issue.instruction) lines.push(`  repair: ${issue.instruction}`);
+      if ('evidence' in issue && issue.evidence?.length) {
+        lines.push(`  evidence: ${issue.evidence.join(' | ')}`);
+      }
+      return lines.join('\n');
+    })
+    .join('\n');
+}
+
+export function buildRepairPrompt(
+  post: GeneratedPostContent,
+  issues: Array<QualityIssue | TechnicalReviewIssue | string>,
+  author: AuthorContext,
+  plan?: BatchPostPlan,
+): string {
+  const structured = issues.map((i) =>
+    typeof i === 'string'
+      ? { code: i, severity: 'error' as const, instruction: `Fix issue: ${i}` }
+      : i,
+  );
+
+  return `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+${plan ? buildPlanBlock(plan) : ''}
+
+Rewrite the complete post as a clean final draft.
+
+Preserve the valid core idea, assigned angle, and verified facts.
+Do not preserve sentence structure when it causes awkward or contradictory prose.
+Address every listed issue.
+Do not invent personal experiences, results, users, metrics, or project history.
+The repaired output must read as one coherent post, not as patched fragments.
+
+
+Improve the writing as well as correcting the listed issues.
+
+Specifically:
+- Strengthen the first two lines.
+- Remove repeated definitions and conclusions.
+- Replace broad statements with concrete mechanisms or consequences.
+- Make each section advance the argument.
+- Preserve natural whitespace and short paragraphs.
+- Do not create a list unless the content genuinely benefits from one.
+- Ensure the closing line adds a new takeaway instead of restating the headline.
+- Ensure the body adds information beyond the image headline and bullet points.
+
+
+
+ISSUES:
+${formatStructuredIssues(structured)}
+
+ORIGINAL POST:
+${post.body}
+
+${VARIED_FORMAT_RULES}
+${HASHTAG_RULES}
+
+Output valid JSON:
+{
+  "headline": "...",
+  "subheadline": "...",
+  "bulletPoints": [],
+  "body": "...",
+  "hashtags": "..."
+}
+
+${SPECIFICITY_RULES}
+${LINKEDIN_LINE_FORMAT_RULES}`;
+}
+
+export function buildExpandSpecificityPrompt(
+  post: GeneratedPostContent,
+  specificity: SpecificityResult | undefined,
+  author: AuthorContext,
+  plan: BatchPostPlan,
+): string {
+  return `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+${buildPlanBlock(plan, undefined)}
+${SPECIFICITY_RULES}
+${LINKEDIN_LINE_FORMAT_RULES}
+
+Expand specificity in this post without changing the core claim.
+
+Current signals: ${(specificity?.signals ?? []).join(', ') || 'none'}
+Missing signals: ${(specificity?.missing ?? []).join(', ') || 'unknown'}
+
+Add only what is missing:
+- a named mechanism
+- an implementation boundary
+- a failure scenario
+- actionable implementation detail
+- cause-and-effect reasoning
+
+Do not invent metrics, customers, incidents, or personal experience.
+
+CURRENT POST:
+${post.body}
+
+Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
+}
+
+export function buildJsonRepairPrompt(params: {
+  repairContext: string;
+  stage: string;
+  message: string;
+  issues?: string[];
+  invalidOutput: string;
+}): string {
+  return `${params.repairContext}
+
+JSON REPAIR TASK:
+The previous response failed at stage: ${params.stage}
+Reason: ${params.message}
+${params.issues?.length ? `Schema issues:\n${params.issues.map((i) => `- ${i}`).join('\n')}` : ''}
+
+Invalid output:
+${params.invalidOutput.slice(0, 3000)}
+
+Return one JSON object only.
+No markdown fences. No commentary.
+
+Required shape:
+{
+  "headline": "string",
+  "subheadline": "string",
+  "bulletPoints": ["string"],
+  "body": "string",
+  "hashtags": "string",
+  "sourceTopic": "string or null",
+  "angle": "string",
+  "layout": "string"
+}`;
+}
+
+export function buildImageCopyPrompt(body: string, plan: BatchPostPlan): string {
+  return `Extract image copy from this APPROVED post only. Do not add new facts.
+
+POST:
+${body}
+
+Assigned visual angle: ${plan.angle}
+
+Output JSON:
+{
+  "mode": "quote" | "single_insight" | "checklist" | "comparison" | "none",
+  "headline": "3-9 words ideally, max 12 words, max 70 characters",
+  "supportingText": "optional, max 7 words, max 55 characters",
+  "bulletPoints": ["0-3 concrete bullets, 4-10 words each, max 14 words per bullet"]
+}
+
+Rules:
+- Use only facts already in the post
+- No contact info, URLs, or social handles
+- Reject vague business language
+- Prefer single_insight when one sentence is strongest
+- Use checklist only for actionable sequences
+- Use comparison only for genuine comparisons
+- mode "none" if a visual adds little value
+
+supportingText:
+- optional
+- maximum 7 words
+- one complete phrase
+- no punctuation-heavy sentence
+- omit it when a clear 7-word phrase is not possible
+
+Examples of valid supportingText:
+- Enforce limits where actions actually occur
+- Prevent retries from publishing duplicate content
+- Tenant isolation requires authorization at every boundary`;
+}
+
+export function buildImageRepairPrompt(
+  body: string,
+  image: { headline: string; supportingText?: string; bulletPoints?: string[] },
+  issues: QualityIssue[],
+): string {
+  return `Repair image copy extracted from an approved post. Do not add new claims.
+
+APPROVED POST:
+${body}
+
+CURRENT IMAGE COPY:
+headline: ${image.headline}
+supportingText: ${image.supportingText ?? '(none)'}
+bullets: ${(image.bulletPoints ?? []).join(' | ') || '(none)'}
+
+ISSUES:
+${formatStructuredIssues(issues)}
+
+Output valid JSON with mode, headline, supportingText (optional, max 7 words), bulletPoints (0-3).
+Omit supportingText if a natural 7-word phrase is not possible.`;
+}
+
+export function buildTechnicalReviewPrompt(
+  post: { body: string },
+  author: AuthorContext,
+  plan: BatchPostPlan,
+): string {
+  return `Review the post as a senior backend and SaaS engineer.
+
+Identify conceptual errors, misleading simplifications, unsupported guarantees,
+and missing distinctions that materially affect technical accuracy.
+
+Do not reject a post merely because it is simplified.
+Reject or warn when simplification changes the meaning or teaches an unsafe design.
+
+Pay special attention to:
+- authentication versus authorization
+- tenant resolution and tenant isolation
+- client-side UX restrictions versus server-side security boundaries
+- entitlement enforcement versus audit logging or legal compliance
+- queue concurrency versus duplicate prevention
+- locks versus idempotency
+- atomic usage counters versus periodic reconciliation
+- environment parity versus shared infrastructure
+- scalability versus consistency
+- database isolation strategies
+- conditional claims presented as universal outcomes
+- unsupported personal implementation stories
+
+${TECHNICAL_DISTINCTIONS}
+
+AUTHOR CONTEXT:
+${author.description.slice(0, 400)}
+
+ASSIGNED ANGLE: ${plan.angle}
+SOURCE TOPIC: ${plan.sourceTopic ?? 'evergreen'}
+
+POST:
+${post.body}
+
+Output JSON only:
+{
+  "passed": boolean,
+  "confidence": number between 0 and 1,
+  "issues": [
+    {
+      "code": "auth_vs_authorization" | "tenant_isolation_confusion" | "token_auth_overclaim" | "frontend_security_claim" | "compliance_overclaim" | "audit_trail_overclaim" | "false_architecture_tradeoff" | "environment_isolation_error" | "idempotency_omitted" | "locking_overclaim" | "atomic_usage_omitted" | "background_job_overclaim" | "guaranteed_outcome" | "unsupported_personal_claim" | "other",
+      "severity": "warning" | "error",
+      "excerpt": "short quote from post",
+      "explanation": "why this is inaccurate or unsafe",
+      "repairInstruction": "how to fix without inventing facts"
+    }
+  ]
+}`;
+}
