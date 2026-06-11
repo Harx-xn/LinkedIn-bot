@@ -17,7 +17,11 @@ export async function getRegionalStripeClient(regionId: string): Promise<StripeC
     !paymentConfig.isActive ||
     !stripeSecretKey
   ) {
-    throw new BillingError(400, 'STRIPE_NOT_CONFIGURED', 'Stripe is not configured for this region');
+    throw new BillingError(
+      400,
+      'STRIPE_NOT_CONFIGURED',
+      'Stripe is not configured for this region yet.',
+    );
   }
 
   return new Stripe(stripeSecretKey);

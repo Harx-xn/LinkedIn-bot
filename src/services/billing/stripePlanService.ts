@@ -7,6 +7,7 @@ export interface StripePriceLike {
   active: boolean;
   type: string;
   currency: string;
+  unit_amount?: number | null;
   recurring?: { interval: string } | null;
 }
 
@@ -22,6 +23,43 @@ export interface ValidatedStripePlan {
     regionId: string | null;
   };
   stripePrice: StripePriceLike;
+}
+
+const ACTIVE_PLAN_SUBSCRIPTION_STATUSES = [
+  'TRIALING',
+  'ACTIVE',
+  'PAST_DUE',
+  'PAYMENT_ACTION_REQUIRED',
+  'PAUSED',
+] as const;
+
+export function validateManualStripePriceId(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return undefined;
+  if (!trimmed.startsWith('price_')) {
+    throw new Error('Stripe Price ID must start with price_');
+  }
+  return trimmed;
+}
+
+export function formatSubAdminPlanResponse<T extends { stripePriceId?: string | null }>(plan: T) {
+  return {
+    ...plan,
+    stripePriceIdPresent: Boolean(plan.stripePriceId),
+    stripePriceId: plan.stripePriceId ?? null,
+  };
+}
+
+async function planHasActiveStripeSubscriptions(planId: string): Promise<boolean> {
+  const count = await prisma.subscription.count({
+    where: {
+      planId,
+      stripeSubscriptionId: { not: null },
+      status: { in: [...ACTIVE_PLAN_SUBSCRIPTION_STATUSES] },
+    },
+  });
+  return count > 0;
 }
 
 export async function validatePlanStripePrice(
@@ -45,7 +83,7 @@ export async function validatePlanStripePrice(
     throw new BillingError(
       400,
       'PLAN_NOT_CONFIGURED_IN_STRIPE',
-      'This plan is not configured for Stripe billing yet',
+      'This plan is not configured for Stripe billing yet.',
     );
   }
 
@@ -58,16 +96,24 @@ export async function validatePlanStripePrice(
     throw new BillingError(
       400,
       'PLAN_NOT_CONFIGURED_IN_STRIPE',
-      'Stripe price for this plan could not be found',
+      'This plan is not configured for Stripe billing yet.',
     );
   }
 
   if (!stripePrice.active) {
-    throw new BillingError(400, 'PLAN_NOT_CONFIGURED_IN_STRIPE', 'Stripe price is inactive');
+    throw new BillingError(
+      400,
+      'PLAN_NOT_CONFIGURED_IN_STRIPE',
+      'This plan is not configured for Stripe billing yet.',
+    );
   }
 
   if (stripePrice.type !== 'recurring' || !stripePrice.recurring) {
-    throw new BillingError(400, 'PLAN_NOT_CONFIGURED_IN_STRIPE', 'Plan price must be recurring');
+    throw new BillingError(
+      400,
+      'PLAN_NOT_CONFIGURED_IN_STRIPE',
+      'This plan is not configured for Stripe billing yet.',
+    );
   }
 
   const planCurrency = plan.currency.toLowerCase();
@@ -76,7 +122,7 @@ export async function validatePlanStripePrice(
     throw new BillingError(
       400,
       'PLAN_NOT_CONFIGURED_IN_STRIPE',
-      'Plan currency does not match Stripe price currency',
+      'This plan is not configured for Stripe billing yet.',
     );
   }
 
@@ -113,9 +159,33 @@ function billingIntervalFromCycle(billingCycle: string): 'day' | 'week' | 'month
   return 'month';
 }
 
+async function existingStripePriceMatchesPlan(
+  stripe: StripeClient,
+  stripePriceId: string,
+  params: { price: number; currency: string; billingCycle: string },
+): Promise<boolean> {
+  try {
+    const existingPrice = (await stripe.prices.retrieve(stripePriceId)) as StripePriceLike;
+    const interval = billingIntervalFromCycle(params.billingCycle);
+    const unitAmount = Math.round(params.price * 100);
+    const currency = params.currency.toLowerCase();
+
+    return (
+      existingPrice.active &&
+      existingPrice.type === 'recurring' &&
+      existingPrice.recurring?.interval === interval &&
+      (existingPrice.currency || '').toLowerCase() === currency &&
+      existingPrice.unit_amount === unitAmount
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Create or rotate Stripe Product/Price for a regional plan.
- * When price/currency changes, creates a new Price and deactivates the old one.
+ * When price/currency changes, creates a new Price and deactivates the old one
+ * only when no active Stripe subscriptions depend on the plan.
  */
 export async function syncPlanToStripe(params: {
   regionId: string;
@@ -128,6 +198,18 @@ export async function syncPlanToStripe(params: {
   previousStripePriceId?: string | null;
 }): Promise<string> {
   const stripe = await getRegionalStripeClient(params.regionId);
+
+  if (params.previousStripePriceId) {
+    const unchanged = await existingStripePriceMatchesPlan(
+      stripe,
+      params.previousStripePriceId,
+      params,
+    );
+    if (unchanged) {
+      return params.previousStripePriceId;
+    }
+  }
+
   const unitAmount = Math.round(params.price * 100);
   const currency = params.currency.toLowerCase();
 
@@ -153,10 +235,13 @@ export async function syncPlanToStripe(params: {
   });
 
   if (params.previousStripePriceId && params.previousStripePriceId !== newPrice.id) {
-    try {
-      await stripe.prices.update(params.previousStripePriceId, { active: false });
-    } catch {
-      // Old price may already be inactive or deleted in Stripe.
+    const keepOldPriceActive = await planHasActiveStripeSubscriptions(params.planId);
+    if (!keepOldPriceActive) {
+      try {
+        await stripe.prices.update(params.previousStripePriceId, { active: false });
+      } catch {
+        // Old price may already be inactive or deleted in Stripe.
+      }
     }
   }
 

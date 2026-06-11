@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { BillingError, sanitizeExternalError } from '../services/billing/billingError';
 import { getBillingMe } from '../services/billing/billingMeService';
+import { getBillingInvoices } from '../services/billing/billingInvoiceService';
 import {
   cancelSubscription,
   changePlan,
@@ -18,6 +19,16 @@ function handleBillingError(res: Response, err: unknown) {
   console.error('[billing]', sanitizeExternalError(err));
   return res.status(500).json({ code: 'CHECKOUT_FAILED', message: 'Billing request failed' });
 }
+
+router.get('/invoices', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const result = await getBillingInvoices(userId);
+    return res.json(result);
+  } catch (err) {
+    return handleBillingError(res, err);
+  }
+});
 
 router.get('/me', requireAuth, async (req: Request, res: Response) => {
   try {

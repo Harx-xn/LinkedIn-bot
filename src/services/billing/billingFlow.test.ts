@@ -236,6 +236,78 @@ describe('post-checkout activation', () => {
   });
 });
 
+describe('billing invoices', () => {
+  const invoiceServiceSource = readFileSync(
+    join(process.cwd(), 'src/services/billing/billingInvoiceService.ts'),
+    'utf8',
+  );
+  const billingRouteSource = readFileSync(join(process.cwd(), 'src/routes/billing.ts'), 'utf8');
+
+  it('exposes GET /api/billing/invoices with requireAuth', () => {
+    assert.ok(billingRouteSource.includes("router.get('/invoices', requireAuth"));
+    assert.ok(billingRouteSource.includes('getBillingInvoices'));
+  });
+
+  it('returns empty invoices when no Stripe billing account exists', () => {
+    assert.ok(invoiceServiceSource.includes('return { invoices: [] }'));
+    assert.ok(invoiceServiceSource.includes('!stripeCustomerId && !stripeSubscriptionId'));
+  });
+
+  it('normalizes Stripe invoice fields without exposing raw objects', () => {
+    const { normalizeStripeInvoice } = require('./billingInvoiceService') as typeof import('./billingInvoiceService');
+    const normalized = normalizeStripeInvoice({
+      id: 'in_123',
+      number: 'INV-001',
+      status: 'paid',
+      amount_due: 1500,
+      amount_paid: 1500,
+      currency: 'usd',
+      created: 1_700_000_000,
+      period_start: 1_700_000_000,
+      period_end: 1_700_086_400,
+      hosted_invoice_url: 'https://invoice.stripe.com/i/test',
+      invoice_pdf: 'https://pay.stripe.com/invoice/test/pdf',
+    });
+    assert.equal(normalized.id, 'in_123');
+    assert.equal(normalized.status, 'paid');
+    assert.equal(normalized.amountDue, 1500);
+    assert.equal(normalized.currency, 'usd');
+    assert.ok(normalized.createdAt.includes('T'));
+    assert.ok(!invoiceServiceSource.includes('stripeSecretKey'));
+    assert.ok(!invoiceServiceSource.includes('decryptSecret'));
+  });
+
+  it('maps Stripe fetch failures to INVOICES_FETCH_FAILED', () => {
+    assert.ok(invoiceServiceSource.includes('INVOICES_FETCH_FAILED'));
+    assert.ok(invoiceServiceSource.includes('Could not load invoices.'));
+  });
+});
+
+describe('change-plan downgrade', () => {
+  const changePlanSource = readFileSync(
+    join(process.cwd(), 'src/services/billing/billingManagementService.ts'),
+    'utf8',
+  );
+
+  it('uses direct subscription update for downgrades without schedules', () => {
+    assert.ok(changePlanSource.includes("proration_behavior: isUpgrade ? 'create_prorations' : 'none'"));
+    assert.ok(!changePlanSource.includes('subscriptionSchedules.create'));
+    assert.ok(!changePlanSource.includes('notifyDowngradeScheduled'));
+  });
+
+  it('validates current and target Stripe price configuration', () => {
+    assert.ok(changePlanSource.includes('CURRENT_PLAN_NOT_CONFIGURED_IN_STRIPE'));
+    assert.ok(changePlanSource.includes('SUBSCRIPTION_ITEM_NOT_FOUND'));
+    assert.ok(changePlanSource.includes('PLAN_NOT_CONFIGURED_IN_STRIPE'));
+  });
+
+  it('returns immediate downgrade response shape', () => {
+    assert.ok(changePlanSource.includes('pending: false'));
+    assert.ok(changePlanSource.includes('effectiveAt: null'));
+    assert.ok(changePlanSource.includes('scheduled downgrades at period end'));
+  });
+});
+
 describe('payments checkout errors', () => {
   const paymentsSource = readFileSync(join(process.cwd(), 'src/routes/payments.ts'), 'utf8');
   const checkoutSource = readFileSync(

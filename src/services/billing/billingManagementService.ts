@@ -1,11 +1,9 @@
 import { prisma } from '../../prismaClient';
 import { config } from '../../config';
-import { resolveStripePlanItem } from '../subscriptionAdminService';
 import { BillingError } from './billingError';
 import { getManageableSubscription } from './billingAccessService';
 import {
   notifyCancellationScheduled,
-  notifyDowngradeScheduled,
   notifyReactivated,
 } from './billingNotificationService';
 import { assertFrontendUrl, getRegionalStripeClient } from './stripeClientService';
@@ -133,6 +131,19 @@ export async function reactivateSubscription(userId: string) {
 
 export async function changePlan(userId: string, targetPlanId: string) {
   const sub = await loadOwnedSubscription(userId);
+
+  if (!sub.plan) {
+    throw new BillingError(400, 'SUBSCRIPTION_NOT_MANAGEABLE', 'Current subscription plan not found');
+  }
+
+  if (!sub.plan.stripePriceId) {
+    throw new BillingError(
+      400,
+      'CURRENT_PLAN_NOT_CONFIGURED_IN_STRIPE',
+      'Current plan is not configured for Stripe billing.',
+    );
+  }
+
   const stripe = await getRegionalStripeClient(sub.regionId!);
   const { plan: targetPlan } = await validatePlanStripePrice(
     targetPlanId,
@@ -140,54 +151,53 @@ export async function changePlan(userId: string, targetPlanId: string) {
     stripe,
   );
 
+  if (!targetPlan.stripePriceId) {
+    throw new BillingError(
+      400,
+      'PLAN_NOT_CONFIGURED_IN_STRIPE',
+      'This plan is not configured for Stripe billing yet.',
+    );
+  }
+
   if (sub.planId === targetPlan.id) {
-    return { pending: false, planId: targetPlan.id, status: sub.status };
+    return {
+      pending: false,
+      planId: targetPlan.id,
+      status: sub.status,
+      effectiveAt: null,
+    };
   }
 
   const stripeSub = (await stripe.subscriptions.retrieve(
     sub.stripeSubscriptionId!,
   )) as StripeSubscriptionFull;
-  const item = resolveStripePlanItem(stripeSub, sub.plan.stripePriceId);
+
+  const item = stripeSub.items?.data?.find(
+    (lineItem) => lineItem.price.id === sub.plan.stripePriceId,
+  );
+  if (!item) {
+    throw new BillingError(
+      400,
+      'SUBSCRIPTION_ITEM_NOT_FOUND',
+      'Could not find the current subscription item in Stripe.',
+    );
+  }
 
   const isUpgrade = targetPlan.price > sub.plan.price;
-  const prorationBehavior = isUpgrade ? ('create_prorations' as const) : ('none' as const);
 
-  let updated;
-  if (isUpgrade) {
-    updated = await stripe.subscriptions.update(sub.stripeSubscriptionId!, {
-      items: [{ id: item.id, price: targetPlan.stripePriceId }],
-      proration_behavior: prorationBehavior,
-      metadata: {
-        ...stripeSub.metadata,
-        planId: targetPlan.id,
-        userId,
-        regionId: sub.regionId!,
-      },
-    });
-  } else {
-    const periodEnd = stripeSub.current_period_end;
-    await stripe.subscriptionSchedules.create({
-      from_subscription: sub.stripeSubscriptionId!,
-      end_behavior: 'release',
-      phases: [
-        {
-          items: [{ price: sub.plan.stripePriceId!, quantity: 1 }],
-          end_date: periodEnd,
-        },
-        {
-          items: [{ price: targetPlan.stripePriceId, quantity: 1 }],
-          metadata: {
-            planId: targetPlan.id,
-            userId,
-            regionId: sub.regionId!,
-          },
-        },
-      ],
-    });
-    updated = (await stripe.subscriptions.retrieve(
-      sub.stripeSubscriptionId!,
-    )) as StripeSubscriptionFull;
-  }
+  // TODO: support scheduled downgrades at period end using Stripe subscription schedules
+  // after handling existing schedules and Stripe phase rules.
+
+  const updated = await stripe.subscriptions.update(sub.stripeSubscriptionId!, {
+    items: [{ id: item.id, price: targetPlan.stripePriceId }],
+    proration_behavior: isUpgrade ? 'create_prorations' : 'none',
+    metadata: {
+      ...stripeSub.metadata,
+      planId: targetPlan.id,
+      userId,
+      regionId: sub.regionId!,
+    },
+  });
 
   const synced = await syncSubscriptionFromStripe({
     stripe,
@@ -196,19 +206,17 @@ export async function changePlan(userId: string, targetPlanId: string) {
     sourceEvent: { id: `change-plan:${sub.id}:${targetPlan.id}`, type: 'user.change_plan' },
   });
 
-  if (!isUpgrade && synced.currentPeriodEnd) {
-    await notifyDowngradeScheduled(
-      userId,
-      targetPlan.name,
-      synced.currentPeriodEnd,
-      `change-plan:${sub.id}:${targetPlan.id}`,
-    );
+  if (synced.planId !== targetPlan.id) {
+    await prisma.subscription.update({
+      where: { id: synced.id },
+      data: { planId: targetPlan.id },
+    });
   }
 
   return {
-    pending: !isUpgrade,
-    planId: synced.planId,
+    pending: false,
+    planId: targetPlan.id,
     status: synced.status,
-    effectiveAt: isUpgrade ? null : synced.currentPeriodEnd?.toISOString() ?? null,
+    effectiveAt: null,
   };
 }

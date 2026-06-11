@@ -428,15 +428,23 @@ router.put("/payment-config", async (req, res) => {
 // Plans (subscription fees)
 // ---------------------------------------------------------------------------
 
+const STRIPE_PLAN_SYNC_FAILED_RESPONSE = {
+  error: "Could not sync plan to Stripe. Check payment settings.",
+  code: "STRIPE_PLAN_SYNC_FAILED",
+} as const;
+
 router.get("/plans", async (req, res) => {
   try {
     const regionId = getRegion(req);
+    const { formatSubAdminPlanResponse } = await import(
+      "../services/billing/stripePlanService"
+    );
     const plans = await prisma.plan.findMany({
       where: { regionId },
       include: { _count: { select: { subscriptions: true } } },
       orderBy: { createdAt: "desc" },
     });
-    return res.json(plans);
+    return res.json(plans.map((plan) => formatSubAdminPlanResponse(plan)));
   } catch (error: any) {
     return res.status(403).json({ message: error.message });
   }
@@ -481,6 +489,8 @@ router.post("/plans", async (req, res) => {
     const regionId = getRegion(req);
     const body = req.body as Record<string, any>;
     const { name, code, price, currency, billingCycle } = body;
+    const { validateManualStripePriceId, syncPlanToStripe, formatSubAdminPlanResponse } =
+      await import("../services/billing/stripePlanService");
 
     // Core required fields.
     if (!name || typeof name !== "string") {
@@ -507,10 +517,12 @@ router.post("/plans", async (req, res) => {
       return res.status(400).json({ message: err.message });
     }
 
-    const stripePriceId =
-      typeof body.stripePriceId === 'string' && body.stripePriceId.trim()
-        ? body.stripePriceId.trim()
-        : undefined;
+    let manualStripePriceId: string | undefined;
+    try {
+      manualStripePriceId = validateManualStripePriceId(body.stripePriceId);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message, code: "PLAN_NOT_CONFIGURED_IN_STRIPE" });
+    }
 
     const plan = await prisma.plan.create({
       data: {
@@ -520,15 +532,14 @@ router.post("/plans", async (req, res) => {
         currency,
         billingCycle,
         regionId,
-        stripePriceId,
+        stripePriceId: manualStripePriceId,
         ...featureData,
       },
     });
 
-    if (body.syncStripe === true && !stripePriceId) {
+    if (body.syncStripe === true && !manualStripePriceId) {
       try {
-        const { syncPlanToStripe } = await import('../services/billing/stripePlanService');
-        const newPriceId = await syncPlanToStripe({
+        await syncPlanToStripe({
           regionId,
           planId: plan.id,
           name,
@@ -538,16 +549,14 @@ router.post("/plans", async (req, res) => {
           billingCycle,
         });
         const synced = await prisma.plan.findUnique({ where: { id: plan.id } });
-        return res.status(201).json({ ...synced, stripePriceId: newPriceId });
-      } catch (stripeErr: any) {
-        return res.status(201).json({
-          ...plan,
-          stripeSyncWarning: stripeErr?.message || 'Stripe sync failed',
-        });
+        return res.status(201).json(formatSubAdminPlanResponse(synced!));
+      } catch {
+        await prisma.plan.delete({ where: { id: plan.id } });
+        return res.status(400).json(STRIPE_PLAN_SYNC_FAILED_RESPONSE);
       }
     }
 
-    return res.status(201).json(plan);
+    return res.status(201).json(formatSubAdminPlanResponse(plan));
   } catch (error: any) {
     if (error?.code === "P2002") {
       return res.status(400).json({
@@ -562,6 +571,8 @@ router.patch("/plans/:planId", async (req, res) => {
   try {
     const regionId = getRegion(req);
     const { planId } = req.params;
+    const { validateManualStripePriceId, syncPlanToStripe, formatSubAdminPlanResponse } =
+      await import("../services/billing/stripePlanService");
 
     const existing = await prisma.plan.findUnique({ where: { id: planId } });
     if (!existing || existing.regionId !== regionId) {
@@ -611,42 +622,48 @@ router.patch("/plans/:planId", async (req, res) => {
     } catch (err: any) {
       return res.status(400).json({ message: err.message });
     }
-    if (typeof body.stripePriceId === 'string' && body.stripePriceId.trim()) {
-      data.stripePriceId = body.stripePriceId.trim();
+
+    let manualStripePriceId: string | undefined;
+    try {
+      manualStripePriceId = validateManualStripePriceId(body.stripePriceId);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message, code: "PLAN_NOT_CONFIGURED_IN_STRIPE" });
+    }
+    if (manualStripePriceId) {
+      data.stripePriceId = manualStripePriceId;
     }
 
     Object.assign(data, featureData);
 
-    const priceChanged =
-      data.price !== undefined &&
-      Number(data.price) !== existing.price;
-    const currencyChanged =
-      data.currency !== undefined &&
-      String(data.currency).toLowerCase() !== existing.currency.toLowerCase();
+    const plan = await prisma.plan.update({ where: { id: planId }, data });
 
-    if (body.syncStripe === true && (priceChanged || currencyChanged) && !data.stripePriceId) {
+    if (body.syncStripe === true && !manualStripePriceId) {
       try {
-        const { syncPlanToStripe } = await import('../services/billing/stripePlanService');
-        const newPriceId = await syncPlanToStripe({
+        await syncPlanToStripe({
           regionId,
           planId,
-          name: (data.name as string) ?? existing.name,
-          code: (data.code as string) ?? existing.code,
-          price: (data.price as number) ?? existing.price,
-          currency: (data.currency as string) ?? existing.currency,
-          billingCycle: (data.billingCycle as string) ?? existing.billingCycle,
+          name: plan.name,
+          code: plan.code,
+          price: plan.price,
+          currency: plan.currency,
+          billingCycle: plan.billingCycle,
           previousStripePriceId: existing.stripePriceId,
         });
-        data.stripePriceId = newPriceId;
-      } catch (stripeErr: any) {
-        return res.status(400).json({
-          message: stripeErr?.message || 'Stripe price sync failed',
+        const refreshed = await prisma.plan.findUnique({
+          where: { id: planId },
+          include: { _count: { select: { subscriptions: true } } },
         });
+        return res.json(formatSubAdminPlanResponse(refreshed!));
+      } catch {
+        return res.status(400).json(STRIPE_PLAN_SYNC_FAILED_RESPONSE);
       }
     }
 
-    const plan = await prisma.plan.update({ where: { id: planId }, data });
-    return res.json(plan);
+    const withCount = await prisma.plan.findUnique({
+      where: { id: planId },
+      include: { _count: { select: { subscriptions: true } } },
+    });
+    return res.json(formatSubAdminPlanResponse(withCount!));
   } catch (error: any) {
     if (error?.code === "P2002") {
       return res.status(400).json({

@@ -68,7 +68,7 @@ async function assertStripeReady(regionId: string) {
     throw new BillingError(
       400,
       'STRIPE_NOT_CONFIGURED',
-      'Online billing is not configured for your region',
+      'Stripe is not configured for this region yet.',
     );
   }
 }
