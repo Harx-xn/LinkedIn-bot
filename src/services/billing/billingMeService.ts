@@ -10,6 +10,7 @@ import {
   hasDashboardAccess,
   isTrialEligible,
 } from './billingAccessService';
+import { isStripeConfigured } from './stripeClientService';
 
 function iso(d: Date | null | undefined): string | null {
   return d ? d.toISOString() : null;
@@ -46,6 +47,15 @@ function planRelationship(
   return 'AVAILABLE';
 }
 
+async function resolveStripeConfigured(regionId: string | null): Promise<boolean> {
+  if (!regionId) return false;
+  try {
+    return await isStripeConfigured(regionId);
+  } catch {
+    return false;
+  }
+}
+
 function resolveRecommendedAction(params: {
   trialEligible: boolean;
   billingRequired: boolean;
@@ -72,6 +82,7 @@ export async function getBillingMe(userId: string) {
       trialStartedAt: true,
       trialEndsAt: true,
       trialRedeemedAt: true,
+      stripeCustomerId: true,
     },
   });
 
@@ -84,12 +95,16 @@ export async function getBillingMe(userId: string) {
       billingRequired: false,
       dashboardAccess: true,
       trialEligible: false,
+      stripeConfigured: false,
       trial: { active: false, startedAt: null, endsAt: null, daysRemaining: null },
       subscription: {
         id: null,
         planId: null,
         planName: null,
         planCode: null,
+        price: null,
+        currency: null,
+        billingCycle: null,
         status: null,
         currentPeriodStart: null,
         currentPeriodEnd: null,
@@ -102,10 +117,11 @@ export async function getBillingMe(userId: string) {
     };
   }
 
-  const [dashboardAccess, trialEligible, sub] = await Promise.all([
+  const [dashboardAccess, trialEligible, sub, stripeConfigured] = await Promise.all([
     hasDashboardAccess(userId),
     isTrialEligible(userId),
     getManageableSubscription(userId),
+    resolveStripeConfigured(user.regionId),
   ]);
 
   const billingRequired =
@@ -134,6 +150,13 @@ export async function getBillingMe(userId: string) {
     currency: p.currency,
     billingCycle: p.billingCycle,
     relationship: planRelationship(currentPrice, p.price, sub?.planId === p.id),
+    stripePriceIdPresent: Boolean(p.stripePriceId),
+    fullDashboardUnlock: p.fullDashboardUnlock,
+    maxRewritesPerPost: p.maxRewritesPerPost,
+    dailyPostLimit: p.dailyPostLimit,
+    dailyBatchGenerationLimit: p.dailyBatchGenerationLimit,
+    imageGenerationEnabled: p.imageGenerationEnabled,
+    dailyImageGenerationLimit: p.dailyImageGenerationLimit,
   }));
 
   const subStatus = mapSubStatus(sub?.status ?? null);
@@ -143,6 +166,9 @@ export async function getBillingMe(userId: string) {
     billingRequired,
     dashboardAccess,
     trialEligible,
+    stripeConfigured,
+    stripeCustomerPresent: Boolean(user.stripeCustomerId || sub?.stripeCustomerId),
+    portalAvailable: Boolean(user.stripeCustomerId || sub?.stripeCustomerId),
     trial: {
       active: trialActive,
       startedAt: iso(user.trialStartedAt),
@@ -154,6 +180,9 @@ export async function getBillingMe(userId: string) {
       planId: sub?.planId ?? null,
       planName: sub?.plan?.name ?? null,
       planCode: sub?.plan?.code ?? null,
+      price: sub?.plan?.price ?? null,
+      currency: sub?.plan?.currency ?? null,
+      billingCycle: sub?.plan?.billingCycle ?? null,
       status: subStatus,
       currentPeriodStart: iso(sub?.currentPeriodStart),
       currentPeriodEnd: iso(sub?.currentPeriodEnd),

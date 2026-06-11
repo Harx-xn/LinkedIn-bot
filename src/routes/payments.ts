@@ -11,10 +11,13 @@ const router = Router();
 
 function handleBillingError(res: Response, err: unknown) {
   if (err instanceof BillingError) {
-    return res.status(err.status).json({ code: err.code, message: err.message });
+    return res.status(err.status).json({ error: err.message, code: err.code });
   }
   console.error('[payments]', sanitizeExternalError(err));
-  return res.status(500).json({ code: 'CHECKOUT_FAILED', message: 'Payment request failed' });
+  return res.status(500).json({
+    error: 'Payment request failed',
+    code: 'CHECKOUT_FAILED',
+  });
 }
 
 router.post('/trial-checkout', requireAuth, async (req: Request, res: Response) => {
@@ -25,7 +28,7 @@ router.post('/trial-checkout', requireAuth, async (req: Request, res: Response) 
   };
 
   if (!planId) {
-    return res.status(400).json({ code: 'PLAN_NOT_FOUND', message: 'planId is required' });
+    return res.status(400).json({ error: 'planId is required', code: 'PLAN_NOT_FOUND' });
   }
 
   try {
@@ -51,7 +54,7 @@ router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
   };
 
   if (!planId) {
-    return res.status(400).json({ code: 'PLAN_NOT_FOUND', message: 'planId is required' });
+    return res.status(400).json({ error: 'planId is required', code: 'PLAN_NOT_FOUND' });
   }
 
   try {

@@ -1,10 +1,10 @@
 import { BillingAccessStatus } from '@prisma/client';
 import { prisma } from '../../prismaClient';
 import { config } from '../../config';
-import { findValidPromotion } from '../promotionService';
+import { validatePromotionCode } from '../promotionService';
 import { findValidInvite } from '../inviteService';
 import { getBooleanSetting } from '../settingsService';
-import { BillingError } from './billingError';
+import { BillingError, sanitizeExternalError } from './billingError';
 import {
   getOrCreateStripeCustomerId,
   hasBlockingSubscription,
@@ -12,8 +12,9 @@ import {
   resolveTrialDays,
   setUserBillingAccess,
 } from './billingAccessService';
-import { assertFrontendUrl, getRegionalStripeClient } from './stripeClientService';
+import { assertFrontendUrl, getRegionalStripeClient, isStripeConfigured } from './stripeClientService';
 import { validatePlanStripePrice } from './stripePlanService';
+import type { StripeCheckoutSessionLike, StripeSubscriptionFull } from './stripeTypes';
 
 export interface CheckoutInput {
   userId: string;
@@ -42,50 +43,126 @@ function buildCheckoutMetadata(params: {
   };
 }
 
+async function assertCheckoutUser(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, regionId: true, billingAccessStatus: true },
+  });
+
+  if (!user) {
+    throw new BillingError(404, 'BILLING_NOT_AVAILABLE', 'Account not found');
+  }
+  if (!user.email) {
+    throw new BillingError(400, 'BILLING_NOT_AVAILABLE', 'Account email is required for billing');
+  }
+  if (!user.regionId) {
+    throw new BillingError(400, 'USER_REGION_MISSING', 'Your account is not assigned to a billing region');
+  }
+
+  return user as typeof user & { email: string; regionId: string };
+}
+
+async function assertStripeReady(regionId: string) {
+  const configured = await isStripeConfigured(regionId);
+  if (!configured) {
+    throw new BillingError(
+      400,
+      'STRIPE_NOT_CONFIGURED',
+      'Online billing is not configured for your region',
+    );
+  }
+}
+
+async function assertNoCheckoutBlockingSubscription(userId: string) {
+  if (await hasBlockingSubscription(userId)) {
+    throw new BillingError(
+      409,
+      'SUBSCRIPTION_ALREADY_EXISTS',
+      'You already have an active subscription. Use plan change or the billing portal to manage it.',
+    );
+  }
+}
+
+async function resolveCheckoutPromotion(params: {
+  promoCode?: string;
+  inviteCode?: string;
+  regionId: string;
+  requireStripePromotionCode: boolean;
+}) {
+  const promoCodesEnabled = await getBooleanSetting(
+    'billing.promoCodesEnabled',
+    params.regionId,
+    true,
+  );
+
+  if (!promoCodesEnabled) {
+    if (params.promoCode?.trim()) {
+      throw new BillingError(400, 'PROMO_INVALID', 'Promotion codes are not enabled for your region');
+    }
+    return null;
+  }
+
+  if (params.promoCode?.trim()) {
+    return validatePromotionCode(params.promoCode, {
+      regionId: params.regionId,
+      requireStripePromotionCode: params.requireStripePromotionCode,
+    });
+  }
+
+  if (params.inviteCode?.trim()) {
+    const invite = await findValidInvite(params.inviteCode);
+    if (invite?.promoCode) {
+      return validatePromotionCode(invite.promoCode, {
+        regionId: params.regionId,
+        requireStripePromotionCode: params.requireStripePromotionCode,
+      });
+    }
+  }
+
+  return null;
+}
+
+async function createStripeCheckoutSession(
+  stripe: Awaited<ReturnType<typeof getRegionalStripeClient>>,
+  params: Parameters<typeof stripe.checkout.sessions.create>[0],
+  idempotencyKey: string,
+) {
+  try {
+    return await stripe.checkout.sessions.create(params, { idempotencyKey });
+  } catch (err) {
+    console.error('[checkout]', sanitizeExternalError(err));
+    throw new BillingError(
+      502,
+      'CHECKOUT_SESSION_FAILED',
+      'Could not start checkout. Please try again.',
+    );
+  }
+}
+
 export async function createTrialCheckoutSession(input: CheckoutInput) {
   if (input.mode !== 'trial') {
     throw new BillingError(400, 'CHECKOUT_FAILED', 'Invalid checkout mode');
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: input.userId },
-    select: { id: true, email: true, regionId: true, billingAccessStatus: true },
-  });
-
-  if (!user?.regionId || !user.email) {
-    throw new BillingError(404, 'PLAN_NOT_FOUND', 'User or region not found');
-  }
+  const user = await assertCheckoutUser(input.userId);
+  await assertStripeReady(user.regionId);
 
   const eligible = await isTrialEligible(input.userId);
   if (!eligible) {
     throw new BillingError(403, 'TRIAL_ALREADY_USED', 'You are not eligible for a free trial');
   }
 
-  if (await hasBlockingSubscription(input.userId)) {
-    throw new BillingError(409, 'SUBSCRIPTION_ALREADY_EXISTS', 'You already have a subscription');
-  }
+  await assertNoCheckoutBlockingSubscription(input.userId);
 
   const stripe = await getRegionalStripeClient(user.regionId);
   const { plan } = await validatePlanStripePrice(input.planId, user.regionId, stripe);
 
-  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
-  let promo = promoCodesEnabled
-    ? await findValidPromotion(input.promoCode, {
-        regionId: user.regionId,
-        requireStripePromotionCode: false,
-      })
-    : null;
-
-  if (input.inviteCode && !promo) {
-    const invite = await findValidInvite(input.inviteCode);
-    if (invite?.promoCode) {
-      promo = await findValidPromotion(invite.promoCode, { regionId: user.regionId });
-    }
-  }
-
-  if (input.promoCode && promoCodesEnabled && !promo) {
-    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is not valid');
-  }
+  const promo = await resolveCheckoutPromotion({
+    promoCode: input.promoCode,
+    inviteCode: input.inviteCode,
+    regionId: user.regionId,
+    requireStripePromotionCode: false,
+  });
 
   const extraTrialDays =
     promo?.type === 'INTERNAL_TRIAL' ? promo.extraTrialDays ?? 0 : 0;
@@ -113,8 +190,10 @@ export async function createTrialCheckoutSession(input: CheckoutInput) {
   assertFrontendUrl(cancelUrl, config.frontendUrl);
 
   const idempotencyKey = `trial-checkout:${user.id}:${plan.id}:${trialDays}`;
+  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
 
-  const session = await stripe.checkout.sessions.create(
+  const session = await createStripeCheckoutSession(
+    stripe,
     {
       mode: 'subscription',
       customer: stripeCustomerId,
@@ -139,7 +218,7 @@ export async function createTrialCheckoutSession(input: CheckoutInput) {
       success_url: successUrl,
       cancel_url: cancelUrl,
     },
-    { idempotencyKey },
+    idempotencyKey,
   );
 
   await setUserBillingAccess(user.id, BillingAccessStatus.TRIAL_PENDING);
@@ -148,37 +227,19 @@ export async function createTrialCheckoutSession(input: CheckoutInput) {
 }
 
 export async function createPaidCheckoutSession(input: CheckoutInput) {
-  const user = await prisma.user.findUnique({
-    where: { id: input.userId },
-    select: { id: true, email: true, regionId: true },
-  });
-
-  if (!user?.regionId || !user.email) {
-    throw new BillingError(404, 'PLAN_NOT_FOUND', 'User or region not found');
-  }
-
-  if (await hasBlockingSubscription(input.userId)) {
-    throw new BillingError(
-      409,
-      'SUBSCRIPTION_ALREADY_EXISTS',
-      'Use plan change or the billing portal to manage your existing subscription',
-    );
-  }
+  const user = await assertCheckoutUser(input.userId);
+  await assertStripeReady(user.regionId);
+  await assertNoCheckoutBlockingSubscription(input.userId);
 
   const stripe = await getRegionalStripeClient(user.regionId);
   const { plan } = await validatePlanStripePrice(input.planId, user.regionId, stripe);
 
-  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
-  const promo = promoCodesEnabled
-    ? await findValidPromotion(input.promoCode, {
-        regionId: user.regionId,
-        requireStripePromotionCode: true,
-      })
-    : null;
-
-  if (input.promoCode && promoCodesEnabled && !promo) {
-    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is not valid');
-  }
+  const promo = await resolveCheckoutPromotion({
+    promoCode: input.promoCode,
+    inviteCode: input.inviteCode,
+    regionId: user.regionId,
+    requireStripePromotionCode: true,
+  });
 
   const stripeCustomerId = await getOrCreateStripeCustomerId({
     userId: user.id,
@@ -202,8 +263,10 @@ export async function createPaidCheckoutSession(input: CheckoutInput) {
   assertFrontendUrl(cancelUrl, config.frontendUrl);
 
   const idempotencyKey = `paid-checkout:${user.id}:${plan.id}`;
+  const promoCodesEnabled = await getBooleanSetting('billing.promoCodesEnabled', user.regionId, true);
 
-  const session = await stripe.checkout.sessions.create(
+  const session = await createStripeCheckoutSession(
+    stripe,
     {
       mode: 'subscription',
       customer: stripeCustomerId,
@@ -218,7 +281,7 @@ export async function createPaidCheckoutSession(input: CheckoutInput) {
       success_url: successUrl,
       cancel_url: cancelUrl,
     },
-    { idempotencyKey },
+    idempotencyKey,
   );
 
   return { url: session.url, sessionId: session.id };
@@ -232,22 +295,35 @@ export async function getCheckoutStatus(params: {
     where: { id: params.userId },
     select: { regionId: true },
   });
-  if (!user?.regionId) {
-    throw new BillingError(404, 'PLAN_NOT_FOUND', 'User not found');
+  if (!user) {
+    throw new BillingError(404, 'BILLING_NOT_AVAILABLE', 'Account not found');
+  }
+  if (!user.regionId) {
+    throw new BillingError(400, 'USER_REGION_MISSING', 'Your account is not assigned to a billing region');
   }
 
   const stripe = await getRegionalStripeClient(user.regionId);
-  const session = await stripe.checkout.sessions.retrieve(params.sessionId, {
-    expand: ['subscription'],
-  });
+  const session = (await stripe.checkout.sessions.retrieve(params.sessionId, {
+    expand: ['subscription.default_payment_method'],
+  })) as StripeCheckoutSessionLike;
 
   const meta = session.metadata ?? {};
   if (meta.userId !== params.userId || meta.regionId !== user.regionId) {
     throw new BillingError(403, 'REGION_MISMATCH', 'Checkout session does not belong to this user');
   }
 
-  if (session.payment_status === 'unpaid' && session.status === 'expired') {
+  if (session.status === 'expired') {
     return { status: 'FAILED' as const, subscriptionStatus: null };
+  }
+
+  if (session.status !== 'complete') {
+    return { status: 'PROCESSING' as const, subscriptionStatus: null };
+  }
+
+  const verifiedPayment =
+    session.payment_status === 'paid' || session.payment_status === 'no_payment_required';
+  if (!verifiedPayment) {
+    return { status: 'INCOMPLETE' as const, subscriptionStatus: 'INCOMPLETE' };
   }
 
   const subscriptionId =
@@ -266,14 +342,13 @@ export async function getCheckoutStatus(params: {
       session,
       expectedRegionId: user.regionId,
     });
-  } catch {
-    // Reconciliation is best-effort; webhook remains authoritative.
+  } catch (err) {
+    console.error('[checkout-status]', sanitizeExternalError(err));
   }
 
-  const stripeSub =
-    typeof session.subscription === 'object' && session.subscription
-      ? session.subscription
-      : await stripe.subscriptions.retrieve(subscriptionId);
+  const stripeSub = (await stripe.subscriptions.retrieve(subscriptionId, {
+    expand: ['default_payment_method'],
+  })) as StripeSubscriptionFull;
 
   const subStatus = stripeSub.status;
   if (subStatus === 'trialing') return { status: 'TRIALING' as const, subscriptionStatus: 'TRIALING' };

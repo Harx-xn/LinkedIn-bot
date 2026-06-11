@@ -3,10 +3,12 @@ import type { StripeSubscriptionLike } from '../subscriptionAdminService';
 export interface StripeCheckoutSessionLike {
   id: string;
   metadata?: Record<string, string> | null;
-  subscription?: string | { id: string } | null;
+  subscription?: string | { id: string; default_payment_method?: string | { id: string } | null } | null;
   customer?: string | { id: string } | null;
   payment_status?: string | null;
   status?: string | null;
+  setup_intent?: string | { payment_method?: string | { id: string } | null } | null;
+  payment_intent?: string | { payment_method?: string | { id: string } | null } | null;
 }
 
 export interface StripeSubscriptionFull extends StripeSubscriptionLike {

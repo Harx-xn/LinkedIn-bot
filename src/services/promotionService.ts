@@ -1,4 +1,5 @@
 import { prisma } from '../prismaClient';
+import { BillingError } from './billing/billingError';
 
 export type PromotionContext = {
   regionId?: string | null;
@@ -7,6 +8,41 @@ export type PromotionContext = {
 
 export function normalizeCode(code?: string | null) {
   return code?.trim().toUpperCase() || '';
+}
+
+export async function validatePromotionCode(
+  rawCode: string | undefined | null,
+  ctx: PromotionContext = {},
+) {
+  const code = normalizeCode(rawCode);
+  if (!code) return null;
+
+  const now = new Date();
+  const promo = await prisma.promotion.findFirst({
+    where: {
+      code,
+      OR: [{ regionId: ctx.regionId || null }, { regionId: null }],
+    },
+    orderBy: [{ regionId: 'desc' }, { createdAt: 'desc' }],
+  });
+
+  if (!promo || !promo.isActive) {
+    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is not valid');
+  }
+  if (promo.startsAt && promo.startsAt > now) {
+    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is not active yet');
+  }
+  if (promo.endsAt && promo.endsAt < now) {
+    throw new BillingError(400, 'PROMO_EXPIRED', 'Promotion code has expired');
+  }
+  if (promo.maxRedemptions !== null && promo.redemptionCount >= promo.maxRedemptions) {
+    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is no longer available');
+  }
+  if (ctx.requireStripePromotionCode && promo.type === 'STRIPE_PROMO' && !promo.stripePromotionCodeId) {
+    throw new BillingError(400, 'PROMO_INVALID', 'Promotion code is not valid for checkout');
+  }
+
+  return promo;
 }
 
 export async function findValidPromotion(rawCode: string | undefined | null, ctx: PromotionContext = {}) {

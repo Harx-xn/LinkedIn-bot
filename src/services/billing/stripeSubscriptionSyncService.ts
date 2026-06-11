@@ -32,6 +32,7 @@ export interface SyncSubscriptionParams {
   stripe: StripeClient;
   stripeSubscription: StripeSubscriptionFull;
   expectedRegionId: string;
+  checkoutSessionId?: string | null;
   sourceEvent?: {
     id: string;
     type: string;
@@ -46,6 +47,97 @@ function stripeTs(seconds: number | null | undefined): Date | null {
 
 function safeMetadata(meta: Record<string, string> | null | undefined) {
   return meta ?? {};
+}
+
+function paymentMethodId(value: string | { id: string } | null | undefined): string | null {
+  if (!value) return null;
+  return typeof value === 'string' ? value : value.id ?? null;
+}
+
+function customerIdFrom(value: string | { id: string } | null | undefined): string | null {
+  if (!value) return null;
+  return typeof value === 'string' ? value : value.id ?? null;
+}
+
+const CHECKOUT_VERIFIED_PAYMENT_STATUSES = new Set(['paid', 'no_payment_required']);
+
+async function resolveFromCheckoutSession(
+  stripe: StripeClient,
+  sessionId: string,
+): Promise<string | null> {
+  const session = (await stripe.checkout.sessions.retrieve(sessionId, {
+    expand: [
+      'setup_intent.payment_method',
+      'payment_intent.payment_method',
+      'subscription.default_payment_method',
+    ],
+  })) as StripeCheckoutSessionLike;
+
+  if (session.status !== 'complete') return null;
+  if (!CHECKOUT_VERIFIED_PAYMENT_STATUSES.has(session.payment_status ?? '')) return null;
+
+  const fromSetup = paymentMethodId(
+    typeof session.setup_intent === 'object' ? session.setup_intent?.payment_method : null,
+  );
+  if (fromSetup) return fromSetup;
+
+  const fromPaymentIntent = paymentMethodId(
+    typeof session.payment_intent === 'object' ? session.payment_intent?.payment_method : null,
+  );
+  if (fromPaymentIntent) return fromPaymentIntent;
+
+  if (typeof session.subscription === 'object' && session.subscription) {
+    const fromSub = paymentMethodId(session.subscription.default_payment_method);
+    if (fromSub) return fromSub;
+  }
+
+  const customerId = customerIdFrom(session.customer);
+  if (customerId) {
+    return resolveFromCustomer(stripe, customerId);
+  }
+
+  return null;
+}
+
+async function resolveFromCustomer(stripe: StripeClient, customerId: string): Promise<string | null> {
+  const customer = (await stripe.customers.retrieve(customerId, {
+    expand: ['invoice_settings.default_payment_method'],
+  })) as {
+    invoice_settings?: { default_payment_method?: string | { id: string } | null };
+  };
+
+  const fromInvoiceSettings = paymentMethodId(customer.invoice_settings?.default_payment_method);
+  if (fromInvoiceSettings) return fromInvoiceSettings;
+
+  const methods = await stripe.paymentMethods.list({
+    customer: customerId,
+    type: 'card',
+    limit: 1,
+  });
+  return methods.data[0]?.id ?? null;
+}
+
+export async function resolveDefaultPaymentMethod(
+  stripe: StripeClient,
+  options: {
+    stripeSub: StripeSubscriptionFull;
+    checkoutSessionId?: string | null;
+  },
+): Promise<string | null> {
+  const fromSubscription = paymentMethodId(options.stripeSub.default_payment_method);
+  if (fromSubscription) return fromSubscription;
+
+  if (options.checkoutSessionId) {
+    const fromCheckout = await resolveFromCheckoutSession(stripe, options.checkoutSessionId);
+    if (fromCheckout) return fromCheckout;
+  }
+
+  const customerId = customerIdFrom(options.stripeSub.customer);
+  if (customerId) {
+    return resolveFromCustomer(stripe, customerId);
+  }
+
+  return null;
 }
 
 async function resolveUserAndPlan(params: {
@@ -99,7 +191,13 @@ async function resolveUserAndPlan(params: {
 }
 
 export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams) {
-  const { stripe, stripeSubscription: stripeSub, expectedRegionId, sourceEvent } = params;
+  const {
+    stripe,
+    stripeSubscription: stripeSub,
+    expectedRegionId,
+    checkoutSessionId,
+    sourceEvent,
+  } = params;
 
   const existing = await prisma.subscription.findUnique({
     where: { stripeSubscriptionId: stripeSub.id },
@@ -131,10 +229,10 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
     });
   }
 
-  const defaultPm =
-    typeof stripeSub.default_payment_method === 'string'
-      ? stripeSub.default_payment_method
-      : stripeSub.default_payment_method?.id ?? null;
+  const defaultPm = await resolveDefaultPaymentMethod(stripe, {
+    stripeSub,
+    checkoutSessionId,
+  });
 
   const subscriptionData = {
     userId: user.id,
@@ -243,6 +341,20 @@ export async function handleCheckoutSessionCompleted(params: {
     throw new Error('REGION_MISMATCH');
   }
 
+  const userId = meta.userId;
+  if (!userId) {
+    throw new Error('Missing checkout session user');
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, regionId: true },
+  });
+
+  if (!user || user.regionId !== params.expectedRegionId) {
+    throw new Error('User region mismatch');
+  }
+
   const subscriptionId =
     typeof params.session.subscription === 'string'
       ? params.session.subscription
@@ -250,9 +362,13 @@ export async function handleCheckoutSessionCompleted(params: {
 
   if (!subscriptionId) return null;
 
-  const stripeSub = (await params.stripe.subscriptions.retrieve(
-    subscriptionId,
-  )) as StripeSubscriptionFull;
+  if (params.session.status && params.session.status !== 'complete') {
+    return null;
+  }
+
+  const stripeSub = (await params.stripe.subscriptions.retrieve(subscriptionId, {
+    expand: ['default_payment_method'],
+  })) as StripeSubscriptionFull;
 
   if (params.session.id) {
     await prisma.subscription.updateMany({
@@ -265,6 +381,7 @@ export async function handleCheckoutSessionCompleted(params: {
     stripe: params.stripe,
     stripeSubscription: stripeSub,
     expectedRegionId: params.expectedRegionId,
+    checkoutSessionId: params.session.id,
     sourceEvent: params.sourceEvent,
   });
 }
@@ -359,6 +476,19 @@ export async function handlePaymentMethodAttached(params: {
   });
 
   if (!user) return;
+
+  await prisma.subscription.updateMany({
+    where: {
+      userId: user.id,
+      stripeCustomerId: customerId,
+      status: { in: ['TRIALING', 'ACTIVE', 'PAST_DUE', 'PAYMENT_ACTION_REQUIRED', 'PAUSED'] },
+      OR: [
+        { stripeDefaultPaymentMethodId: null },
+        { stripeDefaultPaymentMethodId: { not: params.paymentMethod.id } },
+      ],
+    },
+    data: { stripeDefaultPaymentMethodId: params.paymentMethod.id },
+  });
 
   const eventKey = params.sourceEvent?.id ?? `pm:${params.paymentMethod.id}`;
   await notifyPaymentMethodUpdated(user.id, eventKey);

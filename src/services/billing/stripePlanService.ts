@@ -30,11 +30,15 @@ export async function validatePlanStripePrice(
   stripe?: StripeClient,
 ): Promise<ValidatedStripePlan> {
   const plan = await prisma.plan.findFirst({
-    where: { id: planId, regionId, isActive: true },
+    where: { id: planId, regionId },
   });
 
   if (!plan) {
     throw new BillingError(404, 'PLAN_NOT_FOUND', 'Plan not found');
+  }
+
+  if (!plan.isActive) {
+    throw new BillingError(400, 'PLAN_NOT_ACTIVE', 'This plan is not available');
   }
 
   if (!plan.stripePriceId) {

@@ -5,6 +5,15 @@ import { MANAGEABLE_SUBSCRIPTION_STATUSES } from '../../types/billing';
 
 export const DEFAULT_TRIAL_DAYS = 14;
 
+/** Active subscriptions that should block starting a new Stripe Checkout session. */
+export const CHECKOUT_BLOCKING_SUBSCRIPTION_STATUSES = [
+  'TRIALING',
+  'ACTIVE',
+  'PAST_DUE',
+  'PAYMENT_ACTION_REQUIRED',
+  'PAUSED',
+] as const;
+
 const BILLING_ONLY_STATUSES: BillingAccessStatus[] = [
   BillingAccessStatus.BILLING_REQUIRED,
   BillingAccessStatus.TRIAL_PENDING,
@@ -40,7 +49,13 @@ export async function getManageableSubscription(userId: string) {
 }
 
 export async function hasBlockingSubscription(userId: string): Promise<boolean> {
-  const sub = await getManageableSubscription(userId);
+  const sub = await prisma.subscription.findFirst({
+    where: {
+      userId,
+      status: { in: [...CHECKOUT_BLOCKING_SUBSCRIPTION_STATUSES] },
+    },
+    select: { id: true },
+  });
   return !!sub;
 }
 
@@ -137,8 +152,13 @@ export async function hasDashboardAccess(userId: string): Promise<boolean> {
   if (user.role !== UserRole.USER) return true;
 
   const status = user.billingAccessStatus;
+  const sub = await getManageableSubscription(userId);
 
   if (status === BillingAccessStatus.TRIALING || status === BillingAccessStatus.ACTIVE) {
+    if (!sub) return false;
+    if (sub.stripeSubscriptionId && !sub.stripeDefaultPaymentMethodId) {
+      return false;
+    }
     return true;
   }
 
