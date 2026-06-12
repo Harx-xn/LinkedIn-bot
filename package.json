@@ -11,11 +11,12 @@
     "prisma:migrate": "prisma migrate dev",
     "debug": "ts-node-dev debug_db.ts",
     "test-post": "ts-node-dev src/test_post.ts",
-    "test": "node --require ts-node/register --test src/services/subscriptionAdminService.test.ts src/services/billing/billingFlow.test.ts src/services/billing/subadminPlanStripe.test.ts src/services/ghostwriterQuality.test.ts src/services/ghostwriterValidation.test.ts src/services/ghostwriterJsonParser.test.ts src/services/linkedinLineFormatting.test.ts src/services/sheetsSyncService.test.ts src/services/topicDiversity.test.ts src/services/trendPreview.test.ts src/services/trendPreviewPipeline.test.ts src/services/manualPostAi.test.ts src/services/manualPost/manualPostOrchestration.test.ts src/services/manualPost/manualPostIsolation.test.ts src/services/manualPost/manualPostQuality.test.ts src/services/manualPost/manualVoiceProfile.test.ts src/services/manualPost/manualPostFingerprint.test.ts",
+    "test": "node --require ts-node/register --test src/services/subscriptionAdminService.test.ts src/services/billing/billingFlow.test.ts src/services/billing/subadminPlanStripe.test.ts src/services/generativeImagesService.test.ts src/services/botImageModeService.test.ts src/services/ghostwriterQuality.test.ts src/services/ghostwriterValidation.test.ts src/services/ghostwriterJsonParser.test.ts src/services/linkedinLineFormatting.test.ts src/services/sheetsSyncService.test.ts src/services/topicDiversity.test.ts src/services/trendPreview.test.ts src/services/trendPreviewPipeline.test.ts src/services/manualPostAi.test.ts src/services/manualPost/manualPostOrchestration.test.ts src/services/manualPost/manualPostIsolation.test.ts src/services/manualPost/manualPostQuality.test.ts src/services/manualPost/manualVoiceProfile.test.ts src/services/manualPost/manualPostFingerprint.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1049.0",
+    "@google/genai": "^2.8.0",
     "@google/generative-ai": "^0.24.1",
     "@neondatabase/serverless": "^0.10.4",
     "@prisma/adapter-neon": "^5.22.0",

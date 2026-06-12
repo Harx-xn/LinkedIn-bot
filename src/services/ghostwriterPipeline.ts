@@ -12,10 +12,13 @@ import { validatePlanTopicDiversity } from './trendDiversityService';
 
 export type { GeneratedSlotResult };
 
+import type { BotImageMode } from './botImageModeService';
+
 export type GhostwriterBotConfig = {
   tone?: string | null;
   description?: string | null;
   niches: string[];
+  imageMode?: BotImageMode | null;
   backgroundImageUrl?: string | null;
   customLinks?: string | null;
   contactInfo?: string | null;

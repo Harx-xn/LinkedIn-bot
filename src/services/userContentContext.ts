@@ -1,5 +1,6 @@
 import { prisma } from '../prismaClient';
 import { ContentService } from './contentService';
+import { GenerativeImagesService } from './generativeImagesService';
 import { decryptSecret, decryptSecretArray } from './secretCrypto';
 import { finalizeGeneratedPostContent } from './postContentFormatting';
 import type { GeneratedPostContent } from './generationTypes';
@@ -26,6 +27,15 @@ export type NormalizeGeneratedOptions = {
   customLinks?: string | null;
 };
 
+export async function getDecryptedGeminiKeysForUser(userId: string): Promise<string[]> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { region: { select: { geminiApiKeys: true } } },
+  });
+
+  return decryptSecretArray(user?.region?.geminiApiKeys);
+}
+
 export async function getContentServiceForUser(userId: string): Promise<ContentService> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -36,6 +46,13 @@ export async function getContentServiceForUser(userId: string): Promise<ContentS
     openaiApiKey: decryptSecret(user?.region?.openaiApiKey),
     geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
   });
+}
+
+export async function getGenerativeImagesServiceForUser(
+  userId: string,
+): Promise<GenerativeImagesService> {
+  const geminiApiKeys = await getDecryptedGeminiKeysForUser(userId);
+  return new GenerativeImagesService({ geminiApiKeys });
 }
 
 export async function getBotVoice(userId: string): Promise<BotVoice> {

@@ -227,6 +227,7 @@ model BotConfig {
   customLinks        String?
   customRedditFeeds  String?
   backgroundImageUrl String?
+  imageMode          String? // none | providedBackground | aiGenerated
   postingSchedule    String?
   postsPerWeek       Int      @default(7)
   generationWindow   Int      @default(7)

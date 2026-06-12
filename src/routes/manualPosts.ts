@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
+import { prisma } from '../prismaClient';
 import {
   ManualPostError,
+  MANUAL_SOURCE,
   createDraft,
   updateManualPost,
   scheduleManualPost,
@@ -12,14 +14,95 @@ import {
   deleteManualPost,
   duplicateManualPost,
 } from '../services/manualPostService';
-import { PlanLimitError } from '../services/planEntitlementService';
+import { uploadBufferToR2 } from '../middleware/r2';
+import {
+  GenerativeImageError,
+  type LinkedInImageAspectRatio,
+} from '../services/generativeImagesService';
+import {
+  PlanLimitError,
+  canUseImageGeneration,
+  recordImageGeneration,
+} from '../services/planEntitlementService';
 import {
   generateManualPostContent,
   rewriteSavedManualPost,
   rewriteUnsavedManualContent,
 } from '../services/manualPostAiService';
+import { getBotVoice, getGenerativeImagesServiceForUser } from '../services/userContentContext';
 
 const router = Router();
+
+const AI_IMAGE_ASPECT_RATIOS = new Set<LinkedInImageAspectRatio>(['1:1', '4:5', '16:9']);
+
+function extensionForMimeType(mimeType: string): string {
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  return 'png';
+}
+
+function resolveBrandNameFromVoice(voice: Awaited<ReturnType<typeof getBotVoice>>): string | undefined {
+  if (voice.niches[0]?.trim()) return voice.niches[0].trim();
+  if (voice.websiteUrl?.trim()) {
+    try {
+      return new URL(voice.websiteUrl).hostname.replace(/^www\./i, '');
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function parseAiImageOptions(body: Record<string, unknown> | undefined) {
+  const instructions =
+    typeof body?.instructions === 'string' ? body.instructions.trim() : undefined;
+  const style = typeof body?.style === 'string' ? body.style.trim() : undefined;
+  const aspectRatioRaw = body?.aspectRatio;
+  const aspectRatio =
+    typeof aspectRatioRaw === 'string' &&
+    AI_IMAGE_ASPECT_RATIOS.has(aspectRatioRaw as LinkedInImageAspectRatio)
+      ? (aspectRatioRaw as LinkedInImageAspectRatio)
+      : undefined;
+  return { instructions, style, aspectRatio };
+}
+
+async function generateAndUploadManualAiImage(params: {
+  userId: string;
+  postText: string;
+  uploadKey: string;
+  instructions?: string;
+  style?: string;
+  aspectRatio?: LinkedInImageAspectRatio;
+}): Promise<{ mediaUrl: string; mimeType: string; model: string }> {
+  await canUseImageGeneration(params.userId);
+
+  const [imageService, voice] = await Promise.all([
+    getGenerativeImagesServiceForUser(params.userId),
+    getBotVoice(params.userId),
+  ]);
+
+  const generated = await imageService.generateLinkedInPostImage({
+    postText: params.postText,
+    instructions: params.instructions,
+    style: params.style,
+    aspectRatio: params.aspectRatio,
+    brandName: resolveBrandNameFromVoice(voice),
+  });
+
+  const ext = extensionForMimeType(generated.mimeType);
+  const mediaUrl = await uploadBufferToR2(
+    generated.buffer,
+    `${params.uploadKey}.${ext}`,
+    generated.mimeType,
+  );
+
+  return {
+    mediaUrl,
+    mimeType: generated.mimeType,
+    model: generated.model,
+  };
+}
 
 // Resolve the authenticated user id, or throw a 401.
 function requireUserId(req: Request): string {
@@ -42,6 +125,10 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
         const body: Record<string, unknown> = { error: err.message };
         if (err.details !== undefined) body.entitlement = err.details;
         res.status(err.status).json(body);
+        return;
+      }
+      if (err instanceof GenerativeImageError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
         return;
       }
       console.error('[manual-posts] error:', err);
@@ -68,6 +155,34 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     const result = await rewriteUnsavedManualContent(userId, req.body || {});
+    res.json(result);
+  }),
+);
+
+// AI: generate image from unsaved manual post content (no post saved yet).
+router.post(
+  '/generate-ai-image',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) {
+      throw new ManualPostError(400, 'Content is required');
+    }
+
+    const { instructions, style, aspectRatio } = parseAiImageOptions(req.body);
+
+    const result = await generateAndUploadManualAiImage({
+      userId,
+      postText: content,
+      uploadKey: `generated/ai-manual-${userId}-${Date.now()}`,
+      instructions,
+      style,
+      aspectRatio,
+    });
+
+    await recordImageGeneration(userId);
+
     res.json(result);
   }),
 );
@@ -125,6 +240,52 @@ router.post(
     const userId = requireUserId(req);
     const post = await rewriteSavedManualPost(userId, req.params.postId, req.body || {});
     res.json(post);
+  }),
+);
+
+// AI: generate or regenerate image for a saved manual draft/scheduled post.
+router.post(
+  '/:postId/generate-ai-image',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const { postId } = req.params;
+
+    const post = await prisma.post.findUnique({ where: { id: postId } });
+    if (!post || post.source !== MANUAL_SOURCE) {
+      throw new ManualPostError(404, 'Post not found');
+    }
+    if (post.userId !== userId) {
+      throw new ManualPostError(403, 'Unauthorized');
+    }
+    if (post.status === 'PUBLISHED') {
+      throw new ManualPostError(400, 'Cannot generate images for published posts');
+    }
+
+    const content = post.content?.trim();
+    if (!content) {
+      throw new ManualPostError(400, 'Post content is required');
+    }
+
+    const { instructions, style, aspectRatio } = parseAiImageOptions(req.body);
+
+    const { mediaUrl } = await generateAndUploadManualAiImage({
+      userId,
+      postText: content,
+      uploadKey: `generated/ai-manual-${postId}-${Date.now()}`,
+      instructions,
+      style,
+      aspectRatio,
+    });
+
+    const updated = await prisma.post.update({
+      where: { id: post.id },
+      data: { mediaUrl },
+    });
+
+    await recordImageGeneration(userId);
+
+    res.json(updated);
   }),
 );
 

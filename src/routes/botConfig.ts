@@ -13,6 +13,10 @@ import {
 } from '../services/batchScheduleService';
 import { NicheExpansionService, normalizeNicheKey } from '../services/nicheExpansionService';
 import { decryptSecret } from '../services/secretCrypto';
+import {
+  parseBotImageModeInput,
+  resolveBotImageMode,
+} from '../services/botImageModeService';
 
 const router = Router();
 
@@ -25,11 +29,16 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
 
     // add description default too
     const batchPostingSchedule = parsePostingScheduleSafe(config?.postingSchedule ?? null);
+    const effectiveImageMode = config
+      ? resolveBotImageMode(config)
+      : 'none';
 
     res.json(
       config
         ? {
             ...config,
+            imageMode: config.imageMode ?? null,
+            effectiveImageMode,
             contactInfo: config.contactInfo || '',
             websiteUrl: config.websiteUrl || '',
             includeContactInfo: config.includeContactInfo ?? false,
@@ -42,6 +51,8 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
             niches: '[]',
             sources: '["google"]',
             backgroundImageUrl: '',
+            imageMode: null,
+            effectiveImageMode: 'none',
             isEnabled: false,
             description: '', // ✅
             contactInfo: '',
@@ -87,6 +98,16 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
 
     const cleanedContactInfo = cleanOptionalText(req.body.contactInfo, 500);
 
+    let imageModeUpdate: string | null | undefined;
+    if (Object.prototype.hasOwnProperty.call(req.body, 'imageMode')) {
+      try {
+        imageModeUpdate = parseBotImageModeInput(req.body.imageMode);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Invalid imageMode';
+        return res.status(400).json({ error: message });
+      }
+    }
+
     const hasSchedulePayload =
       Object.prototype.hasOwnProperty.call(req.body, 'batchPostingSchedule') ||
       Object.prototype.hasOwnProperty.call(req.body, 'postingSchedule');
@@ -130,6 +151,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
         customLinks: customLinksStr,
         customRedditFeeds: customRedditFeedsStr,
         backgroundImageUrl: backgroundImageUrl || undefined,
+        imageMode: imageModeUpdate ?? null,
         tone: tone || 'Professional',
         postsPerWeek: postsPerWeek || 7,
         isEnabled: !!isEnabled,
@@ -157,6 +179,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
         contactInfo: cleanedContactInfo,
         websiteUrl: normalizedWebsiteUrl,
         ...(postingScheduleUpdate ? { postingSchedule: postingScheduleUpdate } : {}),
+        ...(imageModeUpdate !== undefined ? { imageMode: imageModeUpdate } : {}),
       }
     });
 
@@ -164,6 +187,8 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
 
     res.json({
       ...config,
+      imageMode: config.imageMode ?? null,
+      effectiveImageMode: resolveBotImageMode(config),
       contactInfo: config.contactInfo || '',
       websiteUrl: config.websiteUrl || '',
       includeContactInfo: config.includeContactInfo ?? false,

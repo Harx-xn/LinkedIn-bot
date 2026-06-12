@@ -11,9 +11,9 @@ import {
   BatchScheduleError,
 } from "./batchScheduleService";
 import {
-  isImageGenerationAllowed,
-  recordImageGeneration,
-} from "./planEntitlementService";
+  generateBatchPostMediaUrl,
+  resolveBotImageMode,
+} from "./botImageModeService";
 import {
   generateSlotPostUntilSuccess,
   planBatchForGeneration,
@@ -142,6 +142,7 @@ export class TrendingBotService {
             tone: config.tone,
             description: config.description,
             niches: [niche],
+            imageMode: resolveBotImageMode(config),
             backgroundImageUrl: config.backgroundImageUrl,
             customLinks: config.customLinks,
             contactInfo: config.contactInfo,
@@ -218,25 +219,16 @@ export class TrendingBotService {
             continue;
           }
 
-          let imagePath: string | null = null;
-          if (await isImageGenerationAllowed(config.userId) && result.imageContent?.mode !== 'none') {
-            try {
-              const imagePayload = result.imageContent ?? null;
-              imagePath = await this.imageService.createTopicImage(
-                imagePayload?.headline ?? result.finalized.headline,
-                config.backgroundImageUrl || undefined,
-                {
-                  headline: imagePayload?.headline ?? result.finalized.headline,
-                  subheadline: imagePayload?.supportingText,
-                  bulletPoints: (imagePayload?.bulletPoints ?? []).slice(0, 3),
-                  mode: imagePayload?.mode ?? 'single_insight',
-                },
-              );
-              await recordImageGeneration(config.userId);
-            } catch (e) {
-              console.error("Image generation failed:", e);
-            }
-          }
+          const imagePath = await generateBatchPostMediaUrl({
+            userId: config.userId,
+            imageMode: botConfig.imageMode ?? resolveBotImageMode(config),
+            backgroundImageUrl: config.backgroundImageUrl,
+            postContent: result.finalized.content,
+            imageService: this.imageService,
+            finalized: result.finalized,
+            imageContent: result.imageContent,
+            uploadKeyPrefix: `generated/ai-trending-${config.userId}`,
+          });
 
           const created = await prisma.post.create({
             data: {
@@ -341,6 +333,7 @@ export class TrendingBotService {
       tone: config.tone,
       description: config.description,
       niches,
+      imageMode: resolveBotImageMode(config),
       backgroundImageUrl: config.backgroundImageUrl,
       customLinks: config.customLinks,
       contactInfo: config.contactInfo,
@@ -470,24 +463,16 @@ export class TrendingBotService {
       angle?: import('./generationTypes').PostAngle;
     },
   ) {
-    let mediaUrl: string | null = null;
-    if (await isImageGenerationAllowed(userId) && imageContent?.mode !== 'none') {
-      try {
-        mediaUrl = await this.imageService.createTopicImage(
-          imageContent?.headline ?? finalized.headline,
-          config.backgroundImageUrl ?? undefined,
-          {
-            headline: imageContent?.headline ?? finalized.headline,
-            subheadline: imageContent?.supportingText,
-            bulletPoints: (imageContent?.bulletPoints ?? []).slice(0, 3),
-            mode: (imageContent?.mode as 'single_insight' | 'checklist' | 'comparison' | 'quote' | 'none') ?? 'single_insight',
-          },
-        );
-        await recordImageGeneration(userId);
-      } catch (e) {
-        console.error("Image generation failed:", e);
-      }
-    }
+    const mediaUrl = await generateBatchPostMediaUrl({
+      userId,
+      imageMode: config.imageMode ?? resolveBotImageMode(config),
+      backgroundImageUrl: config.backgroundImageUrl,
+      postContent: finalized.content,
+      imageService: this.imageService,
+      finalized,
+      imageContent,
+      uploadKeyPrefix: `generated/ai-batch-${userId}`,
+    });
 
     const linkedInAccount = await prisma.linkedInAccount.findFirst({
       where: { userId },

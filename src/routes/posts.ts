@@ -4,11 +4,17 @@ import { prisma } from '../prismaClient';
 import { postToLinkedInFromPostId } from '../services/linkedinService';
 import { canPublish } from '../services/entitlementService';
 import { ImageService } from '../services/imageService';
+import { uploadBufferToR2 } from '../middleware/r2';
 import {
   getBotVoice,
   getContentServiceForUser,
+  getGenerativeImagesServiceForUser,
   normalizeGeneratedContent,
 } from '../services/userContentContext';
+import {
+  GenerativeImageError,
+  type LinkedInImageAspectRatio,
+} from '../services/generativeImagesService';
 import {
   PlanLimitError,
   canPublishToLinkedIn,
@@ -29,6 +35,27 @@ function sendIfPlanLimit(res: any, err: unknown): boolean {
     return true;
   }
   return false;
+}
+
+const AI_IMAGE_ASPECT_RATIOS = new Set<LinkedInImageAspectRatio>(['1:1', '4:5', '16:9']);
+
+function extensionForMimeType(mimeType: string): string {
+  if (mimeType.includes('png')) return 'png';
+  if (mimeType.includes('webp')) return 'webp';
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  return 'png';
+}
+
+function resolveBrandNameFromVoice(voice: Awaited<ReturnType<typeof getBotVoice>>): string | undefined {
+  if (voice.niches[0]?.trim()) return voice.niches[0].trim();
+  if (voice.websiteUrl?.trim()) {
+    try {
+      return new URL(voice.websiteUrl).hostname.replace(/^www\./i, '');
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 router.post('/', requireAuth, async (req, res) => {
@@ -227,6 +254,72 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
   });
 
   res.json(updated);
+});
+
+router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
+  const post = await prisma.post.findUnique({ where: { id: req.params.id } });
+
+  if (!post) return res.status(404).json({ error: 'Post not found' });
+  if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
+  if (post.status === 'PUBLISHED') {
+    return res.status(400).json({ error: 'Cannot generate images for published posts' });
+  }
+
+  const instructions =
+    typeof req.body?.instructions === 'string' ? req.body.instructions.trim() : undefined;
+  const style = typeof req.body?.style === 'string' ? req.body.style.trim() : undefined;
+  const aspectRatioRaw = req.body?.aspectRatio;
+  const aspectRatio =
+    typeof aspectRatioRaw === 'string' && AI_IMAGE_ASPECT_RATIOS.has(aspectRatioRaw as LinkedInImageAspectRatio)
+      ? (aspectRatioRaw as LinkedInImageAspectRatio)
+      : undefined;
+
+  try {
+    await canUseImageGeneration(req.userId!);
+  } catch (err) {
+    if (sendIfPlanLimit(res, err)) return;
+    throw err;
+  }
+
+  try {
+    const [imageService, voice] = await Promise.all([
+      getGenerativeImagesServiceForUser(req.userId!),
+      getBotVoice(req.userId!),
+    ]);
+
+    const generated = await imageService.generateLinkedInPostImage({
+      postText: post.content,
+      instructions,
+      style,
+      aspectRatio,
+      brandName: resolveBrandNameFromVoice(voice),
+    });
+
+    const ext = extensionForMimeType(generated.mimeType);
+    const mediaUrl = await uploadBufferToR2(
+      generated.buffer,
+      `generated/ai-post-${post.id}-${Date.now()}.${ext}`,
+      generated.mimeType,
+    );
+
+    const updated = await prisma.post.update({
+      where: { id: post.id },
+      data: { mediaUrl },
+    });
+
+    await recordImageGeneration(req.userId!);
+
+    return res.json(updated);
+  } catch (err: unknown) {
+    if (err instanceof GenerativeImageError) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
+    console.error('[posts] generate-ai-image failed:', err instanceof Error ? err.message : err);
+    return res.status(500).json({
+      error: 'Failed to generate AI image',
+      code: 'GEMINI_IMAGE_GENERATION_FAILED',
+    });
+  }
 });
 
 router.post('/:id/confirm-schedule', requireAuth, async (req, res) => {
