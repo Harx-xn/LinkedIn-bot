@@ -7,15 +7,12 @@ import bcrypt from 'bcryptjs';
 import { prisma } from '../prismaClient';
 import { authMiddleware } from '../middleware/authMiddleware';
 import { requireRole } from '../middleware/requireRole';
+import { isValidUsername } from '../services/auth/authHelpers';
 
 const router = Router();
 
 router.use(authMiddleware);
 router.use(requireRole(UserRole.SUPER_ADMIN));
-
-function isValidUsername(username: string) {
-  return /^[a-zA-Z0-9][a-zA-Z0-9_.]{2,19}$/.test(username);
-}
 
 // ---------------------------------------------------------------------------
 // Regions

@@ -10,6 +10,7 @@ import {
   validateGenerateInput,
   validateUnsavedRewriteInput,
   generateManualPostContent,
+  parseManualTopicSuggestionsResponse,
 } from './manualPostAiService';
 import { generateManualPostV2 } from './manualPost/manualPostOrchestration';
 import { finalizeManualGeneratedPostV2 } from './manualPost/manualPostFormatting';
@@ -130,6 +131,31 @@ describe('manual post AI formatting', () => {
       },
     );
     assert.ok(normalized.content.length <= 3000);
+  });
+});
+
+describe('manual topic suggestions', () => {
+  it('parses valid topic suggestion JSON', () => {
+    const topics = parseManualTopicSuggestionsResponse(`
+      {
+        "topics": [
+          {
+            "title": "Why tenant isolation matters in B2B SaaS",
+            "description": "Explain the product and engineering tradeoffs of scoping customer data.",
+            "reason": "Matches the author's SaaS and security niche."
+          }
+        ]
+      }
+    `);
+    assert.equal(topics.length, 1);
+    assert.equal(topics[0].title, 'Why tenant isolation matters in B2B SaaS');
+  });
+
+  it('rejects invalid topic suggestion JSON', () => {
+    assert.throws(
+      () => parseManualTopicSuggestionsResponse('not json'),
+      (err: unknown) => err instanceof ManualPostError && err.status === 502,
+    );
   });
 });
 

@@ -26,8 +26,10 @@ import {
 } from '../services/planEntitlementService';
 import {
   generateManualPostContent,
+  generateManualPostFromUrl,
   rewriteSavedManualPost,
   rewriteUnsavedManualContent,
+  suggestManualPostTopics,
 } from '../services/manualPostAiService';
 import { getBotVoice, getGenerativeImagesServiceForUser } from '../services/userContentContext';
 
@@ -155,6 +157,31 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     const result = await rewriteUnsavedManualContent(userId, req.body || {});
+    res.json(result);
+  }),
+);
+
+// AI: generate post content from an external article URL.
+router.post(
+  '/generate-from-url',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const result = await generateManualPostFromUrl(userId, req.body || {});
+    res.json(result);
+  }),
+);
+
+// AI: suggest LinkedIn post topics from the user's ghostwriter profile.
+router.post(
+  '/suggest-topics',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const result = await suggestManualPostTopics(userId, {
+      count: req.body?.count,
+      provider: req.body?.provider,
+    });
     res.json(result);
   }),
 );

@@ -20,15 +20,13 @@ import {
   SubscriptionAdminError,
   updateAdminSubscription,
 } from "../services/subscriptionAdminService";
+import { isValidUsername } from "../services/auth/authHelpers";
+
 const router = Router();
 
 // Every route requires a valid token AND a privileged role.
 router.use(authMiddleware);
 router.use(requireRole(UserRole.REGIONAL_ADMIN, UserRole.SUPER_ADMIN));
-
-function isValidUsername(username: string) {
-  return /^[a-zA-Z0-9][a-zA-Z0-9_.]{2,19}$/.test(username);
-}
 
 // Region a request targets: a regional admin is locked to their own region,
 // while a super admin selects one via `regionId` in the body or query.

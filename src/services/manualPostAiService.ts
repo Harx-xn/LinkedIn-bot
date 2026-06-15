@@ -3,13 +3,52 @@ import {
   rewriteSavedManualPostV2,
   rewriteUnsavedManualPostV2,
 } from './manualPost/manualPostOrchestration';
+import { buildManualTopicSuggestionPrompt } from './manualPost/manualPostPrompts';
+import { resolveManualContentService } from './manualPost/manualAiProvider';
+import { getManualVoiceContext } from './manualPost/manualVoiceProfileService';
+import { extractBalancedJsonObject } from './ghostwriterJsonParser';
+import { canGenerate } from './entitlementService';
+import { getBotVoice } from './userContentContext';
 import { ManualPostError } from './manualPostService';
+import {
+  fetchReadableArticleFromUrl,
+  type ReadableArticle,
+} from './manualPost/articleUrlFetcher';
+
+export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
+export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = 5;
+
+export type ManualTopicSuggestion = {
+  title: string;
+  description: string;
+  reason: string;
+};
 
 export const MAX_MANUAL_TOPIC_LENGTH = 500;
 export const MAX_ADDITIONAL_INSTRUCTIONS_LENGTH = 1000;
 export const MAX_SUPPORTING_CONTEXT_LENGTH = 3000;
 export const MAX_REWRITE_SUGGESTIONS_LENGTH = 1000;
 export const MAX_REWRITE_CONTENT_LENGTH = 3000;
+export const MAX_URL_OPTION_LENGTH = 200;
+
+export const URL_POST_VARIATIONS = [
+  'actionable',
+  'storytelling',
+  'thought-provoking',
+  'promotional',
+] as const;
+
+export type UrlPostVariation = (typeof URL_POST_VARIATIONS)[number];
+
+export type GenerateFromUrlInput = {
+  url: string;
+  variation: UrlPostVariation;
+  format?: string;
+  tone?: string;
+  angle?: string;
+  structure?: string;
+  provider?: unknown;
+};
 
 export type ContentProvider = 'OPENAI' | 'GEMINI';
 
@@ -107,3 +146,237 @@ export const rewriteUnsavedManualContent = rewriteUnsavedManualPostV2;
 
 /** Route-facing alias — delegates to manual-only orchestration. */
 export const rewriteSavedManualPost = rewriteSavedManualPostV2;
+
+function clampTopicSuggestionCount(raw: unknown): number {
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_MANUAL_TOPIC_SUGGESTIONS;
+  }
+  const count = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(count) || count < 1) {
+    throw new ManualPostError(400, 'count must be a positive number');
+  }
+  return Math.min(Math.floor(count), MAX_MANUAL_TOPIC_SUGGESTIONS);
+}
+
+function stripMarkdownFences(raw: string): string {
+  return raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+}
+
+export function parseManualTopicSuggestionsResponse(raw: string): ManualTopicSuggestion[] {
+  const cleaned = stripMarkdownFences(raw);
+  if (!cleaned) {
+    throw new ManualPostError(502, 'Could not parse topic suggestions from AI response.');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const balanced = extractBalancedJsonObject(cleaned);
+    if (!balanced) {
+      throw new ManualPostError(502, 'Could not parse topic suggestions from AI response.');
+    }
+    try {
+      parsed = JSON.parse(balanced);
+    } catch {
+      throw new ManualPostError(502, 'Could not parse topic suggestions from AI response.');
+    }
+  }
+
+  const topicsRaw = (parsed as { topics?: unknown })?.topics;
+  if (!Array.isArray(topicsRaw) || topicsRaw.length === 0) {
+    throw new ManualPostError(502, 'AI did not return any topic suggestions.');
+  }
+
+  const topics: ManualTopicSuggestion[] = [];
+  for (const item of topicsRaw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const title = typeof record.title === 'string' ? record.title.trim() : '';
+    const description = typeof record.description === 'string' ? record.description.trim() : '';
+    const reason = typeof record.reason === 'string' ? record.reason.trim() : '';
+    if (!title || !description || !reason) continue;
+    topics.push({ title, description, reason });
+  }
+
+  if (topics.length === 0) {
+    throw new ManualPostError(502, 'AI returned topic suggestions in an invalid format.');
+  }
+
+  return topics;
+}
+
+export async function suggestManualPostTopics(
+  userId: string,
+  options?: { count?: unknown; provider?: unknown },
+): Promise<{ topics: ManualTopicSuggestion[] }> {
+  const gate = await canGenerate(userId);
+  if (!gate.allowed) {
+    throw new ManualPostError(
+      403,
+      gate.reason || 'You are not allowed to generate content right now',
+      gate.entitlement,
+    );
+  }
+
+  const voice = await getBotVoice(userId);
+  if (!voice.description.trim()) {
+    throw new ManualPostError(400, 'Complete your ghostwriter profile before suggesting topics.');
+  }
+
+  const count = clampTopicSuggestionCount(options?.count);
+  const provider = parseContentProvider(options?.provider);
+  const voiceContext = await getManualVoiceContext(userId);
+  const contentService = await resolveManualContentService(userId, provider);
+  const prompt = buildManualTopicSuggestionPrompt({
+    voice: {
+      tone: voice.tone,
+      description: voice.description,
+      niches: voice.niches,
+      websiteUrl: voice.websiteUrl,
+      contactInfo: voice.contactInfo,
+    },
+    voiceContext,
+    count,
+  });
+
+  let raw: string;
+  try {
+    raw = await contentService.fetchComposerGenerationRaw(prompt, provider);
+  } catch (err) {
+    console.error('[manual-posts] suggest-topics provider error:', err instanceof Error ? err.message : err);
+    throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
+  }
+
+  const topics = parseManualTopicSuggestionsResponse(raw).slice(0, count);
+  return { topics };
+}
+
+function pickOptionalString(
+  value: unknown,
+  field: string,
+  maxLength = MAX_URL_OPTION_LENGTH,
+): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') {
+    throw new ManualPostError(400, `${field} must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > maxLength) {
+    throw new ManualPostError(400, `${field} must be ${maxLength} characters or fewer`);
+  }
+  return trimmed;
+}
+
+export function validateGenerateFromUrlInput(body: {
+  url?: unknown;
+  variation?: unknown;
+  format?: unknown;
+  tone?: unknown;
+  angle?: unknown;
+  structure?: unknown;
+}): Omit<GenerateFromUrlInput, 'provider'> {
+  const url = typeof body.url === 'string' ? body.url.trim() : '';
+  if (!url) {
+    throw new ManualPostError(400, 'url is required');
+  }
+
+  const variationRaw = typeof body.variation === 'string' ? body.variation.trim() : '';
+  if (!variationRaw) {
+    throw new ManualPostError(400, 'variation is required');
+  }
+  if (!URL_POST_VARIATIONS.includes(variationRaw as UrlPostVariation)) {
+    throw new ManualPostError(
+      400,
+      'variation must be actionable, storytelling, thought-provoking, or promotional',
+    );
+  }
+
+  return {
+    url,
+    variation: variationRaw as UrlPostVariation,
+    format: pickOptionalString(body.format, 'format'),
+    tone: pickOptionalString(body.tone, 'tone'),
+    angle: pickOptionalString(body.angle, 'angle'),
+    structure: pickOptionalString(body.structure, 'structure'),
+  };
+}
+
+function buildArticleSupportingContext(article: ReadableArticle): string {
+  const parts = [
+    'ARTICLE SOURCE MATERIAL (factual source only — do not invent beyond this excerpt):',
+    `URL: ${article.url}`,
+    article.title ? `Title: ${article.title}` : '',
+    article.description ? `Description: ${article.description}` : '',
+    '',
+    'ARTICLE EXCERPT:',
+    article.text,
+  ].filter(Boolean);
+
+  const context = parts.join('\n').trim();
+  if (context.length <= MAX_SUPPORTING_CONTEXT_LENGTH) {
+    return context;
+  }
+
+  const overhead = context.length - article.text.length;
+  const allowedTextLength = Math.max(200, MAX_SUPPORTING_CONTEXT_LENGTH - overhead - 3);
+  return [
+    ...parts.slice(0, -1),
+    `${article.text.slice(0, allowedTextLength)}...`,
+  ].join('\n');
+}
+
+function buildUrlGenerationInstructions(input: Omit<GenerateFromUrlInput, 'url' | 'provider'>): string {
+  const lines = [
+    'Source type: url article.',
+    `Desired variation: ${input.variation}.`,
+    'Turn the supplied article excerpt into an original LinkedIn post for this author.',
+    'Summarize, interpret, or extract takeaways — do not copy long phrases from the article.',
+    'Do not invent facts, metrics, quotes, customers, or events beyond the article excerpt.',
+    'Do not claim the author personally experienced something unless the article excerpt or author profile supports it.',
+    'Keep a clear angle and make the post LinkedIn-ready.',
+  ];
+
+  if (input.format) lines.push(`Preferred format: ${input.format}.`);
+  if (input.tone) lines.push(`Preferred tone override: ${input.tone}.`);
+  if (input.angle) lines.push(`Preferred angle: ${input.angle}.`);
+  if (input.structure) lines.push(`Preferred structure: ${input.structure}.`);
+
+  return lines.join('\n');
+}
+
+export async function generateManualPostFromUrl(
+  userId: string,
+  body: Record<string, unknown>,
+): Promise<{
+  content: string;
+  hashtags: string | null;
+  topic: string;
+  generatedBy: 'AI';
+  source: {
+    url: string;
+    title: string;
+    description: string;
+  };
+}> {
+  const input = validateGenerateFromUrlInput(body);
+  const article = await fetchReadableArticleFromUrl(input.url);
+  const topic = (article.title || 'Article takeaways').slice(0, MAX_MANUAL_TOPIC_LENGTH);
+
+  const generated = await generateManualPostContent(userId, {
+    topic,
+    supportingContext: buildArticleSupportingContext(article),
+    additionalInstructions: buildUrlGenerationInstructions(input),
+    provider: body.provider,
+  });
+
+  return {
+    ...generated,
+    source: {
+      url: article.url,
+      title: article.title,
+      description: article.description,
+    },
+  };
+}

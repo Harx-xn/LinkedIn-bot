@@ -1,25 +1,31 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { prisma } from '../prismaClient';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { config } from '../config';
 import { BillingAccessStatus } from '@prisma/client';
-import { getBooleanSetting } from '../services/settingsService';
-import { findValidPromotion } from '../services/promotionService';
-import { findValidInvite, redeemInvite } from '../services/inviteService';
+import { redeemInvite } from '../services/inviteService';
+import {
+  AuthValidationError,
+  buildAuthUserResponse,
+  issueJwt,
+  USER_SELECT,
+  validateRegistrationContext,
+} from '../services/auth/authHelpers';
+import {
+  createOAuthState,
+  parseSocialStartQuery,
+} from '../services/auth/oauthStateService';
+import {
+  assertGoogleAuthConfigured,
+  // assertLinkedInAuthConfigured,
+  buildSocialErrorRedirect,
+  fetchGoogleProfile,
+  // fetchLinkedInProfile,
+  getGoogleSignInUrl,
+  // getLinkedInSignInUrl,
+  handleSocialCallback,
+} from '../services/auth/socialAuthService';
 
 const router = Router();
-
-// Shared JWT signing options. The cast satisfies @types/jsonwebtoken, which
-// types `expiresIn` as a narrow string-literal/number rather than `string`.
-const signOptions: jwt.SignOptions = {
-  expiresIn: config.jwtExpiresIn as jwt.SignOptions['expiresIn'],
-};
-
-function isValidUsername(username: string) {
-  // 3–20 chars, letters/numbers/underscore/dot, must start with letter or number
-  return /^[a-zA-Z0-9][a-zA-Z0-9_.]{2,19}$/.test(username);
-}
 
 router.post('/register', async (req, res) => {
   const { email, password, username, regionId, inviteCode, promoCode } = req.body as {
@@ -37,13 +43,6 @@ router.post('/register', async (req, res) => {
       .json({ error: 'Missing email, password, or username' });
   }
 
-  const invite = await findValidInvite(inviteCode);
-  const resolvedRegionId = invite?.regionId || regionId;
-
-  if (!resolvedRegionId) {
-    return res.status(400).json({ error: 'Please select a region or use a valid invite link' });
-  }
-
   if (!email.includes('@')) {
     return res.status(400).json({ error: 'Invalid email format' });
   }
@@ -54,107 +53,60 @@ router.post('/register', async (req, res) => {
       .json({ error: 'Password must be at least 6 characters' });
   }
 
-  if (!isValidUsername(username)) {
-    return res.status(400).json({
-      error:
-        'Invalid username (3–20 chars, letters/numbers/underscore/dot; must start with letter/number)',
-    });
-  }
-
-  const region = await prisma.region.findFirst({
-    where: {
-      id: resolvedRegionId,
-      isActive: true,
-    },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      code: true,
-    },
-  });
-
-  if (!region) {
-    return res.status(400).json({ error: 'Invalid region selected' });
-  }
-
-  const inviteOnly = await getBooleanSetting('auth.inviteOnly', region.id, false);
-  if (inviteOnly && !invite) {
-    return res.status(403).json({ error: 'This region currently requires an invite link to register' });
-  }
-
-  if (invite?.email && invite.email.toLowerCase() !== email.toLowerCase()) {
-    return res.status(403).json({ error: 'This invite link is restricted to another email address' });
-  }
-
-  const effectivePromoCode = promoCode || invite?.promoCode || undefined;
-  if (effectivePromoCode) {
-    const promo = await findValidPromotion(effectivePromoCode, { regionId: region.id });
-    if (!promo) {
-      return res.status(400).json({ error: 'Promotion code is not valid' });
-    }
-  }
-
-  // Check email uniqueness
-  const existingEmail = await prisma.user.findUnique({ where: { email } });
-  if (existingEmail) {
-    return res.status(400).json({ error: 'Email already in use' });
-  }
-
-  // Check username uniqueness
-  const existingUsername = await prisma.user.findUnique({ where: { username } });
-  if (existingUsername) {
-    return res.status(400).json({ error: 'Username already in use' });
-  }
-
   try {
+    const registration = await validateRegistrationContext({
+      username,
+      regionId,
+      inviteCode,
+      promoCode,
+      providerEmail: email,
+      requireUsername: true,
+      promoOrder: 'register',
+    });
+
+    const existingEmail = await prisma.user.findUnique({ where: { email } });
+    if (existingEmail) {
+      return res.status(400).json({ error: 'Email already in use' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
       data: {
         email,
-        username,
+        username: registration.username!,
         passwordHash,
-        regionId: region.id,
-        role: invite?.roleToAssign || undefined,
+        regionId: registration.region.id,
+        role: registration.invite?.roleToAssign || undefined,
         billingAccessStatus: BillingAccessStatus.BILLING_REQUIRED,
       },
-      select: {
-        id: true,
-        email: true,
-        username: true,
-        role: true,
-        regionId: true,
-        trialEndsAt: true,
-        region: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            code: true,
-          },
-        },
-      },
+      select: USER_SELECT,
     });
 
-    if (invite) {
-      await redeemInvite(invite.id, user.id);
+    if (registration.invite) {
+      await redeemInvite(registration.invite.id, user.id);
     }
 
-    const token = jwt.sign({ userId: user.id }, config.jwtSecret, signOptions);
-
     res.json({
-      token,
-      user,
+      token: issueJwt(user.id),
+      user: buildAuthUserResponse(user),
     });
-  } catch (err: any) {
-    // Prisma unique constraint fallback (race condition protection)
-    if (err?.code === 'P2002') {
-      const target = err?.meta?.target?.join?.(', ') || 'field';
+  } catch (err: unknown) {
+    if (err instanceof AuthValidationError) {
+      const status = err.message.includes('invite link to register') ? 403 : 400;
+      if (err.message.includes('restricted to another email')) {
+        return res.status(403).json({ error: err.message });
+      }
+      return res.status(status).json({ error: err.message });
+    }
+
+    const anyErr = err as { code?: string; meta?: { target?: string[] } };
+    if (anyErr?.code === 'P2002') {
+      const target = anyErr?.meta?.target?.join?.(', ') || 'field';
       return res.status(400).json({ error: `Duplicate ${target}` });
     }
 
-    console.error(err);
+    console.error('[auth/register] error:', err);
     return res.status(500).json({ error: 'Failed to register' });
   }
 });
@@ -187,15 +139,19 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'Invalid credentials' });
   }
 
+  if (!user.passwordHash) {
+    return res.status(400).json({
+      error: 'This account uses social login. Please sign in with Google.',
+    });
+  }
+
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) {
     return res.status(400).json({ error: 'Invalid credentials' });
   }
 
-  const token = jwt.sign({ userId: user.id }, config.jwtSecret, signOptions);
-
   res.json({
-    token,
+    token: issueJwt(user.id),
     user: {
       id: user.id,
       email: user.email,
@@ -206,5 +162,47 @@ router.post('/login', async (req, res) => {
     },
   });
 });
+
+async function startSocialAuth(
+  req: Request,
+  res: Response,
+  provider: 'google' | 'linkedin',
+  getUrl: (state: string) => string,
+  assertConfigured: () => void,
+) {
+  try {
+    assertConfigured();
+    const query = parseSocialStartQuery(req.query as Record<string, unknown>);
+    const stateId = await createOAuthState(provider, query);
+    const url = getUrl(stateId);
+    return res.redirect(url);
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : `${provider} sign-in is not available`;
+    console.error(`[auth/${provider}/start] error:`, message);
+    return res.redirect(buildSocialErrorRedirect(message));
+  }
+}
+
+router.get('/google/start', (req, res) =>
+  startSocialAuth(req, res, 'google', getGoogleSignInUrl, assertGoogleAuthConfigured),
+);
+
+router.get('/google/callback', async (req, res) => {
+  const { code, state } = req.query as { code?: string; state?: string };
+  const redirectUrl = await handleSocialCallback('google', code, state, fetchGoogleProfile);
+  return res.redirect(redirectUrl);
+});
+
+// LinkedIn sign-in disabled for now — re-enable when LINKEDIN_AUTH_REDIRECT_URI is configured.
+// router.get('/linkedin/start', (req, res) =>
+//   startSocialAuth(req, res, 'linkedin', getLinkedInSignInUrl, assertLinkedInAuthConfigured),
+// );
+//
+// router.get('/linkedin/callback', async (req, res) => {
+//   const { code, state } = req.query as { code?: string; state?: string };
+//   const redirectUrl = await handleSocialCallback('linkedin', code, state, fetchLinkedInProfile);
+//   return res.redirect(redirectUrl);
+// });
 
 export default router;

@@ -354,3 +354,57 @@ Critic rules:
 
 ${MANUAL_CRITIC_OUTPUT_SCHEMA}`;
 }
+
+export function buildManualTopicSuggestionPrompt(input: {
+  voice: {
+    tone: string;
+    description: string;
+    niches: string[];
+    websiteUrl: string | null;
+    contactInfo: string | null;
+  };
+  voiceContext?: ManualVoiceContext;
+  count: number;
+}): string {
+  const voiceBlocks = buildManualVoiceContextBlocks(input.voiceContext);
+  const niches = input.voice.niches.filter(Boolean).join(', ') || 'none';
+  const website = input.voice.websiteUrl?.trim() || 'not provided';
+
+  return `${MANUAL_COMPOSER_SYSTEM}
+
+TASK:
+Suggest ${input.count} concise LinkedIn post topic ideas for this author to write about manually.
+
+AUTHOR PROFILE (authoritative — do not invent facts beyond this):
+- Tone: ${input.voice.tone}
+- Description: ${input.voice.description.trim()}
+- Niches: ${niches}
+- Website / company context: ${website}
+
+${voiceBlocks}
+
+TOPIC RULES:
+- Make each topic specific to the saved author profile, niches, tone, and website context.
+- Prefer practical, LinkedIn-ready angles a professional could post about credibly.
+- Avoid generic AI slop, vague inspiration, or broad "thought leadership" with no angle.
+- Do not invent company metrics, customers, launches, personal stories, or achievements not supported by the profile.
+- Do not hallucinate user facts that are not present in the author profile or learned voice context.
+- Each topic should be distinct and immediately usable as a manual-post prompt.
+- Titles should be short and specific (under 120 characters).
+- Descriptions should be one short sentence explaining the post angle.
+- Reasons should briefly explain why the topic fits this author's botConfig/profile.
+
+OUTPUT:
+Return valid JSON only with this exact shape:
+{
+  "topics": [
+    {
+      "title": "string",
+      "description": "string",
+      "reason": "string"
+    }
+  ]
+}
+
+Return exactly ${input.count} topics in the topics array.`;
+}
