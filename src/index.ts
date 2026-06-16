@@ -73,6 +73,7 @@ app.use('/api/sheets', sheetsRouter);
 app.use('/api/posts', postsRouter);
 app.use('/api/manual-posts', manualPostsRouter);
 app.use('/api/user', userRouter);
+app.use('/api/users', userRouter);
 app.use('/api/bot', botConfigRouter);
 app.use('/api/bot', botActionRouter); // Used for /bot/generate
 app.use('/api/upload', uploadRouter);

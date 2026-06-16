@@ -32,6 +32,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       username: true,
       role: true,
       themePreference: true,
+      hasCompletedOnboardingTour: true,
 
       regionId: true,
       region: {
@@ -92,6 +93,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     username: user.username,
     role: user.role,
     themePreference: user.themePreference || "LIGHT",
+    hasCompletedOnboardingTour: user.hasCompletedOnboardingTour,
 
     regionId: user.regionId,
     region: user.region
@@ -135,6 +137,32 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       publishedToday: usedToday,
     },
   });
+});
+
+router.post("/onboarding-tour/complete", requireAuth, async (req: Request, res: any) => {
+  const userId = req.userId;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { hasCompletedOnboardingTour: true },
+      select: {
+        id: true,
+        hasCompletedOnboardingTour: true,
+      },
+    });
+
+    return res.json({
+      hasCompletedOnboardingTour: updated.hasCompletedOnboardingTour,
+    });
+  } catch (err) {
+    console.error("Error completing onboarding tour:", err);
+    return res.status(500).json({ error: "Failed to complete onboarding tour" });
+  }
 });
 
 router.patch("/me/theme", requireAuth, async (req: Request, res: any) => {

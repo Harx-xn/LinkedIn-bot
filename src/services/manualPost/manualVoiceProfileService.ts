@@ -20,8 +20,6 @@ export const SAMPLE_RETRIEVAL_MIN = 2;
 export const SAMPLE_RETRIEVAL_MAX = 4;
 export const PROFILE_ANALYSIS_SAMPLE_LIMIT = 20;
 
-const refreshInFlight = new Map<string, Promise<void>>();
-
 export type LearnedVoiceProfile = {
   profile: Record<string, unknown>;
   preferredPhrases: string[];
@@ -85,6 +83,30 @@ export function mergeManualVoiceSignals(input: {
   }
 
   return merged;
+}
+
+/** Voice profile for manual posts comes from the user's BotConfig description. */
+export function buildVoiceProfileFromBotConfig(voice: BotVoice): LearnedVoiceProfile | null {
+  const description = voice.description.trim();
+  if (!description) return null;
+
+  return {
+    profile: {
+      source: 'botConfig',
+      authorDescription: description,
+      tone: voice.tone,
+      niches: voice.niches,
+      websiteUrl: voice.websiteUrl,
+    },
+    preferredPhrases: [],
+    avoidedPhrases: [],
+    approvedPatterns: [],
+    rejectedPatterns: [],
+    analyzedSampleCount: 0,
+    version: 1,
+    confidence: 1,
+    lastAnalyzedAt: null,
+  };
 }
 
 export function buildManualVoiceAnalysisPrompt(samples: ManualWritingSample[], explicitPreferences: BotVoice): string {
@@ -175,20 +197,8 @@ export async function collectManualVoiceSamples(
 }
 
 export async function getManualVoiceProfile(userId: string): Promise<LearnedVoiceProfile | null> {
-  const row = await prisma.userVoiceProfile.findUnique({ where: { userId } });
-  if (!row) return null;
-
-  return {
-    profile: asProfileObject(row.profile),
-    preferredPhrases: asStringArray(row.preferredPhrases),
-    avoidedPhrases: asStringArray(row.avoidedPhrases),
-    approvedPatterns: asStringArray(row.approvedPatterns),
-    rejectedPatterns: asStringArray(row.rejectedPatterns),
-    analyzedSampleCount: row.analyzedSampleCount,
-    version: row.version,
-    confidence: row.confidence,
-    lastAnalyzedAt: row.lastAnalyzedAt,
-  };
+  const voice = await getBotVoice(userId);
+  return buildVoiceProfileFromBotConfig(voice);
 }
 
 function parseVoiceAnalysisOutput(raw: string): {
@@ -353,25 +363,8 @@ export async function shouldRefreshManualVoiceProfile(userId: string): Promise<b
   return newSamples >= MIN_NEW_SAMPLES_FOR_REFRESH || newRevisions >= MIN_NEW_REVISIONS_FOR_REFRESH;
 }
 
-export function scheduleManualVoiceProfileRefresh(userId: string): void {
-  if (refreshInFlight.has(userId)) return;
-
-  const task = (async () => {
-    try {
-      const shouldRefresh = await shouldRefreshManualVoiceProfile(userId);
-      if (!shouldRefresh) return;
-      await refreshManualVoiceProfile(userId);
-    } catch (error) {
-      console.warn('[manual-voice] background profile refresh failed', {
-        userId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  })().finally(() => {
-    refreshInFlight.delete(userId);
-  });
-
-  refreshInFlight.set(userId, task);
+export function scheduleManualVoiceProfileRefresh(_userId: string): void {
+  // Voice profile is sourced from BotConfig.description; no background refresh needed.
 }
 
 export async function retrieveRelevantWritingSamples(
@@ -402,16 +395,7 @@ export async function retrieveRelevantWritingSamples(
 
 export async function getManualVoiceContext(userId: string, topic?: string): Promise<ManualVoiceContext> {
   const explicitPreferences = await getBotVoice(userId);
-
-  let learnedVoiceProfile: LearnedVoiceProfile | null = null;
-  try {
-    learnedVoiceProfile = await getManualVoiceProfile(userId);
-  } catch (error) {
-    console.warn('[manual-voice] profile lookup failed', {
-      userId,
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  const learnedVoiceProfile = buildVoiceProfileFromBotConfig(explicitPreferences);
 
   let selectedWritingSamples: ManualWritingSample[] = [];
   try {
@@ -422,8 +406,6 @@ export async function getManualVoiceContext(userId: string, topic?: string): Pro
       message: error instanceof Error ? error.message : String(error),
     });
   }
-
-  scheduleManualVoiceProfileRefresh(userId);
 
   return {
     explicitPreferences,

@@ -1,0 +1,1 @@
+ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "hasCompletedOnboardingTour" BOOLEAN NOT NULL DEFAULT false;

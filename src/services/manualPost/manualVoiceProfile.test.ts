@@ -154,11 +154,11 @@ describe('manual voice sample weighting', () => {
 });
 
 describe('manual voice prompt integration', () => {
-  it('includes AUTHOR IDENTITY, EXPLICIT PREFERENCES, LEARNED VOICE, and STYLE REFERENCES', () => {
+  it('includes AUTHOR IDENTITY, EXPLICIT PREFERENCES, VOICE PROFILE, and STYLE REFERENCES', () => {
     const blocks = buildManualVoiceContextBlocks(voiceContextFixture());
     assert.ok(blocks.includes('AUTHOR IDENTITY'));
     assert.ok(blocks.includes('EXPLICIT PREFERENCES'));
-    assert.ok(blocks.includes('LEARNED VOICE'));
+    assert.ok(blocks.includes('VOICE PROFILE (from BotConfig)'));
     assert.ok(blocks.includes('STYLE REFERENCES'));
     assert.ok(blocks.includes(STYLE_REFERENCE_INSTRUCTIONS));
     assert.ok(blocks.includes('Do not reuse exact phrases'));
@@ -170,7 +170,7 @@ describe('manual voice prompt integration', () => {
       author: { description: 'Engineer', tone: 'Professional', niches: ['SaaS'] },
       voiceContext: voiceContextFixture(),
     });
-    assert.ok(prompt.includes('LEARNED VOICE'));
+    assert.ok(prompt.includes('VOICE PROFILE (from BotConfig)'));
     assert.ok(prompt.includes('STYLE REFERENCES'));
   });
 
@@ -191,7 +191,7 @@ describe('manual voice prompt integration', () => {
       learnedVoiceProfile: null,
       selectedWritingSamples: [],
     });
-    assert.ok(blocks.includes('No learned profile available yet'));
+    assert.ok(blocks.includes('BotConfig description is missing'));
     assert.ok(blocks.includes('No eligible writing samples available yet'));
   });
 });
@@ -219,14 +219,14 @@ describe('manual voice data scoping', () => {
     assert.ok(collectBody.includes("source: 'MANUAL'"));
   });
 
-  it('profile absence returns explicit preferences without throwing', async () => {
+  it('profile absence falls back to BotConfig guidance text', async () => {
     const blocks = buildManualVoiceContextBlocks({
-      explicitPreferences: voiceContextFixture().explicitPreferences,
+      explicitPreferences: { ...voiceContextFixture().explicitPreferences, description: '' },
       learnedVoiceProfile: null,
       selectedWritingSamples: [],
     });
     assert.ok(blocks.includes('AUTHOR IDENTITY'));
-    assert.ok(blocks.includes('No learned profile available yet'));
+    assert.ok(blocks.includes('BotConfig description is missing'));
   });
 });
 

@@ -135,6 +135,21 @@ describe('manual post AI formatting', () => {
 });
 
 describe('manual topic suggestions', () => {
+  it('parses valid topic suggestion JSON without reason', () => {
+    const topics = parseManualTopicSuggestionsResponse(`
+      {
+        "topics": [
+          {
+            "title": "Why tenant isolation matters in B2B SaaS",
+            "description": "Explain the product and engineering tradeoffs of scoping customer data."
+          }
+        ]
+      }
+    `);
+    assert.equal(topics.length, 1);
+    assert.equal(topics[0].reason, topics[0].description);
+  });
+
   it('parses valid topic suggestion JSON', () => {
     const topics = parseManualTopicSuggestionsResponse(`
       {

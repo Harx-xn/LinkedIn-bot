@@ -17,21 +17,17 @@ export function buildManualVoiceContextBlocks(voiceContext?: ManualVoiceContext)
   blocks.push(`EXPLICIT PREFERENCES
 - Include contact info in final formatting: ${explicitPreferences.includeContactInfo ? 'yes' : 'no'}
 - Include website link in final formatting: ${explicitPreferences.includeWebsiteLink ? 'yes' : 'no'}
-- BotConfig remains authoritative for explicit preferences; learned voice supplements it only.`);
+- BotConfig description is the authoritative voice profile for manual posts.`);
 
   if (learnedVoiceProfile) {
-    const profileJson = JSON.stringify(learnedVoiceProfile.profile, null, 2);
-    const preferred = learnedVoiceProfile.preferredPhrases.slice(0, 8).join(', ') || 'none';
-    const avoided = learnedVoiceProfile.avoidedPhrases.slice(0, 8).join(', ') || 'none';
-    blocks.push(`LEARNED VOICE
-- Confidence: ${learnedVoiceProfile.confidence.toFixed(2)}
-- Profile signals:
-${profileJson}
-- Preferred phrase patterns: ${preferred}
-- Avoided phrase patterns: ${avoided}`);
+    blocks.push(`VOICE PROFILE (from BotConfig)
+- Author description:
+${explicitPreferences.description.trim()}
+- Tone: ${explicitPreferences.tone}
+- Niches: ${explicitPreferences.niches.join(', ') || 'none'}`);
   } else {
-    blocks.push(`LEARNED VOICE
-- No learned profile available yet. Use explicit preferences and style references only.`);
+    blocks.push(`VOICE PROFILE
+- BotConfig description is missing. Complete your ghostwriter profile before generating posts.`);
   }
 
   if (selectedWritingSamples.length > 0) {

@@ -6,9 +6,16 @@ import {
 import { buildManualTopicSuggestionPrompt } from './manualPost/manualPostPrompts';
 import { resolveManualContentService } from './manualPost/manualAiProvider';
 import { getManualVoiceContext } from './manualPost/manualVoiceProfileService';
+import {
+  DEFAULT_TOPIC_SUGGESTION_COUNT,
+  finalizeTopicSuggestions,
+  type ManualTopicSuggestion,
+} from './manualPost/manualPostTopicSuggestionService';
+import { parseTrendSources } from './trendsService';
 import { extractBalancedJsonObject } from './ghostwriterJsonParser';
 import { canGenerate } from './entitlementService';
 import { getBotVoice } from './userContentContext';
+import { prisma } from '../prismaClient';
 import { ManualPostError } from './manualPostService';
 import {
   fetchReadableArticleFromUrl,
@@ -16,13 +23,9 @@ import {
 } from './manualPost/articleUrlFetcher';
 
 export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
-export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = 5;
+export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = DEFAULT_TOPIC_SUGGESTION_COUNT;
 
-export type ManualTopicSuggestion = {
-  title: string;
-  description: string;
-  reason: string;
-};
+export type { ManualTopicSuggestion };
 
 export const MAX_MANUAL_TOPIC_LENGTH = 500;
 export const MAX_ADDITIONAL_INSTRUCTIONS_LENGTH = 1000;
@@ -194,8 +197,11 @@ export function parseManualTopicSuggestionsResponse(raw: string): ManualTopicSug
     const record = item as Record<string, unknown>;
     const title = typeof record.title === 'string' ? record.title.trim() : '';
     const description = typeof record.description === 'string' ? record.description.trim() : '';
-    const reason = typeof record.reason === 'string' ? record.reason.trim() : '';
-    if (!title || !description || !reason) continue;
+    const reason =
+      typeof record.reason === 'string' && record.reason.trim()
+        ? record.reason.trim()
+        : description;
+    if (!title || !description) continue;
     topics.push({ title, description, reason });
   }
 
@@ -224,9 +230,17 @@ export async function suggestManualPostTopics(
     throw new ManualPostError(400, 'Complete your ghostwriter profile before suggesting topics.');
   }
 
-  const count = clampTopicSuggestionCount(options?.count);
+  const count = clampTopicSuggestionCount(options?.count ?? DEFAULT_TOPIC_SUGGESTION_COUNT);
   const provider = parseContentProvider(options?.provider);
-  const voiceContext = await getManualVoiceContext(userId);
+  const [voiceContext, botConfig] = await Promise.all([
+    getManualVoiceContext(userId),
+    prisma.botConfig.findUnique({
+      where: { userId },
+      select: { sources: true },
+    }),
+  ]);
+  const trendSources = parseTrendSources(botConfig?.sources);
+  const currentYear = new Date().getFullYear();
   const contentService = await resolveManualContentService(userId, provider);
   const prompt = buildManualTopicSuggestionPrompt({
     voice: {
@@ -237,18 +251,35 @@ export async function suggestManualPostTopics(
       contactInfo: voice.contactInfo,
     },
     voiceContext,
+    trendSources,
     count,
+    currentYear,
   });
 
   let raw: string;
   try {
-    raw = await contentService.fetchComposerGenerationRaw(prompt, provider);
+    // Use rewrite raw transport so OpenAI is not forced into manual-post JSON schema.
+    raw = await contentService.fetchComposerRewriteRaw(prompt, provider);
   } catch (err) {
     console.error('[manual-posts] suggest-topics provider error:', err instanceof Error ? err.message : err);
     throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
   }
 
-  const topics = parseManualTopicSuggestionsResponse(raw).slice(0, count);
+  let parsedTopics: ManualTopicSuggestion[] = [];
+  try {
+    parsedTopics = parseManualTopicSuggestionsResponse(raw);
+  } catch (err) {
+    console.warn('[manual-posts] suggest-topics AI parse failed; using profile fallbacks', {
+      userId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const topics = finalizeTopicSuggestions(parsedTopics, voice, trendSources, count);
+  if (topics.length === 0) {
+    throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
+  }
+
   return { topics };
 }
 

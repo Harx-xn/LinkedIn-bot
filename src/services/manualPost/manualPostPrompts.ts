@@ -364,35 +364,70 @@ export function buildManualTopicSuggestionPrompt(input: {
     contactInfo: string | null;
   };
   voiceContext?: ManualVoiceContext;
+  trendSources: string[];
   count: number;
+  currentYear: number;
 }): string {
   const voiceBlocks = buildManualVoiceContextBlocks(input.voiceContext);
   const niches = input.voice.niches.filter(Boolean).join(', ') || 'none';
   const website = input.voice.websiteUrl?.trim() || 'not provided';
+  const trendSources = input.trendSources.length > 0 ? input.trendSources.join(', ') : 'google';
 
   return `${MANUAL_COMPOSER_SYSTEM}
 
 TASK:
-Suggest ${input.count} concise LinkedIn post topic ideas for this author to write about manually.
+You are generating topic ideas for LinkedIn posts, not blog articles or SEO headlines.
+Return exactly ${input.count} timely, specific, non-generic post topics for this author.
 
-AUTHOR PROFILE (authoritative — do not invent facts beyond this):
-- Tone: ${input.voice.tone}
-- Description: ${input.voice.description.trim()}
-- Niches: ${niches}
-- Website / company context: ${website}
+CURRENT YEAR: ${input.currentYear}
+- Do not mention ${input.currentYear - 1}, ${input.currentYear - 2}, ${input.currentYear - 3}, or any earlier year.
+- Do not use stale years like 2023, 2022, or 2021.
+- Only use ${input.currentYear} when a year is genuinely useful, and never use an outdated year.
+
+USER PROFILE (authoritative — do not invent facts beyond this):
+${input.voice.description.trim()}
+
+TARGET NICHES:
+${niches}
+
+TONE / STYLE:
+${input.voice.tone}
+
+TREND SOURCES CONFIGURED:
+${trendSources}
+
+WEBSITE / COMPANY CONTEXT:
+${website}
 
 ${voiceBlocks}
 
-TOPIC RULES:
-- Make each topic specific to the saved author profile, niches, tone, and website context.
-- Prefer practical, LinkedIn-ready angles a professional could post about credibly.
-- Avoid generic AI slop, vague inspiration, or broad "thought leadership" with no angle.
-- Do not invent company metrics, customers, launches, personal stories, or achievements not supported by the profile.
-- Do not hallucinate user facts that are not present in the author profile or learned voice context.
-- Each topic should be distinct and immediately usable as a manual-post prompt.
-- Titles should be short and specific (under 120 characters).
-- Descriptions should be one short sentence explaining the post angle.
-- Reasons should briefly explain why the topic fits this author's botConfig/profile.
+QUALITY RULES:
+- Topics must be specific enough to write a strong LinkedIn post from immediately.
+- Make them relevant to this user's expertise, niches, tone, and audience.
+- Prefer contrarian, practical, problem-aware, experience-based, or trend-aware angles.
+- Use trend sources as inspiration for timeliness, not as generic "AI/news" filler.
+- Do not create generic LinkedIn growth clichés.
+- Do not use vague words like "leveraging", "unlock", "game-changer", or "authentic connections" unless tied to a concrete angle.
+- Do not create broad topics about "AI" unless the angle is concrete and tied to the user's profile.
+- Do not invent metrics, customers, launches, or personal experiences not supported by the profile.
+- Do not repeat similar angles.
+- Titles must sound like post starting points, not blog SEO headlines.
+- Each description must be one short sentence explaining the post angle/subtitle.
+
+BAD EXAMPLES (never imitate these patterns):
+- Leveraging AI for Effective Content Marketing
+- Top Tools for LinkedIn Growth in 2023
+- Creating Authentic Connections on LinkedIn
+- Common Mistakes in AI Content Automation
+- The Future of AI in Marketing
+- Why LinkedIn Matters for Your Brand
+
+BETTER EXAMPLES (match this specificity level):
+- Why AI-written LinkedIn posts fail when the author voice is missing
+- The hidden reason most SaaS content sounds the same
+- How founders can turn one customer insight into five LinkedIn posts
+- Why content automation needs guardrails, not just better prompts
+- What LinkedIn creators should stop outsourcing to AI
 
 OUTPUT:
 Return valid JSON only with this exact shape:
@@ -400,8 +435,7 @@ Return valid JSON only with this exact shape:
   "topics": [
     {
       "title": "string",
-      "description": "string",
-      "reason": "string"
+      "description": "string"
     }
   ]
 }
