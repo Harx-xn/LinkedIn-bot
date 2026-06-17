@@ -1,8 +1,10 @@
 /**
  * Batch posting schedule helpers for Trending Bot generation.
  *
- * `BotConfig.postingSchedule` stores JSON:
- *   { time: "HH:mm", days: [0-6], timezone?: "IANA/Zone" }
+ * Schedule is provided per request on POST /bot/generate as:
+ *   { timeSlots: ["HH:mm", ...], days: [0-6], timezone?: "IANA/Zone" }
+ *
+ * Legacy shape `{ time: "HH:mm", ... }` is accepted and normalized to `timeSlots`.
  *
  * Day indices: 0 = Sunday, 1 = Monday, ... 6 = Saturday.
  *
@@ -11,13 +13,15 @@
  */
 
 export type PostingScheduleConfig = {
-  time: string;
+  timeSlots?: string[];
+  /** @deprecated Use timeSlots. Accepted for backwards compatibility. */
+  time?: string;
   days: number[];
   timezone?: string;
 };
 
 export type NormalizedPostingScheduleConfig = {
-  time: string;
+  timeSlots: string[];
   days: number[];
   timezone: string;
 };
@@ -29,8 +33,39 @@ export class BatchScheduleError extends Error {
   }
 }
 
+export const BATCH_GENERATION_SLOTS_REQUIRED_MESSAGE =
+  'Batch schedule is required from POST /bot/generate (precomputed slots were not provided).';
+
+export class BatchScheduleCapacityError extends Error {
+  readonly code = 'BATCH_SCHEDULE_CAPACITY_EXCEEDED';
+
+  constructor(
+    public readonly requestedCount: number,
+    public readonly availableCount: number,
+    public readonly daysWindow: number,
+  ) {
+    super(formatBatchScheduleCapacityMessage(requestedCount, availableCount, daysWindow));
+    this.name = 'BatchScheduleCapacityError';
+  }
+}
+
+function formatBatchScheduleCapacityMessage(
+  requestedCount: number,
+  availableCount: number,
+  daysWindow: number,
+): string {
+  return (
+    `Not enough open schedule slots for this batch. You requested ${requestedCount} posts ` +
+    `but only ${availableCount} slot${availableCount === 1 ? '' : 's'} are available in the next ` +
+    `${daysWindow} days. Try adding more times, selecting more days, increasing duration, or ` +
+    `lowering frequency.`
+  );
+}
+
+const HH_MM_PATTERN = /^(\d{1,2}):(\d{2})$/;
+
 const DEFAULT_SCHEDULE: NormalizedPostingScheduleConfig = {
-  time: '09:00',
+  timeSlots: ['09:00'],
   days: [1, 2, 3, 4, 5],
   timezone: 'UTC',
 };
@@ -41,15 +76,13 @@ function isMissing(value: unknown): boolean {
   return value == null || value === '';
 }
 
-function normalizeTime(value: unknown, hasExplicitTime: boolean): string {
-  if (!hasExplicitTime || value == null || value === '') return DEFAULT_SCHEDULE.time;
-
+function parseAndNormalizeTime(value: unknown): string {
   if (typeof value !== 'string') {
     throw new BatchScheduleError('Invalid time format. Use HH:mm (24-hour).');
   }
 
   const trimmed = value.trim();
-  const match = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  const match = trimmed.match(HH_MM_PATTERN);
   if (!match) {
     throw new BatchScheduleError('Invalid time format. Use HH:mm (24-hour).');
   }
@@ -62,6 +95,33 @@ function normalizeTime(value: unknown, hasExplicitTime: boolean): string {
   }
 
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function normalizeTime(value: unknown, hasExplicitTime: boolean): string {
+  if (!hasExplicitTime || value == null || value === '') {
+    return DEFAULT_SCHEDULE.timeSlots[0];
+  }
+  return parseAndNormalizeTime(value);
+}
+
+function normalizeTimeSlots(raw: Record<string, unknown>): string[] {
+  const hasTimeSlots = Object.prototype.hasOwnProperty.call(raw, 'timeSlots');
+  const hasTime = Object.prototype.hasOwnProperty.call(raw, 'time');
+
+  if (hasTimeSlots) {
+    const value = raw.timeSlots;
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new BatchScheduleError('timeSlots must be a non-empty array of HH:mm times.');
+    }
+    const normalized = value.map((slot) => parseAndNormalizeTime(slot));
+    return [...new Set(normalized)].sort();
+  }
+
+  if (hasTime) {
+    return [normalizeTime(raw.time, true)];
+  }
+
+  return [...DEFAULT_SCHEDULE.timeSlots];
 }
 
 function normalizeDays(value: unknown, hasExplicitDays: boolean): number[] {
@@ -142,34 +202,68 @@ export function parsePostingSchedule(value: unknown): NormalizedPostingScheduleC
   const raw = unwrapScheduleInput(value);
   if (!raw) return { ...DEFAULT_SCHEDULE };
 
-  const hasExplicitTime = Object.prototype.hasOwnProperty.call(raw, 'time');
   const hasExplicitDays = Object.prototype.hasOwnProperty.call(raw, 'days');
-
+  const timeSlots = normalizeTimeSlots(raw);
   const days = normalizeDays(raw.days, hasExplicitDays);
+
   if (hasExplicitDays && days.length === 0) {
     // Config save: empty selection -> default weekdays.
     return {
-      time: normalizeTime(raw.time, hasExplicitTime),
+      timeSlots,
       days: [...DEFAULT_WEEKDAYS],
       timezone: normalizeTimezone(raw.timezone),
     };
   }
 
   return {
-    time: normalizeTime(raw.time, hasExplicitTime),
+    timeSlots,
     days: days.length ? days : [...DEFAULT_WEEKDAYS],
     timezone: normalizeTimezone(raw.timezone),
   };
 }
 
 export function serializePostingSchedule(input: unknown): string {
-  return JSON.stringify(parsePostingSchedule(input));
+  const schedule = parsePostingSchedule(input);
+  return JSON.stringify({
+    timeSlots: schedule.timeSlots,
+    days: schedule.days,
+    timezone: schedule.timezone,
+  });
 }
 
 export function validateScheduleForGeneration(schedule: NormalizedPostingScheduleConfig): void {
   if (!schedule.days.length) {
     throw new BatchScheduleError('Select at least one posting day.');
   }
+  if (!schedule.timeSlots.length) {
+    throw new BatchScheduleError('Select at least one posting time.');
+  }
+}
+
+/**
+ * Validate a batch generation schedule from the request body.
+ * Legacy `{ time: "HH:mm" }` in the payload is still accepted and normalized to `timeSlots`.
+ */
+export function parseBatchPostingScheduleRequest(value: unknown): NormalizedPostingScheduleConfig {
+  if (!value || typeof value !== 'object') {
+    throw new BatchScheduleError('batchPostingSchedule must be an object.');
+  }
+
+  const raw = value as Record<string, unknown>;
+
+  if (!Array.isArray(raw.days) || raw.days.length === 0) {
+    throw new BatchScheduleError('Select at least one posting day.');
+  }
+
+  const hasTimeSlots = Array.isArray(raw.timeSlots) && raw.timeSlots.length > 0;
+  const hasLegacyTime = typeof raw.time === 'string' && raw.time.trim() !== '';
+  if (!hasTimeSlots && !hasLegacyTime) {
+    throw new BatchScheduleError('timeSlots must be a non-empty array of HH:mm times.');
+  }
+
+  const schedule = parsePostingSchedule(value);
+  validateScheduleForGeneration(schedule);
+  return schedule;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,22 +332,43 @@ function wallClockToUtc(
   return candidate;
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** Inclusive window end for batch generation (`now` + `daysWindow` days). */
+export function scheduleWindowEnd(startDate: Date, daysWindow: number): Date {
+  return new Date(startDate.getTime() + daysWindow * MS_PER_DAY);
+}
+
+/** Minute-resolution key for comparing generated slots with stored `scheduledAt`. */
+export function scheduleSlotTimestampKey(date: Date): number {
+  return Math.floor(date.getTime() / 60_000);
+}
+
+/** True when two schedule instants refer to the same posting minute. */
+export function scheduleSlotsMatch(a: Date, b: Date): boolean {
+  return scheduleSlotTimestampKey(a) === scheduleSlotTimestampKey(b);
+}
+
 /**
- * Build exactly `count` future posting slots on allowed weekdays at `schedule.time`.
+ * All posting slots after `startDate` and on or before `startDate + daysWindow`.
+ * For each selected weekday, emits one UTC slot per configured `timeSlots` entry
+ * (wall-clock in `schedule.timezone`, sorted chronologically).
  */
-export function buildBatchScheduleSlots(params: {
+export function buildScheduleSlotsWithinWindow(params: {
   startDate?: Date;
-  count: number;
+  daysWindow: number;
   schedule: NormalizedPostingScheduleConfig;
 }): Date[] {
-  const { count, schedule } = params;
-  if (count <= 0) return [];
+  const { daysWindow, schedule } = params;
+  if (daysWindow <= 0) return [];
 
   validateScheduleForGeneration(schedule);
 
   const startDate = params.startDate ?? new Date();
-  const { hour, minute } = parseTimeParts(schedule.time);
+  const windowEnd = scheduleWindowEnd(startDate, daysWindow);
   const allowed = new Set(schedule.days);
+  const sortedTimeSlots = [...schedule.timeSlots].sort();
+  const timeParts = sortedTimeSlots.map((time) => parseTimeParts(time));
   const slots: Date[] = [];
 
   const anchor = getZonedParts(startDate, schedule.timezone);
@@ -261,22 +376,35 @@ export function buildBatchScheduleSlots(params: {
   let cursorMonth = anchor.month;
   let cursorDay = anchor.day;
 
-  const maxDays = Math.max(count * 14, 90);
-
-  for (let i = 0; i < maxDays && slots.length < count; i++) {
+  for (let i = 0; i <= daysWindow; i++) {
     const probe = wallClockToUtc(cursorYear, cursorMonth, cursorDay, 12, 0, schedule.timezone);
     const parts = getZonedParts(probe, schedule.timezone);
     const dow = weekdayIndexFromShort(parts.weekday);
 
     if (allowed.has(dow)) {
-      const slot = wallClockToUtc(cursorYear, cursorMonth, cursorDay, hour, minute, schedule.timezone);
-      if (slot.getTime() > startDate.getTime()) {
-        slots.push(slot);
+      for (const { hour, minute } of timeParts) {
+        const slot = wallClockToUtc(
+          cursorYear,
+          cursorMonth,
+          cursorDay,
+          hour,
+          minute,
+          schedule.timezone,
+        );
+        if (slot.getTime() > startDate.getTime() && slot.getTime() <= windowEnd.getTime()) {
+          slots.push(slot);
+        }
       }
     }
 
-    // Advance one calendar day in the schedule timezone.
-    const nextNoon = wallClockToUtc(cursorYear, cursorMonth, cursorDay + 1, 12, 0, schedule.timezone);
+    const nextNoon = wallClockToUtc(
+      cursorYear,
+      cursorMonth,
+      cursorDay + 1,
+      12,
+      0,
+      schedule.timezone,
+    );
     const nextParts = getZonedParts(nextNoon, schedule.timezone);
     cursorYear = nextParts.year;
     cursorMonth = nextParts.month;
@@ -284,6 +412,56 @@ export function buildBatchScheduleSlots(params: {
   }
 
   return slots;
+}
+
+/** Candidate slots within the window with occupied REVIEW/QUEUED times removed. */
+export function resolveAvailableScheduleSlots(params: {
+  startDate?: Date;
+  daysWindow: number;
+  schedule: NormalizedPostingScheduleConfig;
+  occupiedScheduledAt: Date[];
+}): Date[] {
+  const candidateSlots = buildScheduleSlotsWithinWindow({
+    startDate: params.startDate,
+    daysWindow: params.daysWindow,
+    schedule: params.schedule,
+  });
+
+  return excludeOccupiedScheduleSlots(candidateSlots, params.occupiedScheduledAt);
+}
+
+/** Remove candidate slots already reserved by REVIEW/QUEUED posts. */
+export function excludeOccupiedScheduleSlots(
+  candidateSlots: Date[],
+  occupiedScheduledAt: Date[],
+): Date[] {
+  if (!occupiedScheduledAt.length) return [...candidateSlots];
+
+  const occupiedKeys = new Set(
+    occupiedScheduledAt.map((scheduledAt) => scheduleSlotTimestampKey(scheduledAt)),
+  );
+
+  return candidateSlots.filter((slot) => !occupiedKeys.has(scheduleSlotTimestampKey(slot)));
+}
+
+/**
+ * Build up to `count` future posting slots within `daysWindow` on allowed weekdays
+ * at each configured time (chronological order).
+ */
+export function buildBatchScheduleSlots(params: {
+  startDate?: Date;
+  count: number;
+  daysWindow: number;
+  schedule: NormalizedPostingScheduleConfig;
+}): Date[] {
+  const { count, daysWindow } = params;
+  if (count <= 0) return [];
+
+  return buildScheduleSlotsWithinWindow({
+    startDate: params.startDate,
+    daysWindow,
+    schedule: params.schedule,
+  }).slice(0, count);
 }
 
 /** Same slot count formula used by the previous calculateTimeSlots helper. */

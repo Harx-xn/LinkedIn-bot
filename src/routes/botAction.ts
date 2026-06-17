@@ -5,14 +5,29 @@
   import { canGenerate } from '../services/entitlementService';
   import {
     BatchScheduleError,
-    parsePostingSchedule,
-    serializePostingSchedule,
-    validateScheduleForGeneration,
+    BatchScheduleCapacityError,
+    NormalizedPostingScheduleConfig,
+    parseBatchPostingScheduleRequest,
   } from '../services/batchScheduleService';
+  import { resolveBatchGenerationSlots } from '../services/batchScheduleCapacityService';
   import {
     PlanLimitError,
     canStartBatchGeneration,
   } from '../services/planEntitlementService';
+
+  export type BotGenerateRequestBody = {
+    daysWindow: number;
+    postsPerWeek: number;
+    batchPostingSchedule: unknown;
+    previewId?: string;
+  };
+
+  function parsePositiveInteger(value: unknown): number | null {
+    if (value === undefined || value === null || value === '') return null;
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    return n;
+  }
 
   const router = Router();
   const botService = new TrendingBotService();
@@ -27,8 +42,24 @@
   });
 
   router.post("/generate", requireAuth, async (req, res) => {
-    const { daysWindow, batchPostingSchedule, postingSchedule } = req.body;
+    const { daysWindow, postsPerWeek, batchPostingSchedule } =
+      req.body as BotGenerateRequestBody;
     if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
+
+    if (postsPerWeek === undefined || postsPerWeek === null) {
+      return res.status(400).json({ error: "Missing postsPerWeek" });
+    }
+
+    const parsedPostsPerWeek = parsePositiveInteger(postsPerWeek);
+    if (parsedPostsPerWeek === null) {
+      return res.status(400).json({
+        error: "Invalid postsPerWeek. Provide a positive integer.",
+      });
+    }
+
+    if (batchPostingSchedule === undefined || batchPostingSchedule === null) {
+      return res.status(400).json({ error: "Missing batchPostingSchedule" });
+    }
 
     // Block generation once the free trial has ended (subscribers/admins pass).
     const gate = await canGenerate(req.userId!);
@@ -46,41 +77,37 @@
       throw err;
     }
 
-    const scheduleInput =
-      batchPostingSchedule !== undefined ? batchPostingSchedule : postingSchedule;
-
-    if (
-      scheduleInput &&
-      typeof scheduleInput === 'object' &&
-      Array.isArray(scheduleInput.days) &&
-      scheduleInput.days.length === 0
-    ) {
-      return res.status(400).json({
-        error: 'Invalid posting schedule: Select at least one posting day.',
-      });
+    let schedule: NormalizedPostingScheduleConfig;
+    try {
+      schedule = parseBatchPostingScheduleRequest(batchPostingSchedule);
+    } catch (err) {
+      if (err instanceof BatchScheduleError) {
+        return res.status(400).json({ error: `Invalid posting schedule: ${err.message}` });
+      }
+      throw err;
     }
 
-    if (scheduleInput !== undefined) {
-      try {
-        const schedule = parsePostingSchedule(scheduleInput);
-        validateScheduleForGeneration(schedule);
-        const serialized = serializePostingSchedule(scheduleInput);
-        const existingConfig = await prisma.botConfig.findUnique({
-          where: { userId: req.userId! },
-          select: { id: true },
+    const parsedDaysWindow = Number(daysWindow);
+    let resolvedSlots: Date[];
+    try {
+      const resolved = await resolveBatchGenerationSlots({
+        userId: req.userId!,
+        postsPerWeek: parsedPostsPerWeek,
+        daysWindow: parsedDaysWindow,
+        schedule,
+      });
+      resolvedSlots = resolved.slots;
+    } catch (err) {
+      if (err instanceof BatchScheduleCapacityError) {
+        return res.status(400).json({
+          error: err.message,
+          code: err.code,
+          requestedCount: err.requestedCount,
+          availableCount: err.availableCount,
+          daysWindow: err.daysWindow,
         });
-        if (existingConfig) {
-          await prisma.botConfig.update({
-            where: { userId: req.userId! },
-            data: { postingSchedule: serialized },
-          });
-        }
-      } catch (err) {
-        if (err instanceof BatchScheduleError) {
-          return res.status(400).json({ error: `Invalid posting schedule: ${err.message}` });
-        }
-        throw err;
       }
+      throw err;
     }
 
     // Attach the region so generation jobs show up in region-scoped analytics.
@@ -93,15 +120,21 @@
       data: {
         userId: req.userId!,
         regionId: owner?.regionId ?? null,
-        daysWindow: Number(daysWindow),
+        daysWindow: parsedDaysWindow,
         status: "RUNNING",
+        totalSlots: resolvedSlots.length,
+        completedSlots: 0,
       },
     });
 
+    // Batch schedule/frequency are request-scoped only — not persisted to BotConfig.
     const previewId = typeof req.body.previewId === 'string' ? req.body.previewId : undefined;
 
     botService
-      .generateNow(req.userId!, Number(daysWindow), job.id, { previewId })
+      .generateNow(req.userId!, job.id, {
+        previewId,
+        slots: resolvedSlots,
+      })
       .then(async () => {
         await prisma.botGenerationJob.update({
           where: { id: job.id },

@@ -3,13 +3,7 @@ import { ContentService } from "./contentService";
 import { ImageService } from "./imageService";
 import { prisma } from "../prismaClient";
 import { decryptSecret, decryptSecretArray } from "./secretCrypto";
-import {
-  buildBatchScheduleSlots,
-  calculateBatchSlotCount,
-  parsePostingSchedule,
-  validateScheduleForGeneration,
-  BatchScheduleError,
-} from "./batchScheduleService";
+import { BATCH_GENERATION_SLOTS_REQUIRED_MESSAGE, BatchScheduleError } from "./batchScheduleService";
 import {
   generateBatchPostMediaUrl,
   resolveBotImageMode,
@@ -260,16 +254,18 @@ export class TrendingBotService {
 
   async generateNow(
     userId: string,
-    daysWindow: number,
-    jobId?: string,
-    options?: { previewId?: string },
+    jobId: string | undefined,
+    options: { slots: Date[]; previewId?: string },
   ) {
     const config = await prisma.botConfig.findUnique({ where: { userId } });
     if (!config || !config.isEnabled) return;
 
-    console.log(
-      `Generating batch for user ${userId}, window: ${daysWindow} days`,
-    );
+    const slots = options.slots;
+    if (!slots.length) {
+      throw new BatchScheduleError(BATCH_GENERATION_SLOTS_REQUIRED_MESSAGE);
+    }
+
+    console.log(`Generating batch for user ${userId}, slots: ${slots.length}`);
 
     const contentService = await this.getContentService(userId);
 
@@ -300,23 +296,6 @@ export class TrendingBotService {
         : [];
     } catch {}
 
-    let schedule;
-    try {
-      schedule = parsePostingSchedule(config.postingSchedule);
-      validateScheduleForGeneration(schedule);
-    } catch (err) {
-      if (err instanceof BatchScheduleError) {
-        throw err;
-      }
-      schedule = parsePostingSchedule(null);
-    }
-
-    const totalPosts = calculateBatchSlotCount(config.postsPerWeek, daysWindow);
-    const slots = buildBatchScheduleSlots({
-      count: totalPosts,
-      schedule,
-      startDate: new Date(),
-    });
     if (jobId) {
       await prisma.botGenerationJob.update({
         where: { id: jobId },

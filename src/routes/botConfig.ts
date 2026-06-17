@@ -6,11 +6,6 @@ import {
   cleanOptionalText,
   normalizeWebsiteUrl,
 } from '../services/postContentFormatting';
-import {
-  BatchScheduleError,
-  parsePostingScheduleSafe,
-  serializePostingSchedule,
-} from '../services/batchScheduleService';
 import { NicheExpansionService, normalizeNicheKey } from '../services/nicheExpansionService';
 import { decryptSecret } from '../services/secretCrypto';
 import {
@@ -27,8 +22,6 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
       where: { userId: req.userId }
     });
 
-    // add description default too
-    const batchPostingSchedule = parsePostingScheduleSafe(config?.postingSchedule ?? null);
     const effectiveImageMode = config
       ? resolveBotImageMode(config)
       : 'none';
@@ -43,8 +36,6 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
             websiteUrl: config.websiteUrl || '',
             includeContactInfo: config.includeContactInfo ?? false,
             includeWebsiteLink: config.includeWebsiteLink ?? false,
-            postingSchedule: config.postingSchedule || null,
-            batchPostingSchedule,
           }
         : {
             userId: req.userId,
@@ -54,13 +45,11 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
             imageMode: null,
             effectiveImageMode: 'none',
             isEnabled: false,
-            description: '', // ✅
+            description: '',
             contactInfo: '',
             websiteUrl: '',
             includeContactInfo: false,
             includeWebsiteLink: false,
-            postingSchedule: null,
-            batchPostingSchedule,
           }
     );
   } catch (error) {
@@ -69,9 +58,9 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
   }
 });
 
-// PUT /bot/config - Update or Create bot config
+// PUT /bot/config - Update or Create bot config (personalization/content only)
 router.put('/config', requireAuth, async (req: Request, res: any) => {
-
+  const body = req.body as Record<string, unknown>;
 
   const {
     niches,
@@ -82,108 +71,81 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     backgroundImageUrl,
     isEnabled,
     tone,
-    postsPerWeek,
-    description // ✅
-  } = req.body;
+    description,
+  } = body;
 
-  const includeContactInfo = parseBoolean(req.body.includeContactInfo, false);
-  const includeWebsiteLink = parseBoolean(req.body.includeWebsiteLink, false);
+  const includeContactInfo = parseBoolean(body.includeContactInfo, false);
+  const includeWebsiteLink = parseBoolean(body.includeWebsiteLink, false);
 
   let normalizedWebsiteUrl: string | null = null;
   try {
-    normalizedWebsiteUrl = normalizeWebsiteUrl(req.body.websiteUrl);
+    normalizedWebsiteUrl = normalizeWebsiteUrl(body.websiteUrl);
   } catch {
     return res.status(400).json({ error: 'Invalid website URL' });
   }
 
-    const cleanedContactInfo = cleanOptionalText(req.body.contactInfo, 500);
+  const cleanedContactInfo = cleanOptionalText(body.contactInfo, 500);
 
-    let imageModeUpdate: string | null | undefined;
-    if (Object.prototype.hasOwnProperty.call(req.body, 'imageMode')) {
-      try {
-        imageModeUpdate = parseBotImageModeInput(req.body.imageMode);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Invalid imageMode';
-        return res.status(400).json({ error: message });
-      }
-    }
-
-    const hasSchedulePayload =
-      Object.prototype.hasOwnProperty.call(req.body, 'batchPostingSchedule') ||
-      Object.prototype.hasOwnProperty.call(req.body, 'postingSchedule');
-
-    let postingScheduleUpdate: string | undefined;
-    if (hasSchedulePayload) {
-      const scheduleInput = req.body.batchPostingSchedule ?? req.body.postingSchedule;
-      try {
-        postingScheduleUpdate = serializePostingSchedule(scheduleInput ?? null);
-      } catch (err) {
-        if (err instanceof BatchScheduleError) {
-          return res.status(400).json({ error: `Invalid posting schedule: ${err.message}` });
-        }
-        throw err;
-      }
-    }
-
+  let imageModeUpdate: string | null | undefined;
+  if (Object.prototype.hasOwnProperty.call(body, 'imageMode')) {
     try {
+      imageModeUpdate = parseBotImageModeInput(body.imageMode);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Invalid imageMode';
+      return res.status(400).json({ error: message });
+    }
+  }
+
+  try {
     const nichesStr = typeof niches === 'string' ? niches : JSON.stringify(niches || []);
     const sourcesStr = typeof sources === 'string' ? sources : JSON.stringify(sources || []);
-    const customRssFeedsStr = typeof customRssFeeds === 'string' ? customRssFeeds : JSON.stringify(customRssFeeds || []);
-    const customLinksStr = typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
-    const customRedditFeedsStr = typeof customRedditFeeds === 'string' ? customRedditFeeds : JSON.stringify(customRedditFeeds || []);
+    const customRssFeedsStr =
+      typeof customRssFeeds === 'string' ? customRssFeeds : JSON.stringify(customRssFeeds || []);
+    const customLinksStr =
+      typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
+    const customRedditFeedsStr =
+      typeof customRedditFeeds === 'string'
+        ? customRedditFeeds
+        : JSON.stringify(customRedditFeeds || []);
 
-    // Stamp the config with the user's region so region-scoped admin/analytics
-    // queries include bot-generated data.
     const owner = await prisma.user.findUnique({
       where: { id: req.userId! },
       select: { regionId: true },
     });
     const regionId = owner?.regionId ?? null;
 
+    const normalizedBackgroundImageUrl =
+      typeof backgroundImageUrl === 'string' && backgroundImageUrl.trim()
+        ? backgroundImageUrl.trim()
+        : null;
+
+    const sharedContentFields = {
+      regionId,
+      niches: nichesStr,
+      sources: sourcesStr,
+      customRssFeeds: customRssFeedsStr,
+      customLinks: customLinksStr,
+      customRedditFeeds: customRedditFeedsStr,
+      backgroundImageUrl: normalizedBackgroundImageUrl,
+      tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional',
+      isEnabled: !!isEnabled,
+      description: typeof description === 'string' ? description : '',
+      includeContactInfo,
+      includeWebsiteLink,
+      contactInfo: cleanedContactInfo,
+      websiteUrl: normalizedWebsiteUrl,
+      ...(imageModeUpdate !== undefined ? { imageMode: imageModeUpdate } : {}),
+    };
+
     const config = await prisma.botConfig.upsert({
       where: { userId: req.userId! },
       create: {
         userId: req.userId!,
-        regionId,
-        niches: nichesStr,
-        sources: sourcesStr,
-        customRssFeeds: customRssFeedsStr,
-        customLinks: customLinksStr,
-        customRedditFeeds: customRedditFeedsStr,
-        backgroundImageUrl: backgroundImageUrl || undefined,
         imageMode: imageModeUpdate ?? null,
-        tone: tone || 'Professional',
-        postsPerWeek: postsPerWeek || 7,
-        isEnabled: !!isEnabled,
-        postingSchedule: postingScheduleUpdate ?? serializePostingSchedule(null),
-        description: description || '', // ✅
-        includeContactInfo,
-        includeWebsiteLink,
-        contactInfo: cleanedContactInfo,
-        websiteUrl: normalizedWebsiteUrl,
+        ...sharedContentFields,
       },
-      update: {
-        regionId,
-        niches: nichesStr,
-        sources: sourcesStr,
-        customRssFeeds: customRssFeedsStr,
-        customLinks: customLinksStr,
-        customRedditFeeds: customRedditFeedsStr,
-        backgroundImageUrl: backgroundImageUrl || null,
-        tone: tone || 'Professional',
-        postsPerWeek: postsPerWeek || 7,
-        isEnabled: !!isEnabled,
-        description: description || '', // ✅
-        includeContactInfo,
-        includeWebsiteLink,
-        contactInfo: cleanedContactInfo,
-        websiteUrl: normalizedWebsiteUrl,
-        ...(postingScheduleUpdate ? { postingSchedule: postingScheduleUpdate } : {}),
-        ...(imageModeUpdate !== undefined ? { imageMode: imageModeUpdate } : {}),
-      }
+      update: sharedContentFields,
     });
-
-    const batchPostingSchedule = parsePostingScheduleSafe(config.postingSchedule);
 
     res.json({
       ...config,
@@ -193,8 +155,6 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       websiteUrl: config.websiteUrl || '',
       includeContactInfo: config.includeContactInfo ?? false,
       includeWebsiteLink: config.includeWebsiteLink ?? false,
-      postingSchedule: config.postingSchedule || null,
-      batchPostingSchedule,
     });
   } catch (error) {
     console.error('Error saving bot config:', error);
