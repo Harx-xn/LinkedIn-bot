@@ -24,6 +24,11 @@ import {
   recordImageGeneration,
 } from '../services/planEntitlementService';
 import { safeUpdateTopicHistoryStatus } from '../services/topicHistoryService';
+import {
+  CalendarMonthError,
+  getCalendarDayUtcRange,
+  getCalendarMonthUtcRange,
+} from '../services/calendarMonthService';
 
 const router = Router();
 const imageService = new ImageService();
@@ -142,6 +147,145 @@ router.post('/review/confirm', requireAuth, async (req, res) => {
   }
 
   res.json({ updated: result.count });
+});
+
+const CALENDAR_POST_STATUSES = ['REVIEW', 'QUEUED', 'PUBLISHED', 'FAILED', 'DRAFT'] as const;
+
+const CALENDAR_POST_SELECT = {
+  id: true,
+  content: true,
+  status: true,
+  source: true,
+  scheduledAt: true,
+  publishedAt: true,
+  mediaUrl: true,
+  hashtags: true,
+  linkedinPostUrn: true,
+  errorMessage: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+function serializeCalendarPost(post: {
+  id: string;
+  content: string;
+  status: string;
+  source: string;
+  scheduledAt: Date | null;
+  publishedAt: Date | null;
+  mediaUrl: string | null;
+  hashtags: string | null;
+  linkedinPostUrn: string | null;
+  errorMessage: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: post.id,
+    content: post.content,
+    status: post.status,
+    source: post.source,
+    scheduledAt: post.scheduledAt?.toISOString() ?? null,
+    publishedAt: post.publishedAt?.toISOString() ?? null,
+    mediaUrl: post.mediaUrl,
+    hashtags: post.hashtags,
+    linkedinPostUrn: post.linkedinPostUrn,
+    errorMessage: post.errorMessage,
+    createdAt: post.createdAt.toISOString(),
+    updatedAt: post.updatedAt.toISOString(),
+  };
+}
+
+router.get('/calendar', requireAuth, async (req, res) => {
+  const monthParam = req.query.month;
+  const timezoneParam = req.query.timezone;
+
+  if (typeof monthParam !== 'string' || !monthParam.trim()) {
+    return res.status(400).json({ error: 'Missing month query parameter. Use YYYY-MM.' });
+  }
+
+  if (typeof timezoneParam !== 'string' || !timezoneParam.trim()) {
+    return res.status(400).json({ error: 'Missing timezone query parameter.' });
+  }
+
+  let range;
+  try {
+    range = getCalendarMonthUtcRange({
+      month: monthParam,
+      timezone: timezoneParam,
+    });
+  } catch (err) {
+    if (err instanceof CalendarMonthError) {
+      return res.status(400).json({ error: err.message });
+    }
+    throw err;
+  }
+
+  const posts = await prisma.post.findMany({
+    where: {
+      userId: req.userId!,
+      status: { in: [...CALENDAR_POST_STATUSES] },
+      scheduledAt: {
+        not: null,
+        gte: range.startUtc,
+        lt: range.endUtcExclusive,
+      },
+    },
+    select: CALENDAR_POST_SELECT,
+    orderBy: { scheduledAt: 'asc' },
+  });
+
+  return res.json({
+    month: range.month,
+    timezone: range.timezone,
+    posts: posts.map(serializeCalendarPost),
+  });
+});
+
+router.get('/calendar/day', requireAuth, async (req, res) => {
+  const dateParam = req.query.date;
+  const timezoneParam = req.query.timezone;
+
+  if (typeof dateParam !== 'string' || !dateParam.trim()) {
+    return res.status(400).json({ error: 'Missing date query parameter. Use YYYY-MM-DD.' });
+  }
+
+  if (typeof timezoneParam !== 'string' || !timezoneParam.trim()) {
+    return res.status(400).json({ error: 'Missing timezone query parameter.' });
+  }
+
+  let range;
+  try {
+    range = getCalendarDayUtcRange({
+      date: dateParam,
+      timezone: timezoneParam,
+    });
+  } catch (err) {
+    if (err instanceof CalendarMonthError) {
+      return res.status(400).json({ error: err.message });
+    }
+    throw err;
+  }
+
+  const posts = await prisma.post.findMany({
+    where: {
+      userId: req.userId!,
+      status: { in: [...CALENDAR_POST_STATUSES] },
+      scheduledAt: {
+        not: null,
+        gte: range.startUtc,
+        lt: range.endUtcExclusive,
+      },
+    },
+    select: CALENDAR_POST_SELECT,
+    orderBy: { scheduledAt: 'asc' },
+  });
+
+  return res.json({
+    date: range.date,
+    timezone: range.timezone,
+    posts: posts.map(serializeCalendarPost),
+  });
 });
 
 router.get('/queue', requireAuth, async (req, res) => {
