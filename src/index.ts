@@ -33,6 +33,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   // add your deployed frontend domain too:
   "https://frontend-bx09.onrender.com",
+  "https://veyra.innovariatech.space"
 ];
 
 app.post(
