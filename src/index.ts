@@ -22,6 +22,7 @@ import paymentsRouter from './routes/payments';
 import billingRouter from './routes/billing';
 import notificationsRouter from './routes/notifications';
 import entitlementsRouter from './routes/entitlements';
+import supportRouter from './routes/support';
 import { handleStripeWebhook } from './routes/stripeWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
@@ -34,6 +35,11 @@ const allowedOrigins = [
   "https://frontend-bx09.onrender.com",
 ];
 
+app.post(
+  '/api/payments/webhook/stripe/:regionId',
+
+  handleStripeWebhook
+);
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -48,11 +54,6 @@ app.use(
   })
 );
 
-app.post(
-  '/api/payments/webhook/stripe/:regionId',
-  express.raw({ type: 'application/json' }),
-  handleStripeWebhook
-);
 
 app.use(express.json());
 // Lightweight request logger.
@@ -86,6 +87,7 @@ app.use('/api/payments', paymentsRouter);
 app.use('/api/billing', billingRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/entitlements', entitlementsRouter);
+app.use('/api/support', supportRouter);
 // Backwards-compatible aliases (pre-/api mounts)
 app.use('/admin', adminRoutes);
 app.use('/regional-admin', regionRoutes);

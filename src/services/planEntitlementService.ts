@@ -1,4 +1,5 @@
 import { UserRole } from '@prisma/client';
+import type { Plan } from '@prisma/client';
 import { prisma } from '../prismaClient';
 import { hasDashboardAccess } from './billing/billingAccessService';
 import { getEntitlement } from './entitlementService';
@@ -81,6 +82,7 @@ function startOfUtcDay(): Date {
 }
 
 type ActiveSubscriptionWithPlan = Awaited<ReturnType<typeof getActiveSubscriptionWithPlan>>;
+type SubscriptionPlan = NonNullable<ActiveSubscriptionWithPlan>['plan'];
 
 /**
  * Most recent ACTIVE subscription for a user, with its Plan included.
@@ -97,6 +99,22 @@ export async function getActiveSubscriptionWithPlan(userId: string) {
     orderBy: { startsAt: 'desc' },
     include: { plan: true },
   });
+}
+
+async function getHighestActivePlanForRegion(regionId: string | null): Promise<Plan | null> {
+  if (!regionId) return null;
+  return prisma.plan.findFirst({
+    where: { regionId, isActive: true },
+    orderBy: [{ price: 'desc' }, { name: 'asc' }],
+  });
+}
+
+async function getEffectiveEntitlementPlan(
+  sub: ActiveSubscriptionWithPlan,
+): Promise<SubscriptionPlan | Plan | null> {
+  if (!sub?.plan) return null;
+  if (sub.status !== 'TRIALING') return sub.plan;
+  return (await getHighestActivePlanForRegion(sub.regionId)) ?? sub.plan;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +212,17 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
     };
   }
 
-  const plan = sub.plan;
+  const plan = await getEffectiveEntitlementPlan(sub);
+  if (!plan) {
+    return {
+      hasActiveSubscription: false,
+      planId: null,
+      planName: null,
+      ...LOCKED_LIMITS,
+      usage,
+      remaining: { postsToday: 0, batchGenerationsToday: 0, imagesToday: 0 },
+    };
+  }
   const imageGenerationEnabled = plan.imageGenerationEnabled;
   // If image generation is disabled, effective daily limit is locked to 0.
   const effectiveImageLimit = imageGenerationEnabled ? plan.dailyImageGenerationLimit : 0;
@@ -233,7 +261,8 @@ export async function requireFullDashboardAccess(userId: string): Promise<void> 
 
   const sub = await getActiveSubscriptionWithPlan(userId);
   if (sub && sub.plan) {
-    if (!sub.plan.fullDashboardUnlock) {
+    const plan = await getEffectiveEntitlementPlan(sub);
+    if (!plan?.fullDashboardUnlock) {
       throw new PlanLimitError(
         'DASHBOARD_LOCKED',
         'Your current plan does not unlock the full dashboard.',
@@ -305,8 +334,11 @@ export async function canPublishToLinkedIn(
   const sub = await getActiveSubscriptionWithPlan(userId);
   if (!sub?.plan) return; // trial/expired: handled by entitlementService.canPublish
 
+  const plan = await getEffectiveEntitlementPlan(sub);
+  if (!plan) return;
+
   const published = await countPostsToday(userId);
-  if (published + additionalCount > sub.plan.dailyPostLimit) {
+  if (published + additionalCount > plan.dailyPostLimit) {
     throw new PlanLimitError(
       'DAILY_POST_LIMIT_REACHED',
       'Daily post limit reached for your current plan.',

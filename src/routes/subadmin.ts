@@ -3,7 +3,7 @@
 // A SUPER_ADMIN may also call these endpoints, but must pass an explicit
 // `regionId` to choose which region to act on (see getRegion / resolveRegionId).
 import { Router } from "express";
-import { UserRole } from "@prisma/client";
+import { Prisma, SupportRequestStatus, UserRole } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { prisma } from "../prismaClient";
 import { authMiddleware } from "../middleware/authMiddleware";
@@ -51,6 +51,33 @@ const ALLOWED_PLATFORM_SETTINGS: Record<string, SettingRule> = {
   "ui.supportEmail": { kind: "string", pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
 };
 
+const SUPPORT_REQUEST_SELECT = {
+  id: true,
+  subject: true,
+  message: true,
+  status: true,
+  adminNote: true,
+  createdAt: true,
+  updatedAt: true,
+  resolvedAt: true,
+  user: {
+    select: {
+      id: true,
+      email: true,
+      username: true,
+      isActive: true,
+      createdAt: true,
+    },
+  },
+} satisfies Prisma.SupportRequestSelect;
+
+const SUPPORT_REQUEST_STATUSES = new Set<SupportRequestStatus>([
+  SupportRequestStatus.OPEN,
+  SupportRequestStatus.IN_PROGRESS,
+  SupportRequestStatus.RESOLVED,
+  SupportRequestStatus.CLOSED,
+]);
+
 function normalizePlatformSetting(key: string, rawValue: any) {
   const rule = ALLOWED_PLATFORM_SETTINGS[key];
   if (!rule) {
@@ -92,6 +119,107 @@ function normalizePlatformSetting(key: string, rawValue: any) {
   }
   return value;
 }
+
+// ---------------------------------------------------------------------------
+// Support requests (region-scoped user support inbox)
+// ---------------------------------------------------------------------------
+
+router.get("/support-requests", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const rawStatus = typeof req.query.status === "string" ? req.query.status : "ALL";
+    const status = rawStatus.trim().toUpperCase();
+    if (status !== "ALL" && !SUPPORT_REQUEST_STATUSES.has(status as SupportRequestStatus)) {
+      return res.status(400).json({ message: "Invalid support request status" });
+    }
+
+    const rawLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : 50;
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100)
+      : 50;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+
+    const where: Prisma.SupportRequestWhereInput = {
+      regionId,
+      ...(status !== "ALL" ? { status: status as SupportRequestStatus } : {}),
+      ...(search
+        ? {
+            OR: [
+              { subject: { contains: search, mode: "insensitive" } },
+              { message: { contains: search, mode: "insensitive" } },
+              { user: { email: { contains: search, mode: "insensitive" } } },
+              { user: { username: { contains: search, mode: "insensitive" } } },
+            ],
+          }
+        : {}),
+    };
+
+    const supportRequests = await prisma.supportRequest.findMany({
+      where,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      select: SUPPORT_REQUEST_SELECT,
+    });
+
+    return res.json(supportRequests);
+  } catch (error: any) {
+    return res.status(403).json({ message: error.message });
+  }
+});
+
+router.patch("/support-requests/:requestId", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { requestId } = req.params;
+    const { status, adminNote } = req.body as {
+      status?: string;
+      adminNote?: unknown;
+    };
+
+    const existing = await prisma.supportRequest.findUnique({
+      where: { id: requestId },
+      select: { id: true, regionId: true, resolvedAt: true },
+    });
+
+    if (!existing || existing.regionId !== regionId) {
+      return res.status(404).json({ message: "Support request not found" });
+    }
+
+    const data: Prisma.SupportRequestUpdateInput = {};
+    if (status !== undefined) {
+      if (!SUPPORT_REQUEST_STATUSES.has(status as SupportRequestStatus)) {
+        return res.status(400).json({ message: "Invalid support request status" });
+      }
+      const nextStatus = status as SupportRequestStatus;
+      data.status = nextStatus;
+      data.resolvedAt =
+        nextStatus === SupportRequestStatus.RESOLVED || nextStatus === SupportRequestStatus.CLOSED
+          ? existing.resolvedAt ?? new Date()
+          : null;
+    }
+
+    if (adminNote !== undefined) {
+      if (typeof adminNote !== "string") {
+        return res.status(400).json({ message: "adminNote must be a string" });
+      }
+      const trimmedAdminNote = adminNote.trim();
+      if (trimmedAdminNote.length > 2000) {
+        return res.status(400).json({ message: "adminNote must be at most 2000 characters" });
+      }
+      data.adminNote = trimmedAdminNote || null;
+    }
+
+    const supportRequest = await prisma.supportRequest.update({
+      where: { id: requestId },
+      data,
+      select: SUPPORT_REQUEST_SELECT,
+    });
+
+    return res.json(supportRequest);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Clients (end users belonging to the sub-admin's region)

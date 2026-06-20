@@ -71,6 +71,7 @@ model Region {
   inviteLinks           InviteLink[]
   imageGenerationUsages ImageGenerationUsage[]
   manualAiRewriteUsages ManualAiRewriteUsage[]
+  supportRequests         SupportRequest[]
 }
 
 model PaymentConfig {
@@ -143,6 +144,7 @@ model User {
   voiceProfile            UserVoiceProfile?
   postContentFingerprints PostContentFingerprint[]
   authProviderAccounts    AuthProviderAccount[]
+  supportRequests         SupportRequest[]
 
   @@index([regionId])
   @@index([role])
@@ -198,6 +200,13 @@ enum TopicHistoryStatus {
   SCHEDULED
   PUBLISHED
   REJECTED
+}
+
+enum SupportRequestStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
 }
 
 model UserNicheSearchPlan {
@@ -635,4 +644,24 @@ model ManualAiRewriteUsage {
 
   @@index([userId, createdAt])
   @@index([regionId, createdAt])
+}
+
+model SupportRequest {
+  id         String               @id @default(cuid())
+  userId     String
+  regionId   String?
+  subject    String
+  message    String
+  status     SupportRequestStatus @default(OPEN)
+  adminNote  String?
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+  resolvedAt DateTime?
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([regionId, status, createdAt])
+  @@index([status])
 }
