@@ -32,6 +32,10 @@ import {
   suggestManualPostTopics,
 } from '../services/manualPostAiService';
 import { getBotVoice, getGenerativeImagesServiceForUser } from '../services/userContentContext';
+import {
+  GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
+  hasSavedGhostwriterDescription,
+} from '../services/ghostwriterConfigRequirementService';
 
 const router = Router();
 
@@ -113,6 +117,12 @@ function requireUserId(req: Request): string {
   return userId;
 }
 
+async function requireSavedGhostwriterDescription(userId: string) {
+  if (!(await hasSavedGhostwriterDescription(userId))) {
+    throw new ManualPostError(400, GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
+  }
+}
+
 // Wrap a handler so ManualPostError -> proper status, anything else -> 500.
 function handle(fn: (req: Request, res: Response) => Promise<void>) {
   return async (req: Request, res: Response) => {
@@ -145,6 +155,7 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
+    await requireSavedGhostwriterDescription(userId);
     const result = await generateManualPostContent(userId, req.body || {});
     res.json(result);
   }),
@@ -167,6 +178,7 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
+    await requireSavedGhostwriterDescription(userId);
     const result = await generateManualPostFromUrl(userId, req.body || {});
     res.json(result);
   }),
@@ -178,6 +190,7 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
+    await requireSavedGhostwriterDescription(userId);
     const result = await suggestManualPostTopics(userId, {
       count: req.body?.count,
       provider: req.body?.provider,

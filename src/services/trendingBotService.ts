@@ -28,6 +28,12 @@ import {
 } from "./trendPreviewPoolStore";
 import { createGeneratedTopicHistory, loadRecentTopicHistory } from "./topicHistoryService";
 import { fingerprintFromBody } from "./topicFingerprintService";
+import {
+  GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
+  GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
+  hasGhostwriterDescription,
+  parseSavedGhostwriterNiches,
+} from "./ghostwriterConfigRequirementService";
 
 export class TrendingBotService {
   private trendsService: TrendsService;
@@ -79,21 +85,23 @@ export class TrendingBotService {
     for (const config of configs) {
       console.log(`Processing config for user ${config.userId}`);
 
+      if (!hasGhostwriterDescription(config.description)) {
+        console.warn("Skipping trend fetch: ghostwriter description is missing", {
+          userId: config.userId,
+        });
+        continue;
+      }
+
+      const niches = parseSavedGhostwriterNiches(config.niches);
+      if (niches.length === 0) {
+        console.warn("Skipping trend fetch: no saved niches", {
+          userId: config.userId,
+        });
+        continue;
+      }
+
       const contentService = await this.getContentService(config.userId);
       const regionId = config.regionId ?? (await this.getUserRegionId(config.userId));
-
-      let niches: string[] = [];
-      try {
-        if (config.niches) {
-          const parsed = JSON.parse(config.niches);
-          niches = Array.isArray(parsed) ? parsed : [config.niches];
-        } else {
-          niches = ["Technology"];
-        }
-      } catch (e) {
-        console.warn("Error parsing niches:", e);
-        niches = ["Technology"];
-      }
 
       console.log(`User Niches: ${niches.join(", ")}`);
 
@@ -258,7 +266,12 @@ export class TrendingBotService {
     options: { slots: Date[]; previewId?: string },
   ) {
     const config = await prisma.botConfig.findUnique({ where: { userId } });
-    if (!config || !config.isEnabled) return;
+    if (!config) {
+      throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
+    }
+    if (!hasGhostwriterDescription(config.description)) {
+      throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
+    }
 
     const slots = options.slots;
     if (!slots.length) {
@@ -269,11 +282,9 @@ export class TrendingBotService {
 
     const contentService = await this.getContentService(userId);
 
-    let niches: string[] = [];
-    try {
-      niches = JSON.parse(config.niches);
-    } catch {
-      niches = ["Technology"];
+    const niches = parseSavedGhostwriterNiches(config.niches);
+    if (niches.length === 0) {
+      throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
     }
 
     const sources = parseTrendSources(config.sources);
@@ -523,22 +534,14 @@ export class TrendingBotService {
       return options?.debug ? { trends: [] } : [];
     }
 
-    let niches: string[] = [];
-    try {
-      const parsedNiches = config.niches ? JSON.parse(config.niches) : ["Technology"];
-      niches = Array.isArray(parsedNiches)
-        ? parsedNiches.filter((v): v is string => typeof v === "string").map((v) => v.trim()).filter(Boolean)
-        : typeof parsedNiches === "string" && parsedNiches.trim()
-          ? [parsedNiches.trim()]
-          : ["Technology"];
-    } catch (error) {
-      console.error("[previewTrends] Failed to parse niches", {
-        userId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      niches = ["Technology"];
+    if (!hasGhostwriterDescription(config.description)) {
+      throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
     }
-    if (niches.length === 0) niches = ["Technology"];
+
+    const niches = parseSavedGhostwriterNiches(config.niches);
+    if (niches.length === 0) {
+      throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
+    }
 
     const sources = parseTrendSources(config.sources);
     if (config.sources?.trim() === "[]") {

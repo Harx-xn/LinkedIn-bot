@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
-import { postToLinkedInFromPostId } from '../services/linkedinService';
+import {
+  getUsableLinkedInAccountForUser,
+  postToLinkedInFromPostId,
+} from '../services/linkedinService';
 import { canPublish } from '../services/entitlementService';
 import { ImageService } from '../services/imageService';
 import { uploadBufferToR2 } from '../middleware/r2';
@@ -70,9 +73,7 @@ router.post('/', requireAuth, async (req, res) => {
 
   let finalLinkedInAccountId = linkedinAccountId;
   if (!finalLinkedInAccountId) {
-    const linkedInAccount = await prisma.linkedInAccount.findFirst({
-      where: { userId: req.userId! }
-    });
+    const linkedInAccount = await getUsableLinkedInAccountForUser(req.userId!);
     finalLinkedInAccountId = linkedInAccount?.id || null;
   }
 
@@ -530,7 +531,7 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
   try {
     let linkedinAccountId = post.linkedinAccountId;
     if (!linkedinAccountId) {
-      const userLi = await prisma.linkedInAccount.findFirst({ where: { userId: req.userId! } });
+      const userLi = await getUsableLinkedInAccountForUser(req.userId!);
       if (!userLi) return res.status(400).json({ error: 'No LinkedIn account connected' });
       linkedinAccountId = userLi.id;
       await prisma.post.update({ where: { id: post.id }, data: { linkedinAccountId } });

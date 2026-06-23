@@ -111,12 +111,14 @@ export async function saveLinkedInAccountForUser(userId: string, accessToken: st
 
   const existing = await prisma.linkedInAccount.findFirst({ where: { userId } });
   if (existing) {
-    return prisma.linkedInAccount.update({
+    const account = await prisma.linkedInAccount.update({
       where: { id: existing.id },
       data: { accessToken, expiresAt, authorUrn }
     });
+    await repairGoogleSheetPostsAfterLinkedInConnect(userId, account.id);
+    return account;
   }
-  return prisma.linkedInAccount.create({
+  const account = await prisma.linkedInAccount.create({
     data: {
       userId,
       accessToken,
@@ -124,6 +126,80 @@ export async function saveLinkedInAccountForUser(userId: string, accessToken: st
       authorUrn
     }
   });
+  await repairGoogleSheetPostsAfterLinkedInConnect(userId, account.id);
+  return account;
+}
+
+export function isLinkedInAccountUsable(
+  account?: { accessToken?: string | null; expiresAt?: Date | null } | null,
+  now: Date = new Date(),
+) {
+  return Boolean(
+    account?.accessToken?.trim() &&
+      account.expiresAt &&
+      account.expiresAt.getTime() > now.getTime(),
+  );
+}
+
+export async function getUsableLinkedInAccountForUser(userId: string) {
+  const account = await prisma.linkedInAccount.findFirst({
+    where: {
+      userId,
+      accessToken: { not: "" },
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  return account && isLinkedInAccountUsable(account) ? account : null;
+}
+
+const LINKEDIN_CONNECTION_ERROR_PATTERN =
+  /no linkedin account (?:connected|attached)|linkedin account not connected/i;
+
+export async function repairGoogleSheetPostsAfterLinkedInConnect(
+  userId: string,
+  linkedinAccountId: string,
+) {
+  const failedPosts = await prisma.post.findMany({
+    where: {
+      userId,
+      source: "GOOGLE_SHEET",
+      status: "FAILED",
+      errorMessage: { not: null },
+    },
+    select: {
+      id: true,
+      scheduledAt: true,
+      errorMessage: true,
+    },
+  });
+  const repairable = failedPosts.filter(post =>
+    LINKEDIN_CONNECTION_ERROR_PATTERN.test(post.errorMessage || ""),
+  );
+
+  await prisma.$transaction([
+    prisma.post.updateMany({
+      where: {
+        userId,
+        source: "GOOGLE_SHEET",
+        status: { not: "PUBLISHED" },
+      },
+      data: { linkedinAccountId },
+    }),
+    ...repairable.map(post =>
+      prisma.post.update({
+        where: { id: post.id },
+        data: {
+          linkedinAccountId,
+          status: post.scheduledAt ? "QUEUED" : "DRAFT",
+          errorMessage: null,
+        },
+      }),
+    ),
+  ]);
+
+  return repairable.length;
 }
 
 async function uploadImageToLinkedIn(
@@ -198,22 +274,38 @@ async function uploadImageToLinkedIn(
 }
 
 export async function postToLinkedInFromPostId(postId: string) {
-  const post = await prisma.post.findUnique({
+  let post = await prisma.post.findUnique({
     where: { id: postId },
     include: { user: true, linkedinAccount: true }
   });
   if (!post) throw new Error('Post not found');
-  if (!post.linkedinAccountId || !post.linkedinAccount) throw new Error('No LinkedIn account attached');
 
-  const liAccount = post.linkedinAccount;
-  const accessToken = liAccount.accessToken;
+  let liAccount = post.linkedinAccount;
+  if (!isLinkedInAccountUsable(liAccount)) {
+    const currentAccount = await getUsableLinkedInAccountForUser(post.userId);
+    if (!currentAccount) {
+      throw new Error(
+        'LinkedIn account not connected or connection expired. Reconnect LinkedIn and try again.',
+      );
+    }
+
+    await prisma.post.update({
+      where: { id: post.id },
+      data: { linkedinAccountId: currentAccount.id },
+    });
+    liAccount = currentAccount;
+  }
+  const activeLinkedInAccount = liAccount!;
+  const accessToken = activeLinkedInAccount.accessToken;
 
   // Resolve the region's LinkedIn API version (falls back to env/global).
   const creds = await getRegionLinkedInCreds(post.userId);
   const apiVersion = creds.apiVersion;
 
   // Use organization URN if selected, otherwise use personal URN
-  const authorUrn = liAccount.selectedOrganizationUrn || liAccount.authorUrn;
+  const authorUrn =
+    activeLinkedInAccount.selectedOrganizationUrn ||
+    activeLinkedInAccount.authorUrn;
 
   const body: any = {
     author: authorUrn,

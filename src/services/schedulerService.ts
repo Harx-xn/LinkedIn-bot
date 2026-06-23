@@ -1,8 +1,14 @@
 import cron from "node-cron";
 import { prisma } from "../prismaClient";
-import { postToLinkedInFromPostId } from "./linkedinService";
-import { fetchPostsFromSheet } from "./sheetsService";
-import { handleSheetSyncError, isGoogleInvalidGrantError } from "./sheetsSyncService";
+import {
+  getUsableLinkedInAccountForUser,
+  postToLinkedInFromPostId,
+} from "./linkedinService";
+import {
+  handleSheetSyncError,
+  isGoogleInvalidGrantError,
+  syncGoogleSheetPosts,
+} from "./sheetsSyncService";
 import { canPublish } from "./entitlementService";
 import { canPublishToLinkedIn } from "./planEntitlementService";
 
@@ -51,59 +57,20 @@ export function startScheduler() {
       }
 
       try {
-        const rows = await fetchPostsFromSheet({
+        const result = await syncGoogleSheetPosts({
           clientId,
           clientSecret,
-          accessToken: config.accessToken,
-          refreshToken: config.refreshToken,
-          spreadsheetId: config.spreadsheetId,
-          range: config.range,
+          config,
         });
 
-        const linkedInAccount = await prisma.linkedInAccount.findFirst({
-          where: { userId: config.userId },
-        });
-
-        for (const row of rows) {
-          if (!row.content) continue;
-
-          const normalizedStatus = row.status?.toUpperCase();
-
-          // Let users mark rows as SKIP in Google Sheets.
-          if (normalizedStatus === "SKIP") {
-            continue;
-          }
-
-          const finalStatus =
-            normalizedStatus === "QUEUED" && row.scheduledAt
-              ? "QUEUED"
-              : "DRAFT";
-
-          const duplicate = await prisma.post.findFirst({
-            where: {
-              userId: config.userId,
-              content: row.content,
-              source: "GOOGLE_SHEET",
-            },
+        if (result.created || result.updated || result.invalid) {
+          console.log("[sheets] sync complete", {
+            userId: config.userId,
+            created: result.created,
+            updated: result.updated,
+            skipped: result.skipped,
+            invalid: result.invalid,
           });
-
-          if (!duplicate) {
-            await prisma.post.create({
-              data: {
-                userId: config.userId,
-                regionId: config.regionId,
-                linkedinAccountId: linkedInAccount?.id || null,
-                content: row.content,
-                hashtags: row.hashtags,
-                mediaUrl: row.mediaUrl,
-                scheduledAt: finalStatus === "QUEUED" ? row.scheduledAt : null,
-                source: "GOOGLE_SHEET",
-                status: finalStatus,
-              },
-            });
-
-            console.log("Imported post from sheet for user", config.userId);
-          }
         }
       } catch (err: unknown) {
         const outcome = await handleSheetSyncError(config.id, config.userId, err);
@@ -148,22 +115,15 @@ export function startScheduler() {
       }
 
       try {
-        let linkedinAccountId = post.linkedinAccountId;
+        const linkedInAccount = await getUsableLinkedInAccountForUser(post.userId);
+        if (!linkedInAccount) {
+          throw new Error("LinkedIn account not connected or connection expired");
+        }
 
-        if (!linkedinAccountId) {
-          const linkedInAccount = await prisma.linkedInAccount.findFirst({
-            where: { userId: post.userId },
-          });
-
-          if (!linkedInAccount) {
-            throw new Error("No LinkedIn account connected");
-          }
-
-          linkedinAccountId = linkedInAccount.id;
-
+        if (post.linkedinAccountId !== linkedInAccount.id) {
           await prisma.post.update({
             where: { id: post.id },
-            data: { linkedinAccountId },
+            data: { linkedinAccountId: linkedInAccount.id },
           });
         }
 

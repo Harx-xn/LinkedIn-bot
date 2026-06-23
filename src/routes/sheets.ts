@@ -5,8 +5,9 @@ import {
   exchangeGoogleCode,
   readGoogleSheetAsJson,
   createLinkedInPostsSheet,
-  fetchPostsFromSheet,
+  getGoogleSheetsAccessErrorMessage,
 } from "../services/sheetsService";
+import { syncGoogleSheetPosts } from "../services/sheetsSyncService";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../prismaClient";
 
@@ -27,6 +28,24 @@ function getGoogleCredentials() {
   }
 
   return { clientId, clientSecret };
+}
+
+function isGoogleReconnectRequired(message: string) {
+  return /reconnect required|revoked|expired|missing a refresh token/i.test(message);
+}
+
+async function recordGoogleSheetError(userId: string | undefined, message: string) {
+  if (!userId) return;
+
+  await prisma.sheetConfig.updateMany({
+    where: { userId },
+    data: {
+      lastSyncError: message.slice(0, 500),
+      ...(isGoogleReconnectRequired(message)
+        ? { active: false, authStatus: "REAUTH_REQUIRED" }
+        : {}),
+    },
+  });
 }
 
 router.get("/connect", requireAuth, async (req: any, res: any) => {
@@ -96,14 +115,24 @@ router.get("/callback", async (req: any, res: any) => {
       String(code),
     );
 
+    const existingConfig = await prisma.sheetConfig.findUnique({
+      where: { userId },
+      select: { refreshToken: true },
+    });
+    const hasUsableRefreshToken = Boolean(
+      tokens.refresh_token || existingConfig?.refreshToken,
+    );
+    const refreshTokenMissingMessage =
+      "Google Sheets reconnect required: the saved Google connection is missing a refresh token.";
+
     await prisma.sheetConfig.upsert({
       where: { userId },
       update: {
         accessToken: tokens.access_token || undefined,
         refreshToken: tokens.refresh_token || undefined,
-        active: true,
-        authStatus: 'CONNECTED',
-        lastSyncError: null,
+        active: hasUsableRefreshToken,
+        authStatus: hasUsableRefreshToken ? "CONNECTED" : "REAUTH_REQUIRED",
+        lastSyncError: hasUsableRefreshToken ? null : refreshTokenMissingMessage,
       },
       create: {
         userId,
@@ -112,8 +141,9 @@ router.get("/callback", async (req: any, res: any) => {
         range: "",
         accessToken: tokens.access_token || null,
         refreshToken: tokens.refresh_token || null,
-        active: true,
-        authStatus: 'CONNECTED',
+        active: hasUsableRefreshToken,
+        authStatus: hasUsableRefreshToken ? "CONNECTED" : "REAUTH_REQUIRED",
+        lastSyncError: hasUsableRefreshToken ? null : refreshTokenMissingMessage,
       },
     });
 
@@ -286,9 +316,14 @@ router.get("/data", requireAuth, async (req: any, res: any) => {
     return res.json({ data });
   } catch (err: any) {
     console.error("Read Google Sheet error:", err);
+    const message =
+      getGoogleSheetsAccessErrorMessage(err) ||
+      err?.message ||
+      "Failed to read Google Sheet";
+    await recordGoogleSheetError(getReqUserId(req), message);
 
     return res.status(500).json({
-      error: err?.message || "Failed to read Google Sheet",
+      error: message,
     });
   }
 });
@@ -366,9 +401,14 @@ router.post("/create-template", requireAuth, async (req: any, res: any) => {
     });
   } catch (err: any) {
     console.error("Create Google Sheet template error:", err);
+    const message =
+      getGoogleSheetsAccessErrorMessage(err) ||
+      err?.message ||
+      "Failed to create Google Sheet template";
+    await recordGoogleSheetError(getReqUserId(req), message);
 
     return res.status(500).json({
-      error: err?.message || "Failed to create Google Sheet template",
+      error: message,
     });
   }
 });
@@ -403,74 +443,26 @@ router.post("/sync-now", requireAuth, async (req: any, res: any) => {
       });
     }
 
-    const rows = await fetchPostsFromSheet({
+    const result = await syncGoogleSheetPosts({
       clientId,
       clientSecret,
-      accessToken: config.accessToken,
-      refreshToken: config.refreshToken,
-      spreadsheetId: config.spreadsheetId,
-      range: config.range,
+      config,
     });
-
-    let imported = 0;
-    let skipped = 0;
-
-    for (const row of rows) {
-      if (!row.content) {
-        skipped++;
-        continue;
-      }
-
-      if (row.status === "SKIP") {
-        skipped++;
-        continue;
-      }
-
-      const duplicate = await prisma.post.findFirst({
-        where: {
-          userId,
-          content: row.content,
-          source: "GOOGLE_SHEET",
-        },
-      });
-
-      if (duplicate) {
-        skipped++;
-        continue;
-      }
-
-      const linkedInAccount = await prisma.linkedInAccount.findFirst({
-        where: { userId },
-      });
-
-      await prisma.post.create({
-        data: {
-          userId,
-          regionId: config.regionId,
-          linkedinAccountId: linkedInAccount?.id || null,
-          content: row.content,
-          hashtags: row.hashtags,
-          mediaUrl: row.mediaUrl,
-          scheduledAt: row.scheduledAt,
-          source: "GOOGLE_SHEET",
-          status: row.status || (row.scheduledAt ? "QUEUED" : "DRAFT"),
-        },
-      });
-
-      imported++;
-    }
 
     return res.json({
       ok: true,
-      rowsFound: rows.length,
-      imported,
-      skipped,
+      ...result,
     });
   } catch (err: any) {
     console.error("Manual Google Sheets sync error:", err);
+    const message =
+      getGoogleSheetsAccessErrorMessage(err) ||
+      err?.message ||
+      "Failed to sync Google Sheet";
+    await recordGoogleSheetError(getReqUserId(req), message);
 
     return res.status(500).json({
-      error: err?.message || "Failed to sync Google Sheet",
+      error: message,
     });
   }
 });

@@ -14,6 +14,12 @@
     PlanLimitError,
     canStartBatchGeneration,
   } from '../services/planEntitlementService';
+  import {
+    GHOSTWRITER_CONFIG_REQUIRED_CODE,
+    GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
+    GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
+    getSavedGhostwriterRequirements,
+  } from '../services/ghostwriterConfigRequirementService';
 
   export type BotGenerateRequestBody = {
     daysWindow: number;
@@ -59,6 +65,22 @@
 
     if (batchPostingSchedule === undefined || batchPostingSchedule === null) {
       return res.status(400).json({ error: "Missing batchPostingSchedule" });
+    }
+
+    const ghostwriterRequirements = await getSavedGhostwriterRequirements(
+      req.userId!,
+    );
+    if (!ghostwriterRequirements.hasDescription) {
+      return res.status(400).json({
+        error: GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
+        code: GHOSTWRITER_CONFIG_REQUIRED_CODE,
+      });
+    }
+    if (ghostwriterRequirements.niches.length === 0) {
+      return res.status(400).json({
+        error: GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
+        code: GHOSTWRITER_CONFIG_REQUIRED_CODE,
+      });
     }
 
     // Block generation once the free trial has ended (subscribers/admins pass).
@@ -154,6 +176,19 @@
   // GET /bot/trends/preview - Preview top trends for current config
   router.get('/trends/preview', requireAuth, async (req, res) => {
       try {
+          const requirements = await getSavedGhostwriterRequirements(req.userId!);
+          if (!requirements.hasDescription) {
+            return res.status(400).json({
+              error: GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
+              code: GHOSTWRITER_CONFIG_REQUIRED_CODE,
+            });
+          }
+          if (requirements.niches.length === 0) {
+            return res.status(400).json({
+              error: GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
+              code: GHOSTWRITER_CONFIG_REQUIRED_CODE,
+            });
+          }
           const debug = req.query.debug === 'true' || req.query.debug === '1';
           const enriched = req.query.enriched === 'true' || req.query.enriched === '1';
           const result = await botService.previewTrends(req.userId!, { debug, enriched: debug || enriched });

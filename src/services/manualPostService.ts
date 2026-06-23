@@ -1,6 +1,9 @@
 import { prisma } from '../prismaClient';
 import { canPublish } from './entitlementService';
-import { postToLinkedInFromPostId } from './linkedinService';
+import {
+  getUsableLinkedInAccountForUser,
+  postToLinkedInFromPostId,
+} from './linkedinService';
 import { canPublishToLinkedIn } from './planEntitlementService';
 import { scheduleManualPostFingerprintSync } from './manualPost/manualPostFingerprintService';
 
@@ -86,11 +89,7 @@ function parseFutureDate(value: unknown): Date {
 
 // Most recently updated LinkedIn account for the user (or null if none).
 async function getLinkedInAccountId(userId: string): Promise<string | null> {
-  const account = await prisma.linkedInAccount.findFirst({
-    where: { userId },
-    orderBy: { updatedAt: 'desc' },
-    select: { id: true },
-  });
+  const account = await getUsableLinkedInAccountForUser(userId);
   return account?.id ?? null;
 }
 

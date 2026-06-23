@@ -2,6 +2,7 @@ import { Router, Request } from "express";
 import { prisma } from "../prismaClient";
 import { requireAuth } from "../middleware/auth";
 import { getEntitlement, publishedToday } from "../services/entitlementService";
+import { isLinkedInAccountUsable } from "../services/linkedinService";
 
 type ThemePreference = "LIGHT" | "DARK";
 
@@ -52,7 +53,8 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
 
   const linkedinAccount = await prisma.linkedInAccount.findFirst({
     where: { userId },
-    select: { id: true },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, accessToken: true, expiresAt: true },
   });
 
   const activeSubscription = await prisma.subscription.findFirst({
@@ -116,7 +118,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     ),
 
     // connection token exists
-    linkedinConnected: !!linkedinAccount,
+    linkedinConnected: isLinkedInAccountUsable(linkedinAccount),
 
     subscription: activeSubscription
       ? {
