@@ -7,6 +7,10 @@ import {
   recordImageGeneration,
 } from './planEntitlementService';
 import { getGenerativeImagesServiceForUser } from './userContentContext';
+import type {
+  GenerateLinkedInPostImageInput,
+  LinkedInImageAspectRatio,
+} from './generativeImagesService';
 
 export type BotImageMode = 'none' | 'providedBackground' | 'aiGenerated';
 
@@ -52,6 +56,11 @@ export interface BatchPostImageInput {
   userId: string;
   imageMode: BotImageMode;
   backgroundImageUrl?: string | null;
+  imageInstructions?: string | null;
+  imageStyle?: string | null;
+  imageAspectRatio?: string | null;
+  profileDescription?: string | null;
+  brandName?: string | null;
   postContent: string;
   imageService: ImageService;
   finalized: {
@@ -66,6 +75,19 @@ export interface BatchPostImageInput {
     bulletPoints?: string[];
   } | null;
   uploadKeyPrefix?: string;
+}
+
+export function buildBatchGenerativeImageInput(
+  input: BatchPostImageInput,
+): GenerateLinkedInPostImageInput {
+  return {
+    postText: input.postContent,
+    instructions: input.imageInstructions ?? undefined,
+    style: input.imageStyle ?? undefined,
+    aspectRatio: input.imageAspectRatio as LinkedInImageAspectRatio | undefined,
+    profileDescription: input.profileDescription ?? undefined,
+    brandName: input.brandName ?? undefined,
+  };
 }
 
 export async function generateBatchPostMediaUrl(
@@ -91,9 +113,9 @@ export async function generateBatchPostMediaUrl(
 
     try {
       const generative = await getGenerativeImagesServiceForUser(input.userId);
-      const generated = await generative.generateLinkedInPostImage({
-        postText: input.postContent,
-      });
+      const generated = await generative.generateLinkedInPostImage(
+        buildBatchGenerativeImageInput(input),
+      );
 
       const ext = extensionForMimeType(generated.mimeType);
       const prefix = input.uploadKeyPrefix ?? `generated/ai-batch-${input.userId}`;

@@ -6,6 +6,7 @@ import {
   resolveAvailableScheduleSlots,
   scheduleWindowEnd,
   validateScheduleForGeneration,
+  resolveBatchStartDate,
 } from './batchScheduleService';
 
 export type ResolvedBatchGenerationSlots = {
@@ -22,16 +23,19 @@ export async function resolveBatchGenerationSlots(params: {
   userId: string;
   postsPerWeek: number;
   daysWindow: number;
+  startDate: unknown;
   schedule: NormalizedPostingScheduleConfig;
   now?: Date;
 }): Promise<ResolvedBatchGenerationSlots> {
   const now = params.now ?? new Date();
   const { userId, postsPerWeek, daysWindow, schedule } = params;
 
+  const startDate = resolveBatchStartDate(params.startDate, schedule.timezone, now);
+
   validateScheduleForGeneration(schedule);
 
   const requestedCount = calculateBatchSlotCount(postsPerWeek, daysWindow);
-  const windowEnd = scheduleWindowEnd(now, daysWindow);
+  const windowEnd = scheduleWindowEnd(startDate, daysWindow);
 
   const occupiedPosts = await prisma.post.findMany({
     where: {
@@ -39,7 +43,7 @@ export async function resolveBatchGenerationSlots(params: {
       status: { in: ['REVIEW', 'QUEUED'] },
       scheduledAt: {
         not: null,
-        gt: now,
+        gt: startDate,
         lte: windowEnd,
       },
     },
@@ -51,7 +55,7 @@ export async function resolveBatchGenerationSlots(params: {
     .filter((scheduledAt): scheduledAt is Date => scheduledAt instanceof Date);
 
   const availableSlots = resolveAvailableScheduleSlots({
-    startDate: now,
+    startDate,
     daysWindow,
     schedule,
     occupiedScheduledAt,

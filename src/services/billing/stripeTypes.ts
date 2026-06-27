@@ -15,6 +15,7 @@ export interface StripeSubscriptionFull extends StripeSubscriptionLike {
   id: string;
   status: string;
   customer?: string | { id: string } | null;
+  latest_invoice?: string | { id: string } | null;
   trial_start?: number | null;
   trial_end?: number | null;
   current_period_start?: number;
@@ -27,6 +28,8 @@ export interface StripeSubscriptionFull extends StripeSubscriptionLike {
 export interface StripeInvoiceLike {
   id: string;
   subscription?: string | { id: string } | null;
+  customer?: string | { id: string } | null;
+  status?: string | null;
 }
 
 export interface StripePaymentMethodLike {

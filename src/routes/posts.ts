@@ -55,7 +55,6 @@ function extensionForMimeType(mimeType: string): string {
 }
 
 function resolveBrandNameFromVoice(voice: Awaited<ReturnType<typeof getBotVoice>>): string | undefined {
-  if (voice.niches[0]?.trim()) return voice.niches[0].trim();
   if (voice.websiteUrl?.trim()) {
     try {
       return new URL(voice.websiteUrl).hostname.replace(/^www\./i, '');
@@ -438,6 +437,7 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
       style,
       aspectRatio,
       brandName: resolveBrandNameFromVoice(voice),
+      profileDescription: voice.description,
     });
 
     const ext = extensionForMimeType(generated.mimeType);

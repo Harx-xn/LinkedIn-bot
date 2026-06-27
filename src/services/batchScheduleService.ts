@@ -332,6 +332,37 @@ function wallClockToUtc(
   return candidate;
 }
 
+/** Resolve a YYYY-MM-DD batch start in the posting timezone. */
+export function resolveBatchStartDate(
+  value: unknown,
+  timeZone: string,
+  now: Date = new Date(),
+): Date {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new BatchScheduleError('startDate must use YYYY-MM-DD format.');
+  }
+
+  const [year, month, day] = value.split('-').map(Number);
+  const startOfSelectedDay = wallClockToUtc(year, month, day, 0, 0, timeZone);
+  const selectedParts = getZonedParts(startOfSelectedDay, timeZone);
+  if (
+    selectedParts.year !== year ||
+    selectedParts.month !== month ||
+    selectedParts.day !== day
+  ) {
+    throw new BatchScheduleError('startDate is not a valid calendar date.');
+  }
+
+  const today = getZonedParts(now, timeZone);
+  const todayKey = today.year * 10_000 + today.month * 100 + today.day;
+  const selectedKey = year * 10_000 + month * 100 + day;
+  if (selectedKey < todayKey) {
+    throw new BatchScheduleError('startDate cannot be in the past.');
+  }
+
+  return selectedKey === todayKey ? now : startOfSelectedDay;
+}
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** Inclusive window end for batch generation (`now` + `daysWindow` days). */

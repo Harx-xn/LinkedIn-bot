@@ -151,6 +151,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
         break;
       }
       case 'invoice.paid':
+      case 'invoice.payment_succeeded':
       case 'invoice.payment_failed':
       case 'invoice.payment_action_required': {
         const invoice = event.data.object as StripeInvoiceLike;

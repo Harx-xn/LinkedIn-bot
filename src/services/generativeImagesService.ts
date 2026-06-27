@@ -13,6 +13,7 @@ export interface GenerateLinkedInPostImageInput {
   postText: string;
   instructions?: string;
   brandName?: string;
+  profileDescription?: string;
   style?: string;
   aspectRatio?: LinkedInImageAspectRatio;
   model?: string;
@@ -64,6 +65,57 @@ function isRateLimitError(error: unknown): boolean {
   );
 }
 
+export function buildLinkedInImagePrompt(input: GenerateLinkedInPostImageInput): string {
+    const {
+      postText,
+      instructions,
+      brandName,
+      profileDescription,
+      style = 'professional',
+      aspectRatio = '1:1',
+    } = input;
+
+    return `
+Create a high-quality LinkedIn feed image based on the post below.
+
+POST TEXT:
+${postText.trim()}
+
+CREATOR / PROFILE CONTEXT:
+${profileDescription?.trim() || 'No specific creator profile context provided.'}
+
+USER IMAGE INSTRUCTIONS:
+${instructions?.trim() || 'Create a clean professional visual that supports the main idea of the post.'}
+
+IMAGE REQUIREMENTS:
+- Platform: LinkedIn professional feed.
+- Aspect ratio: ${aspectRatio}.
+- Visual style: ${style}.
+- Brand name: ${brandName?.trim() || 'No specific brand'}.
+- Create a clean, polished LinkedIn visual that supports the post's specific business idea.
+- Use the creator/profile context to personalize the industry, audience, and visual metaphor.
+- Do not include the full creator/profile context as visible text.
+- Do not add random labels, taglines, or category names such as "AI Automation" unless explicitly requested in the user instructions or brand name.
+- Avoid weird surreal 3D scenes, random megaphones, lighthouses, diamonds, badges, fake logos, or decorative icons unless they directly support the post.
+- Prefer clean editorial business graphics, simple diagrams, abstract SaaS/productivity visuals, content strategy metaphors, or professional creator-style visuals.
+- Premium, polished, clear, and suitable for a professional LinkedIn audience.
+- Communicate one strong idea visually without clutter.
+- Avoid tiny or unreadable text.
+- If text appears in the image, use at most one short headline of 3-7 words; keep it bold and legible.
+- Never include hashtags or text beginning with # anywhere in the image.
+- Never render the creator's niche name, industry category, or profile label as visible text in the image.
+- Do not repeat the full post text inside the image.
+- Do not create fake screenshots unless explicitly requested.
+- Do not include copyrighted logos, real company logos, or recognizable real people.
+- The image should feel specific to the post, not like a generic AI/tech motivational poster.
+
+VISUAL DECISION RULE:
+Before creating the image, identify the single clearest idea from the post and design around that. For comparison or positioning posts, show a clear contrast between vague/generic and specific/targeted. For SaaS or business posts, prefer clear strategic metaphors over literal objects.
+
+For posts about generic versus specific B2B messaging, prefer a targeting or focus metaphor, a clean content strategy board, a funnel narrowing from broad messaging to a precise audience, or blurry generic messages contrasted with one sharp specific message. Avoid unrelated "AI Automation" labels unless AI automation is explicitly central to the post, user instructions, brand name, or creator context.
+`.trim();
+}
+
 export class GenerativeImagesService {
   private readonly geminiKeys: string[];
   private currentKeyIndex = 0;
@@ -89,40 +141,6 @@ export class GenerativeImagesService {
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.geminiKeys.length;
   }
 
-  private buildLinkedInImagePrompt(input: GenerateLinkedInPostImageInput): string {
-    const {
-      postText,
-      instructions,
-      brandName,
-      style = 'professional',
-      aspectRatio = '1:1',
-    } = input;
-
-    return `
-Create a high-quality LinkedIn feed image based on the post below.
-
-POST TEXT:
-${postText.trim()}
-
-USER IMAGE INSTRUCTIONS:
-${instructions?.trim() || 'Create a professional visual that supports the main idea of the post.'}
-
-IMAGE REQUIREMENTS:
-- Platform: LinkedIn professional feed.
-- Aspect ratio: ${aspectRatio}.
-- Visual style: ${style}.
-- Brand name: ${brandName?.trim() || 'No specific brand'}.
-- Premium, polished, clear, and suitable for a professional audience.
-- Communicate the core idea visually without clutter.
-- Avoid tiny or unreadable text.
-- If text appears in the image, keep it short, bold, and legible.
-- Do not create fake screenshots unless explicitly requested.
-- Do not include copyrighted logos, real company logos, or recognizable real people.
-- Prefer conceptual business, SaaS, technology, productivity, marketing, or founder-style visuals.
-- Support the post message; do not repeat the full post text inside the image.
-`.trim();
-  }
-
   async generateLinkedInPostImage(
     input: GenerateLinkedInPostImageInput,
     retryCount = 0,
@@ -143,7 +161,7 @@ IMAGE REQUIREMENTS:
 
     try {
       const ai = this.getGeminiClient(usedKeyIndex);
-      const prompt = this.buildLinkedInImagePrompt(input);
+      const prompt = buildLinkedInImagePrompt(input);
 
       const response = await ai.models.generateContent({
         model,

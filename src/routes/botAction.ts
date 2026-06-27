@@ -24,6 +24,7 @@
   export type BotGenerateRequestBody = {
     daysWindow: number;
     postsPerWeek: number;
+    startDate: string;
     batchPostingSchedule: unknown;
     previewId?: string;
   };
@@ -48,9 +49,10 @@
   });
 
   router.post("/generate", requireAuth, async (req, res) => {
-    const { daysWindow, postsPerWeek, batchPostingSchedule } =
+    const { daysWindow, postsPerWeek, startDate, batchPostingSchedule } =
       req.body as BotGenerateRequestBody;
     if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
+    if (!startDate) return res.status(400).json({ error: "Missing startDate" });
 
     if (postsPerWeek === undefined || postsPerWeek === null) {
       return res.status(400).json({ error: "Missing postsPerWeek" });
@@ -116,10 +118,14 @@
         userId: req.userId!,
         postsPerWeek: parsedPostsPerWeek,
         daysWindow: parsedDaysWindow,
+        startDate,
         schedule,
       });
       resolvedSlots = resolved.slots;
     } catch (err) {
+      if (err instanceof BatchScheduleError) {
+        return res.status(400).json({ error: `Invalid starting date: ${err.message}` });
+      }
       if (err instanceof BatchScheduleCapacityError) {
         return res.status(400).json({
           error: err.message,

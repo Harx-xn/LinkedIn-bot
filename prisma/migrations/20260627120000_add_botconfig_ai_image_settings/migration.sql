@@ -1,0 +1,4 @@
+ALTER TABLE "BotConfig"
+ADD COLUMN IF NOT EXISTS "imageInstructions" TEXT,
+ADD COLUMN IF NOT EXISTS "imageStyle" TEXT,
+ADD COLUMN IF NOT EXISTS "imageAspectRatio" TEXT;

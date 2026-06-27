@@ -262,6 +262,9 @@ model BotConfig {
   customRedditFeeds  String?
   backgroundImageUrl String?
   imageMode          String? // none | providedBackground | aiGenerated
+  imageInstructions  String?
+  imageStyle         String?
+  imageAspectRatio   String? // 1:1 | 4:5 | 16:9
   isEnabled          Boolean  @default(false)
   description        String?  @default("")
   tone               String?  @default("Professional")

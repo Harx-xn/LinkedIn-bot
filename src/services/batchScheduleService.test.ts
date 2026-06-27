@@ -9,10 +9,40 @@ import {
   excludeOccupiedScheduleSlots,
   parsePostingSchedule,
   resolveAvailableScheduleSlots,
+  resolveBatchStartDate,
   scheduleSlotsMatch,
   scheduleWindowEnd,
   serializePostingSchedule,
 } from './batchScheduleService';
+
+describe('resolveBatchStartDate', () => {
+  const now = new Date('2026-06-27T08:00:00.000Z');
+
+  it('uses midnight in the posting timezone for a future date', () => {
+    assert.equal(
+      resolveBatchStartDate('2026-07-01', 'Asia/Karachi', now).toISOString(),
+      '2026-06-30T19:00:00.000Z',
+    );
+  });
+
+  it('uses the current instant when today is selected', () => {
+    assert.equal(
+      resolveBatchStartDate('2026-06-27', 'Asia/Karachi', now).toISOString(),
+      now.toISOString(),
+    );
+  });
+
+  it('rejects past and invalid dates', () => {
+    assert.throws(
+      () => resolveBatchStartDate('2026-06-26', 'Asia/Karachi', now),
+      BatchScheduleError,
+    );
+    assert.throws(
+      () => resolveBatchStartDate('2026-02-30', 'Asia/Karachi', now),
+      BatchScheduleError,
+    );
+  });
+});
 
 describe('parsePostingSchedule', () => {
   it('normalizes legacy time to timeSlots', () => {

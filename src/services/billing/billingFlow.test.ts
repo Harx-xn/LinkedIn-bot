@@ -202,6 +202,7 @@ describe('post-checkout activation', () => {
     join(process.cwd(), 'src/services/billing/stripeSubscriptionSyncService.ts'),
     'utf8',
   );
+  const webhookSource = readFileSync(join(process.cwd(), 'src/routes/stripeWebhook.ts'), 'utf8');
   const checkoutStatusSource = readFileSync(
     join(process.cwd(), 'src/services/billing/stripeCheckoutService.ts'),
     'utf8',
@@ -219,6 +220,19 @@ describe('post-checkout activation', () => {
     assert.ok(syncSource.includes('stripeDefaultPaymentMethodId: params.paymentMethod.id'));
   });
 
+  it('handles both invoice.paid and invoice.payment_succeeded webhooks', () => {
+    assert.ok(webhookSource.includes("case 'invoice.paid':"));
+    assert.ok(webhookSource.includes("case 'invoice.payment_succeeded':"));
+    assert.ok(syncSource.includes("params.eventType === 'invoice.payment_succeeded'"));
+    assert.ok(syncSource.includes('stripeLatestInvoiceId: params.invoice.id'));
+  });
+
+  it('active Stripe sync clears active access without depending on stale trial fields', () => {
+    assert.ok(syncSource.includes("localStatus === 'ACTIVE'"));
+    assert.ok(syncSource.includes('await setUserBillingAccess(user.id, billingStatus, trialFields)'));
+    assert.ok(syncSource.includes('trialEndsAt: null'));
+  });
+
   it('only reconciles checkout-status after verified checkout completion', () => {
     assert.ok(checkoutStatusSource.includes("session.status !== 'complete'"));
     assert.ok(checkoutStatusSource.includes('no_payment_required'));
@@ -233,6 +247,42 @@ describe('post-checkout activation', () => {
     assert.ok(accessSource.includes('TRIAL_PENDING'));
     assert.ok(accessSource.includes('stripeDefaultPaymentMethodId'));
     assert.ok(accessSource.includes('BillingAccessStatus.TRIALING'));
+  });
+});
+
+describe('stale trial reconciliation', () => {
+  const reconciliationSource = readFileSync(
+    join(process.cwd(), 'src/services/billing/billingReconciliationService.ts'),
+    'utf8',
+  );
+  const billingMeSource = readFileSync(
+    join(process.cwd(), 'src/services/billing/billingMeService.ts'),
+    'utf8',
+  );
+  const entitlementSource = readFileSync(
+    join(process.cwd(), 'src/services/entitlementService.ts'),
+    'utf8',
+  );
+
+  it('reconciles stale stripe subscriptions before billing overview and expired entitlement', () => {
+    assert.ok(reconciliationSource.includes('reconcileUserStripeSubscriptionForAccess'));
+    assert.ok(reconciliationSource.includes('stripeSubscriptionId: { not: null }'));
+    assert.ok(reconciliationSource.includes('looksStale'));
+    assert.ok(billingMeSource.includes("reconcileUserStripeSubscriptionForAccess(userId, 'billing-me')"));
+    assert.ok(entitlementSource.includes("reconcileUserStripeSubscriptionForAccess(userId, 'entitlement')"));
+  });
+
+  it('paid active entitlement wins over expired trial state', () => {
+    assert.ok(entitlementSource.includes("where: { userId, status: 'ACTIVE' }"));
+    assert.ok(entitlementSource.includes("reconciled?.status === 'ACTIVE'"));
+    assert.ok(entitlementSource.includes("status: 'SUBSCRIBED'"));
+  });
+
+  it('logs context when generation is denied by billing entitlement', () => {
+    assert.ok(entitlementSource.includes('logGenerationDenied'));
+    assert.ok(entitlementSource.includes('localSubscriptionStatus'));
+    assert.ok(entitlementSource.includes('billingAccessStatus'));
+    assert.ok(entitlementSource.includes('trialEndsAt'));
   });
 });
 

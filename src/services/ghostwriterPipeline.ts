@@ -20,6 +20,9 @@ export type GhostwriterBotConfig = {
   niches: string[];
   imageMode?: BotImageMode | null;
   backgroundImageUrl?: string | null;
+  imageInstructions?: string | null;
+  imageStyle?: string | null;
+  imageAspectRatio?: string | null;
   customLinks?: string | null;
   contactInfo?: string | null;
   websiteUrl?: string | null;

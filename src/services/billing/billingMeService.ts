@@ -10,6 +10,7 @@ import {
   hasDashboardAccess,
   isTrialEligible,
 } from './billingAccessService';
+import { reconcileUserStripeSubscriptionForAccess } from './billingReconciliationService';
 import { isStripeConfigured } from './stripeClientService';
 
 function iso(d: Date | null | undefined): string | null {
@@ -73,17 +74,19 @@ function resolveRecommendedAction(params: {
 }
 
 export async function getBillingMe(userId: string) {
-  const user = await prisma.user.findUnique({
+  const userSelect = {
+    role: true,
+    regionId: true,
+    billingAccessStatus: true,
+    trialStartedAt: true,
+    trialEndsAt: true,
+    trialRedeemedAt: true,
+    stripeCustomerId: true,
+  } as const;
+
+  let user = await prisma.user.findUnique({
     where: { id: userId },
-    select: {
-      role: true,
-      regionId: true,
-      billingAccessStatus: true,
-      trialStartedAt: true,
-      trialEndsAt: true,
-      trialRedeemedAt: true,
-      stripeCustomerId: true,
-    },
+    select: userSelect,
   });
 
   if (!user) {
@@ -115,6 +118,17 @@ export async function getBillingMe(userId: string) {
       availablePlans: [],
       recommendedAction: null,
     };
+  }
+
+  const reconciled = await reconcileUserStripeSubscriptionForAccess(userId, 'billing-me');
+  if (reconciled) {
+    user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: userSelect,
+    });
+    if (!user) {
+      throw new Error('User not found');
+    }
   }
 
   const [dashboardAccess, trialEligible, sub, stripeConfigured] = await Promise.all([

@@ -35,6 +35,15 @@ import {
   parseSavedGhostwriterNiches,
 } from "./ghostwriterConfigRequirementService";
 
+function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undefined {
+  if (!websiteUrl?.trim()) return undefined;
+  try {
+    return new URL(websiteUrl).hostname.replace(/^www\./i, "");
+  } catch {
+    return undefined;
+  }
+}
+
 export class TrendingBotService {
   private trendsService: TrendsService;
   private imageService: ImageService;
@@ -146,6 +155,9 @@ export class TrendingBotService {
             niches: [niche],
             imageMode: resolveBotImageMode(config),
             backgroundImageUrl: config.backgroundImageUrl,
+            imageInstructions: config.imageInstructions,
+            imageStyle: config.imageStyle,
+            imageAspectRatio: config.imageAspectRatio,
             customLinks: config.customLinks,
             contactInfo: config.contactInfo,
             websiteUrl: config.websiteUrl,
@@ -225,6 +237,11 @@ export class TrendingBotService {
             userId: config.userId,
             imageMode: botConfig.imageMode ?? resolveBotImageMode(config),
             backgroundImageUrl: config.backgroundImageUrl,
+            imageInstructions: botConfig.imageInstructions,
+            imageStyle: botConfig.imageStyle,
+            imageAspectRatio: botConfig.imageAspectRatio,
+            profileDescription: botConfig.description,
+            brandName: resolveBrandNameFromWebsite(botConfig.websiteUrl),
             postContent: result.finalized.content,
             imageService: this.imageService,
             finalized: result.finalized,
@@ -325,6 +342,9 @@ export class TrendingBotService {
       niches,
       imageMode: resolveBotImageMode(config),
       backgroundImageUrl: config.backgroundImageUrl,
+      imageInstructions: config.imageInstructions,
+      imageStyle: config.imageStyle,
+      imageAspectRatio: config.imageAspectRatio,
       customLinks: config.customLinks,
       contactInfo: config.contactInfo,
       websiteUrl: config.websiteUrl,
@@ -457,6 +477,11 @@ export class TrendingBotService {
       userId,
       imageMode: config.imageMode ?? resolveBotImageMode(config),
       backgroundImageUrl: config.backgroundImageUrl,
+      imageInstructions: config.imageInstructions,
+      imageStyle: config.imageStyle,
+      imageAspectRatio: config.imageAspectRatio,
+      profileDescription: config.description,
+      brandName: resolveBrandNameFromWebsite(config.websiteUrl),
       postContent: finalized.content,
       imageService: this.imageService,
       finalized,

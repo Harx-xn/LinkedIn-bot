@@ -59,6 +59,11 @@ function customerIdFrom(value: string | { id: string } | null | undefined): stri
   return typeof value === 'string' ? value : value.id ?? null;
 }
 
+function invoiceIdFrom(value: string | { id: string } | null | undefined): string | null {
+  if (!value) return null;
+  return typeof value === 'string' ? value : value.id ?? null;
+}
+
 const CHECKOUT_VERIFIED_PAYMENT_STATUSES = new Set(['paid', 'no_payment_required']);
 
 async function resolveFromCheckoutSession(
@@ -221,6 +226,7 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
 
   const customerId =
     typeof stripeSub.customer === 'string' ? stripeSub.customer : stripeSub.customer?.id ?? null;
+  const latestInvoiceId = invoiceIdFrom(stripeSub.latest_invoice);
 
   if (customerId && !user.stripeCustomerId) {
     await prisma.user.update({
@@ -242,6 +248,7 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
     stripeCustomerId: customerId,
     stripeSubscriptionId: stripeSub.id,
     stripeSubscriptionItemId: item.id,
+    ...(latestInvoiceId !== null ? { stripeLatestInvoiceId: latestInvoiceId } : {}),
     stripeDefaultPaymentMethodId: defaultPm,
     cancelAtPeriodEnd: stripeSub.cancel_at_period_end ?? false,
     canceledAt,
@@ -286,7 +293,7 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
           trialRedeemedAt: new Date(),
         }
       : localStatus === 'ACTIVE' && previousStatus === 'TRIALING'
-        ? { trialStartedAt: trialStart, trialEndsAt: trialEnd }
+        ? { trialStartedAt: trialStart, trialEndsAt: null }
         : {};
 
   await setUserBillingAccess(user.id, billingStatus, trialFields);
@@ -411,6 +418,20 @@ export async function handleInvoiceEvent(params: {
   });
 
   const eventKey = params.sourceEvent?.id ?? params.eventType;
+  const stripeStatus = stripeSub.status;
+
+  console.info('[stripe-webhook] invoice subscription synced', {
+    eventType: params.eventType,
+    invoiceId: params.invoice.id,
+    subscriptionId,
+    customerId:
+      typeof params.invoice.customer === 'string'
+        ? params.invoice.customer
+        : params.invoice.customer?.id ?? null,
+    stripeStatus,
+    localStatus: sub.status,
+    userId: sub.userId,
+  });
 
   if (params.eventType === 'invoice.payment_failed') {
     await prisma.subscription.update({
@@ -430,7 +451,11 @@ export async function handleInvoiceEvent(params: {
     await notifyPaymentActionRequired(sub.userId, eventKey);
   }
 
-  if (params.eventType === 'invoice.paid' && sub.status === 'ACTIVE') {
+  if (
+    (params.eventType === 'invoice.paid' ||
+      params.eventType === 'invoice.payment_succeeded') &&
+    sub.status === 'ACTIVE'
+  ) {
     await prisma.subscription.update({
       where: { id: sub.id },
       data: {
