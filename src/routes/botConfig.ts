@@ -12,6 +12,7 @@ import {
   parseBotImageModeInput,
   resolveBotImageMode,
 } from '../services/botImageModeService';
+import { getOwnedBrandLogoKey, normalizeBrandLogoPosition } from '../services/brandLogoService';
 
 const router = Router();
 const VALID_IMAGE_STYLES = new Set([
@@ -54,6 +55,9 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
             websiteUrl: '',
             includeContactInfo: false,
             includeWebsiteLink: false,
+            brandLogoUrl: '',
+            brandLogoEnabled: false,
+            brandLogoPosition: 'bottomRight',
           }
     );
   } catch (error) {
@@ -155,6 +159,13 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       typeof backgroundImageUrl === 'string' && backgroundImageUrl.trim()
         ? backgroundImageUrl.trim()
         : null;
+    const brandLogoUrl = typeof body.brandLogoUrl === 'string' ? body.brandLogoUrl.trim() : '';
+    if (brandLogoUrl && !getOwnedBrandLogoKey(brandLogoUrl, req.userId!)) {
+      return res.status(400).json({ error: 'Invalid brand logo upload' });
+    }
+    const normalizedBrandLogoUrl = brandLogoUrl || null;
+    const brandLogoEnabled = parseBoolean(body.brandLogoEnabled, false) && !!normalizedBrandLogoUrl;
+    const brandLogoPosition = normalizeBrandLogoPosition(body.brandLogoPosition);
 
     const sharedContentFields = {
       regionId,
@@ -164,6 +175,9 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       customLinks: customLinksStr,
       customRedditFeeds: customRedditFeedsStr,
       backgroundImageUrl: normalizedBackgroundImageUrl,
+      brandLogoUrl: normalizedBrandLogoUrl,
+      brandLogoEnabled,
+      brandLogoPosition,
       tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional',
       isEnabled: !!isEnabled,
       description: typeof description === 'string' ? description : '',

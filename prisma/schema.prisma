@@ -265,6 +265,9 @@ model BotConfig {
   imageInstructions  String?
   imageStyle         String?
   imageAspectRatio   String? // 1:1 | 4:5 | 16:9
+  brandLogoUrl       String?
+  brandLogoEnabled   Boolean  @default(false)
+  brandLogoPosition  String   @default("bottomRight")
   isEnabled          Boolean  @default(false)
   description        String?  @default("")
   tone               String?  @default("Professional")

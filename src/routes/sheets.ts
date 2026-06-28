@@ -6,6 +6,8 @@ import {
   readGoogleSheetAsJson,
   createLinkedInPostsSheet,
   getGoogleSheetsAccessErrorMessage,
+  readGoogleSheetMediaRows,
+  updateGoogleSheetMediaUrl,
 } from "../services/sheetsService";
 import { syncGoogleSheetPosts } from "../services/sheetsSyncService";
 import { requireAuth } from "../middleware/auth";
@@ -410,6 +412,72 @@ router.post("/create-template", requireAuth, async (req: any, res: any) => {
     return res.status(500).json({
       error: message,
     });
+  }
+});
+
+router.get("/rows", requireAuth, async (req: any, res: any) => {
+  try {
+    const userId = getReqUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const config = await prisma.sheetConfig.findUnique({ where: { userId } });
+    if (!config?.spreadsheetId || (!config.accessToken && !config.refreshToken)) {
+      return res.status(400).json({ error: "Google Sheets account and spreadsheet are required." });
+    }
+    const { clientId, clientSecret } = getGoogleCredentials();
+    const rows = await readGoogleSheetMediaRows({
+      clientId,
+      clientSecret,
+      accessToken: config.accessToken,
+      refreshToken: config.refreshToken,
+      spreadsheetId: config.spreadsheetId,
+      range: config.range || "Posts!A1:Z1000",
+    });
+    return res.json({ rows });
+  } catch (err: any) {
+    const message = getGoogleSheetsAccessErrorMessage(err) || err?.message || "Failed to read Google Sheet rows";
+    await recordGoogleSheetError(getReqUserId(req), message);
+    return res.status(500).json({ error: message });
+  }
+});
+
+router.patch("/rows/:rowNumber/media-url", requireAuth, async (req: any, res: any) => {
+  try {
+    const userId = getReqUserId(req);
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const rowNumber = Number(req.params.rowNumber);
+    const mediaUrl = typeof req.body?.mediaUrl === "string" ? req.body.mediaUrl.trim() : "";
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > 1000) {
+      return res.status(400).json({ error: "Invalid Google Sheet row number" });
+    }
+    if (!mediaUrl) return res.status(400).json({ error: "mediaUrl is required" });
+    try {
+      const parsedUrl = new URL(mediaUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error();
+    } catch {
+      return res.status(400).json({ error: "mediaUrl must be a valid HTTP URL" });
+    }
+
+    const config = await prisma.sheetConfig.findUnique({ where: { userId } });
+    if (!config?.spreadsheetId || (!config.accessToken && !config.refreshToken)) {
+      return res.status(400).json({ error: "Google Sheets account and spreadsheet are required." });
+    }
+    const { clientId, clientSecret } = getGoogleCredentials();
+    await updateGoogleSheetMediaUrl({
+      clientId,
+      clientSecret,
+      accessToken: config.accessToken,
+      refreshToken: config.refreshToken,
+      spreadsheetId: config.spreadsheetId,
+      range: config.range || "Posts!A1:Z1000",
+      rowNumber,
+      mediaUrl,
+    });
+    return res.json({ ok: true, rowNumber, mediaUrl });
+  } catch (err: any) {
+    const message = getGoogleSheetsAccessErrorMessage(err) || err?.message || "Failed to update Google Sheet row";
+    await recordGoogleSheetError(getReqUserId(req), message);
+    return res.status(500).json({ error: message });
   }
 });
 

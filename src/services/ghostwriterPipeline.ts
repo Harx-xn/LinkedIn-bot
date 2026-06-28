@@ -23,6 +23,9 @@ export type GhostwriterBotConfig = {
   imageInstructions?: string | null;
   imageStyle?: string | null;
   imageAspectRatio?: string | null;
+  brandLogoUrl?: string | null;
+  brandLogoEnabled?: boolean;
+  brandLogoPosition?: string | null;
   customLinks?: string | null;
   contactInfo?: string | null;
   websiteUrl?: string | null;

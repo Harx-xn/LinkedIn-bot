@@ -15,6 +15,7 @@ import {
   duplicateManualPost,
 } from '../services/manualPostService';
 import { uploadBufferToR2 } from '../middleware/r2';
+import { applyBrandLogoWatermark, normalizeBrandLogoPosition } from '../services/brandLogoService';
 import {
   GenerativeImageError,
   type LinkedInImageAspectRatio,
@@ -82,9 +83,13 @@ async function generateAndUploadManualAiImage(params: {
 }): Promise<{ mediaUrl: string; mimeType: string; model: string }> {
   await canUseImageGeneration(params.userId);
 
-  const [imageService, voice] = await Promise.all([
+  const [imageService, voice, botConfig] = await Promise.all([
     getGenerativeImagesServiceForUser(params.userId),
     getBotVoice(params.userId),
+    prisma.botConfig.findUnique({
+      where: { userId: params.userId },
+      select: { brandLogoUrl: true, brandLogoEnabled: true, brandLogoPosition: true },
+    }),
   ]);
 
   const generated = await imageService.generateLinkedInPostImage({
@@ -96,16 +101,34 @@ async function generateAndUploadManualAiImage(params: {
     profileDescription: voice.description,
   });
 
-  const ext = extensionForMimeType(generated.mimeType);
+  let finalBuffer = generated.buffer;
+  let finalMimeType = generated.mimeType;
+  if (botConfig?.brandLogoEnabled && botConfig.brandLogoUrl) {
+    try {
+      finalBuffer = await applyBrandLogoWatermark({
+        baseImage: generated.buffer,
+        logoUrl: botConfig.brandLogoUrl,
+        userId: params.userId,
+        position: normalizeBrandLogoPosition(botConfig.brandLogoPosition),
+      });
+      finalMimeType = 'image/png';
+    } catch (err) {
+      console.warn('[manual] Brand logo watermark skipped', {
+        userId: params.userId,
+        message: err instanceof Error ? err.message : 'unknown error',
+      });
+    }
+  }
+  const ext = extensionForMimeType(finalMimeType);
   const mediaUrl = await uploadBufferToR2(
-    generated.buffer,
+    finalBuffer,
     `${params.uploadKey}.${ext}`,
-    generated.mimeType,
+    finalMimeType,
   );
 
   return {
     mediaUrl,
-    mimeType: generated.mimeType,
+    mimeType: finalMimeType,
     model: generated.model,
   };
 }

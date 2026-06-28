@@ -22,8 +22,16 @@ router.post("/", requireAuth, upload.single("image"), async (req: Request, res: 
   const file = (req as MulterRequest).file;
   if (!file) return res.status(400).json({ error: "No file uploaded" });
 
-  const ext = file.originalname.split(".").pop() || "jpg";
-  const key = `uploads/${Date.now()}-${Math.round(Math.random() * 1e9)}.${ext}`;
+  const purpose = req.body?.purpose === "brandLogo" ? "brandLogo" : "background";
+  const ext = file.mimetype.includes("png")
+    ? "png"
+    : file.mimetype.includes("webp")
+      ? "webp"
+      : "jpg";
+  const folder = purpose === "brandLogo"
+    ? `uploads/brand-logos/${req.userId}`
+    : "uploads";
+  const key = `${folder}/${Date.now()}-${Math.round(Math.random() * 1e9)}.${ext}`;
 
   const url = await uploadBufferToR2(file.buffer, key, file.mimetype);
 

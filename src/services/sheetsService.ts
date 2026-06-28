@@ -1,9 +1,170 @@
-  import { google } from "googleapis";
+  import { google, sheets_v4 } from "googleapis";
   import { config } from "../config";
 
   export const GOOGLE_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
   ];
+
+  const POST_TEMPLATE_ROW_LIMIT = 1000;
+
+  export function getPostTemplateExampleScheduledAt(now = new Date()): string {
+    const example = new Date(now);
+    example.setUTCDate(example.getUTCDate() + 1);
+    example.setUTCHours(10, 0, 0, 0);
+    return example.toISOString().slice(0, 16).replace("T", " ");
+  }
+
+  export function buildPostTemplateFormattingRequests(
+    sheetId: number,
+  ): sheets_v4.Schema$Request[] {
+    const columnWidths = [180, 600, 240, 190, 300, 160];
+    const requests: sheets_v4.Schema$Request[] = [
+      {
+        updateSheetProperties: {
+          properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+          fields: "gridProperties.frozenRowCount",
+        },
+      },
+      ...columnWidths.map((pixelSize, index) => ({
+        updateDimensionProperties: {
+          range: {
+            sheetId,
+            dimension: "COLUMNS",
+            startIndex: index,
+            endIndex: index + 1,
+          },
+          properties: { pixelSize },
+          fields: "pixelSize",
+        },
+      })),
+      {
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "ROWS", startIndex: 0, endIndex: 1 },
+          properties: { pixelSize: 38 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: {
+            sheetId,
+            dimension: "ROWS",
+            startIndex: 1,
+            endIndex: POST_TEMPLATE_ROW_LIMIT,
+          },
+          properties: { pixelSize: 64 },
+          fields: "pixelSize",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 6 },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.102, green: 0.18, blue: 0.32 },
+              textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+              horizontalAlignment: "CENTER",
+              verticalAlignment: "MIDDLE",
+              borders: {
+                top: { style: "SOLID", color: { red: 0.25, green: 0.35, blue: 0.5 } },
+                bottom: { style: "SOLID", color: { red: 0.25, green: 0.35, blue: 0.5 } },
+                left: { style: "SOLID", color: { red: 0.25, green: 0.35, blue: 0.5 } },
+                right: { style: "SOLID", color: { red: 0.25, green: 0.35, blue: 0.5 } },
+              },
+            },
+          },
+          fields: "userEnteredFormat",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 0, endColumnIndex: 6 },
+          cell: { userEnteredFormat: { verticalAlignment: "TOP" } },
+          fields: "userEnteredFormat.verticalAlignment",
+        },
+      },
+      ...[1, 2, 4].map((columnIndex) => ({
+        repeatCell: {
+          range: {
+            sheetId,
+            startRowIndex: 1,
+            endRowIndex: POST_TEMPLATE_ROW_LIMIT,
+            startColumnIndex: columnIndex,
+            endColumnIndex: columnIndex + 1,
+          },
+          cell: { userEnteredFormat: { wrapStrategy: "WRAP" } },
+          fields: "userEnteredFormat.wrapStrategy",
+        },
+      })),
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 3, endColumnIndex: 4 },
+          cell: { userEnteredFormat: { numberFormat: { type: "DATE_TIME", pattern: "yyyy-mm-dd hh:mm" } } },
+          fields: "userEnteredFormat.numberFormat",
+        },
+      },
+      {
+        setDataValidation: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 3, endColumnIndex: 4 },
+          rule: {
+            condition: { type: "DATE_IS_VALID" },
+            strict: true,
+            showCustomUi: true,
+            inputMessage: "Enter a valid date and time, for example 2026-07-01 10:00.",
+          },
+        },
+      },
+      {
+        setDataValidation: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 5, endColumnIndex: 6 },
+          rule: {
+            condition: { type: "ONE_OF_LIST", values: ["QUEUED", "DRAFT", "PUBLISHED"].map((userEnteredValue) => ({ userEnteredValue })) },
+            strict: true,
+            showCustomUi: true,
+            inputMessage: "Choose QUEUED, DRAFT, or PUBLISHED.",
+          },
+        },
+      },
+      {
+        setBasicFilter: {
+          filter: { range: { sheetId, startRowIndex: 0, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 0, endColumnIndex: 6 } },
+        },
+      },
+    ];
+
+    const statusColors: Array<[string, sheets_v4.Schema$Color]> = [
+      ["DRAFT", { red: 0.9, green: 0.91, blue: 0.93 }],
+      ["QUEUED", { red: 0.82, green: 0.9, blue: 1 }],
+      ["PUBLISHED", { red: 0.82, green: 0.94, blue: 0.85 }],
+    ];
+    statusColors.forEach(([status, backgroundColor], index) => {
+      requests.push({
+        addConditionalFormatRule: {
+          index,
+          rule: {
+            ranges: [{ sheetId, startRowIndex: 1, endRowIndex: POST_TEMPLATE_ROW_LIMIT, startColumnIndex: 5, endColumnIndex: 6 }],
+            booleanRule: {
+              condition: { type: "TEXT_EQ", values: [{ userEnteredValue: status }] },
+              format: { backgroundColor, textFormat: { bold: true } },
+            },
+          },
+        },
+      });
+    });
+
+    return requests;
+  }
+
+  async function formatPostTemplateSheet(
+    sheets: sheets_v4.Sheets,
+    spreadsheetId: string,
+    sheetId: number,
+  ) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: buildPostTemplateFormattingRequests(sheetId) },
+    }).catch(normalizeGoogleSheetsError);
+  }
 
   function getGoogleErrorText(err: unknown) {
     const message = err instanceof Error ? err.message : String(err ?? "");
@@ -170,6 +331,46 @@
       return item;
     });
   }
+
+  export type GoogleSheetMediaRow = {
+    rowNumber: number;
+    appPostId: string;
+    content: string;
+    hashtags: string;
+    scheduledAt: string;
+    mediaUrl: string;
+    status: string;
+  };
+
+  export function isSelectableGoogleSheetMediaRowStatus(status: string): boolean {
+    const normalized = status.trim().toUpperCase();
+    return normalized !== 'PUBLISHED' && normalized !== 'QUEUED';
+  }
+
+  export async function readGoogleSheetMediaRows(params: {
+    clientId: string;
+    clientSecret: string;
+    accessToken?: string | null;
+    refreshToken?: string | null;
+    spreadsheetId: string;
+    range: string;
+  }): Promise<GoogleSheetMediaRow[]> {
+    const rows = await readGoogleSheetAsJson(params);
+    return rows
+      .map((row, index) => ({
+        rowNumber: index + 2,
+        appPostId: getCellValue(row, ['appPostId', 'app post id', 'postId', 'post id', 'id']),
+        content: getCellValue(row, ['content', 'post', 'post content', 'text', 'caption', 'linkedin post']),
+        hashtags: getCellValue(row, ['hashtags', 'tags', 'hash tags']),
+        scheduledAt: getCellValue(row, ['scheduledAt', 'scheduled at', 'schedule', 'date', 'publish at']),
+        mediaUrl: getCellValue(row, ['mediaUrl', 'media url', 'image', 'imageUrl', 'image url', 'media']),
+        status: getCellValue(row, ['status', 'state']),
+      }))
+      .filter(
+        (row) =>
+          Boolean(row.content) && isSelectableGoogleSheetMediaRowStatus(row.status),
+      );
+  }
   export type SheetPostInput = {
     appPostId?: string | null;
     sheetRowNumber?: number;
@@ -324,10 +525,55 @@
       .update({
         spreadsheetId,
         range,
-        valueInputOption: "RAW",
+        valueInputOption: "USER_ENTERED",
         requestBody: { values },
       })
       .catch(normalizeGoogleSheetsError);
+  }
+
+  export async function updateGoogleSheetMediaUrl(params: {
+    clientId: string;
+    clientSecret: string;
+    accessToken?: string | null;
+    refreshToken?: string | null;
+    spreadsheetId: string;
+    range: string;
+    rowNumber: number;
+    mediaUrl: string;
+  }) {
+    if (!Number.isInteger(params.rowNumber) || params.rowNumber < 2 || params.rowNumber > 1000) {
+      throw new Error('Invalid Google Sheet row number.');
+    }
+
+    const sheetName = getSheetName(params.range);
+    ensureRefreshToken(params.refreshToken);
+    const oAuth2Client = getGoogleOAuthClient(params.clientId, params.clientSecret);
+    oAuth2Client.setCredentials({
+      access_token: params.accessToken || undefined,
+      refresh_token: params.refreshToken || undefined,
+    });
+    const sheets = google.sheets({ version: 'v4', auth: oAuth2Client });
+    const headerResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: params.spreadsheetId,
+      range: `${sheetName}!1:1`,
+    }).catch(normalizeGoogleSheetsError);
+    const headers = (headerResponse.data.values?.[0] || []).map((value) =>
+      String(value).trim().toLowerCase(),
+    );
+    const mediaColumnIndex = headers.findIndex((header) =>
+      ['mediaurl', 'media url', 'image', 'imageurl', 'image url', 'media'].includes(header),
+    );
+    if (mediaColumnIndex < 0) {
+      throw new Error('The connected Google Sheet does not have a mediaUrl column.');
+    }
+
+    const column = getGoogleSheetColumnName(mediaColumnIndex + 1);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: params.spreadsheetId,
+      range: `${sheetName}!${column}${params.rowNumber}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[params.mediaUrl]] },
+    }).catch(normalizeGoogleSheetsError);
   }
 
   export async function ensureGoogleSheetAppPostIdColumn(params: {
@@ -425,6 +671,7 @@
 
     const spreadsheetId = response.data.spreadsheetId;
     const spreadsheetUrl = response.data.spreadsheetUrl;
+    const postsSheetId = response.data.sheets?.[0]?.properties?.sheetId;
 
     if (!spreadsheetId) {
       throw new Error("Google did not return a spreadsheet ID.");
@@ -442,7 +689,7 @@
               "",
               "Write your LinkedIn post here",
               "#linkedin #automation",
-              "2026-05-21 10:00",
+              getPostTemplateExampleScheduledAt(),
               "",
               "DRAFT",
             ],
@@ -450,6 +697,11 @@
         },
       })
       .catch(normalizeGoogleSheetsError);
+
+    if (typeof postsSheetId !== "number") {
+      throw new Error("Google did not return the Posts sheet ID.");
+    }
+    await formatPostTemplateSheet(sheets, spreadsheetId, postsSheetId);
 
     return {
       spreadsheetId,
