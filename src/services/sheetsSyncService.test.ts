@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   isGoogleInvalidGrantError,
   normalizeSheetPostStatus,
+  shouldPreservePublishedStatus,
 } from './sheetsSyncService';
 import {
   GOOGLE_OAUTH_SCOPES,
+  findGoogleSheetPostStatusCell,
   getGoogleSheetColumnName,
   getGoogleSheetsAccessErrorMessage,
 } from './sheetsService';
@@ -82,6 +84,21 @@ describe('Google Sheets post status normalization', () => {
   it('keeps SKIP as a sheet-only instruction', () => {
     assert.equal(normalizeSheetPostStatus('skip').skip, true);
   });
+
+  it('keeps published posts terminal even when a stale Sheet row says draft', () => {
+    assert.equal(
+      shouldPreservePublishedStatus({ status: 'DRAFT', publishedAt: new Date() }),
+      true,
+    );
+    assert.equal(
+      shouldPreservePublishedStatus({ status: 'PUBLISHED', publishedAt: null }),
+      true,
+    );
+    assert.equal(
+      shouldPreservePublishedStatus({ status: 'DRAFT', publishedAt: null }),
+      false,
+    );
+  });
 });
 
 describe('Google Sheets column names', () => {
@@ -89,5 +106,27 @@ describe('Google Sheets column names', () => {
     assert.equal(getGoogleSheetColumnName(1), 'A');
     assert.equal(getGoogleSheetColumnName(26), 'Z');
     assert.equal(getGoogleSheetColumnName(27), 'AA');
+  });
+
+  it('finds the status cell by stable appPostId even when columns move', () => {
+    assert.equal(
+      findGoogleSheetPostStatusCell(
+        [
+          ['content', 'status', 'appPostId'],
+          ['First post', 'QUEUED', 'post-1'],
+          ['Second post', 'DRAFT', 'post-2'],
+        ],
+        'post-2',
+      ),
+      'B3',
+    );
+  });
+
+  it('returns null when the post row or required headers are absent', () => {
+    assert.equal(findGoogleSheetPostStatusCell([['content', 'status']], 'post-1'), null);
+    assert.equal(
+      findGoogleSheetPostStatusCell([['status', 'appPostId'], ['DRAFT', 'other']], 'post-1'),
+      null,
+    );
   });
 });

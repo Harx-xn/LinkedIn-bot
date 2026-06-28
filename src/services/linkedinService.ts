@@ -2,6 +2,7 @@ import axios from 'axios';
 import { config } from '../config';
 import { prisma } from '../prismaClient';
 import { decryptSecret } from './secretCrypto';
+import { updateGoogleSheetPostStatus } from './sheetsService';
 
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
@@ -359,6 +360,49 @@ export async function postToLinkedInFromPostId(postId: string) {
       linkedinPostUrn: urn ?? null
     }
   });
+
+  if (post.source === 'GOOGLE_SHEET') {
+    try {
+      const sheetConfig = await prisma.sheetConfig.findFirst({
+        where: { userId: post.userId, active: true },
+      });
+      const clientId = process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+      if (!sheetConfig) throw new Error('No active Google Sheet connection found.');
+      if (!clientId || !clientSecret) {
+        throw new Error('Google Sheets platform credentials are not configured.');
+      }
+
+      await updateGoogleSheetPostStatus({
+        clientId,
+        clientSecret,
+        accessToken: sheetConfig.accessToken,
+        refreshToken: sheetConfig.refreshToken,
+        spreadsheetId: sheetConfig.spreadsheetId,
+        range: sheetConfig.range,
+        appPostId: post.id,
+        status: 'PUBLISHED',
+      });
+      await prisma.sheetConfig.update({
+        where: { id: sheetConfig.id },
+        data: { lastSyncError: null },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[sheets] published status writeback failed', {
+        postId: post.id,
+        userId: post.userId,
+        message,
+      });
+      await prisma.sheetConfig.updateMany({
+        where: { userId: post.userId },
+        data: {
+          lastSyncError: `Post published, but its Sheet status could not be updated: ${message}`.slice(0, 500),
+        },
+      }).catch(() => undefined);
+    }
+  }
 
   try {
     const { safeUpdateTopicHistoryStatus } = await import('./topicHistoryService');

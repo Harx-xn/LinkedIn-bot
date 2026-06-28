@@ -1,6 +1,7 @@
 import { prisma } from '../prismaClient';
 import {
   ensureGoogleSheetAppPostIdColumn,
+  ensureGoogleSheetStatusColumn,
   fetchPostsFromSheet,
   updateGoogleSheetValues,
 } from './sheetsService';
@@ -64,6 +65,13 @@ export type SheetSyncResult = {
   errors: string[];
 };
 
+export function shouldPreservePublishedStatus(post: {
+  status: string;
+  publishedAt: Date | null;
+}): boolean {
+  return post.status === 'PUBLISHED' || post.publishedAt !== null;
+}
+
 export async function syncGoogleSheetPosts(params: {
   config: {
     id: string;
@@ -87,6 +95,7 @@ export async function syncGoogleSheetPosts(params: {
     range: config.range,
   };
   const idColumn = await ensureGoogleSheetAppPostIdColumn(googleParams);
+  const statusColumn = await ensureGoogleSheetStatusColumn(googleParams);
   const sheetName = config.range.includes('!')
     ? config.range.slice(0, config.range.indexOf('!'))
     : 'Posts';
@@ -143,6 +152,9 @@ export async function syncGoogleSheetPosts(params: {
 
       const statusForCreate =
         normalizedStatus.status || (row.scheduledAt ? 'QUEUED' : 'DRAFT');
+      const preservePublished = existingPost
+        ? shouldPreservePublishedStatus(existingPost)
+        : false;
       const post = existingPost
         ? await (async () => {
             await prisma.post.updateMany({
@@ -156,7 +168,12 @@ export async function syncGoogleSheetPosts(params: {
                 hashtags: row.hashtags,
                 mediaUrl: row.mediaUrl,
                 scheduledAt: row.scheduledAt,
-                ...(normalizedStatus.status
+                ...(preservePublished
+                  ? {
+                      status: 'PUBLISHED',
+                      errorMessage: null,
+                    }
+                  : normalizedStatus.status
                   ? {
                       status: normalizedStatus.status,
                       errorMessage: null,
@@ -195,6 +212,19 @@ export async function syncGoogleSheetPosts(params: {
           ...googleParams,
           range: `${sheetName}!${idColumn.column}${row.sheetRowNumber}`,
           values: [[post.id]],
+        });
+      }
+
+      if (
+        existingPost &&
+        preservePublished &&
+        row.sheetRowNumber &&
+        normalizedStatus.status !== 'PUBLISHED'
+      ) {
+        await updateGoogleSheetValues({
+          ...googleParams,
+          range: `${sheetName}!${statusColumn}${row.sheetRowNumber}`,
+          values: [['PUBLISHED']],
         });
       }
     } catch (err) {

@@ -531,6 +531,70 @@
       .catch(normalizeGoogleSheetsError);
   }
 
+  export function findGoogleSheetPostStatusCell(
+    rows: unknown[][],
+    appPostId: string,
+  ): string | null {
+    const headers = (rows[0] || []).map((value) =>
+      String(value ?? "").trim().toLowerCase(),
+    );
+    const idColumnIndex = headers.findIndex((header) =>
+      ["apppostid", "app post id", "postid", "post id", "id"].includes(header),
+    );
+    const statusColumnIndex = headers.findIndex((header) =>
+      ["status", "state"].includes(header),
+    );
+
+    if (idColumnIndex < 0 || statusColumnIndex < 0) return null;
+
+    const rowIndex = rows.findIndex(
+      (row, index) =>
+        index > 0 && String(row[idColumnIndex] ?? "").trim() === appPostId,
+    );
+    if (rowIndex < 0) return null;
+
+    return `${getGoogleSheetColumnName(statusColumnIndex + 1)}${rowIndex + 1}`;
+  }
+
+  export async function updateGoogleSheetPostStatus(params: {
+    clientId: string;
+    clientSecret: string;
+    accessToken?: string | null;
+    refreshToken?: string | null;
+    spreadsheetId: string;
+    range: string;
+    appPostId: string;
+    status: string;
+  }) {
+    const sheetName = getSheetName(params.range);
+    ensureRefreshToken(params.refreshToken);
+    const oAuth2Client = getGoogleOAuthClient(params.clientId, params.clientSecret);
+    oAuth2Client.setCredentials({
+      access_token: params.accessToken || undefined,
+      refresh_token: params.refreshToken || undefined,
+    });
+    const sheets = google.sheets({ version: "v4", auth: oAuth2Client });
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: params.spreadsheetId,
+      range: `${sheetName}!A1:ZZ1000`,
+    }).catch(normalizeGoogleSheetsError);
+    const statusCell = findGoogleSheetPostStatusCell(
+      response.data.values || [],
+      params.appPostId,
+    );
+
+    if (!statusCell) {
+      throw new Error(`Could not find the status cell for appPostId ${params.appPostId}.`);
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: params.spreadsheetId,
+      range: `${sheetName}!${statusCell}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[params.status]] },
+    }).catch(normalizeGoogleSheetsError);
+  }
+
   export async function updateGoogleSheetMediaUrl(params: {
     clientId: string;
     clientSecret: string;
@@ -628,6 +692,44 @@
       column: nextColumn,
       schemaUpgraded: true,
     };
+  }
+
+  export async function ensureGoogleSheetStatusColumn(params: {
+    clientId: string;
+    clientSecret: string;
+    accessToken?: string | null;
+    refreshToken?: string | null;
+    spreadsheetId: string;
+    range: string;
+  }) {
+    const sheetName = getSheetName(params.range);
+    ensureRefreshToken(params.refreshToken);
+    const oAuth2Client = getGoogleOAuthClient(params.clientId, params.clientSecret);
+    oAuth2Client.setCredentials({
+      access_token: params.accessToken || undefined,
+      refresh_token: params.refreshToken || undefined,
+    });
+    const sheets = google.sheets({ version: "v4", auth: oAuth2Client });
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: params.spreadsheetId,
+      range: `${sheetName}!1:1`,
+    }).catch(normalizeGoogleSheetsError);
+    const headers = (response.data.values?.[0] || []).map((value) =>
+      String(value).trim(),
+    );
+    const existingIndex = headers.findIndex((header) =>
+      ["status", "state"].includes(header.toLowerCase()),
+    );
+
+    if (existingIndex >= 0) return getGoogleSheetColumnName(existingIndex + 1);
+
+    const column = getGoogleSheetColumnName(headers.length + 1);
+    await updateGoogleSheetValues({
+      ...params,
+      range: `${sheetName}!${column}1`,
+      values: [["status"]],
+    });
+    return column;
   }
 
   export async function createLinkedInPostsSheet(params: {
