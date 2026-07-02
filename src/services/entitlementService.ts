@@ -3,9 +3,11 @@ import { prisma } from '../prismaClient';
 import { hasDashboardAccess } from './billing/billingAccessService';
 import { reconcileUserStripeSubscriptionForAccess } from './billing/billingReconciliationService';
 import { getNumberSetting } from './settingsService';
+import { getUtcMonthWindow } from '../utils/monthlyLimitWindow';
 
 export const TRIAL_DAYS = 14;
-export const TRIAL_DAILY_PUBLISH_LIMIT = 1;
+export const TRIAL_MONTHLY_PUBLISH_LIMIT = 30;
+export const TRIAL_MONTHLY_PUBLISH_SETTING_KEY = 'trial.monthlyPublishLimit';
 
 export type EntitlementStatus = 'ADMIN' | 'SUBSCRIBED' | 'TRIAL' | 'EXPIRED';
 
@@ -13,13 +15,18 @@ export interface Entitlement {
   status: EntitlementStatus;
   trialEndsAt: Date | null;
   daysLeft: number;
-  dailyPublishLimit: number | null;
+  monthlyPublishLimit: number | null;
 }
 
-function startOfToday(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
+export function getTrialMonthlyPublishLimit(
+  regionId: string | null,
+  loader = getNumberSetting,
+): Promise<number> {
+  return loader(
+    TRIAL_MONTHLY_PUBLISH_SETTING_KEY,
+    regionId,
+    TRIAL_MONTHLY_PUBLISH_LIMIT,
+  );
 }
 
 export async function getEntitlement(userId: string): Promise<Entitlement> {
@@ -34,11 +41,11 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
   });
 
   if (!user) {
-    return { status: 'EXPIRED', trialEndsAt: null, daysLeft: 0, dailyPublishLimit: 0 };
+    return { status: 'EXPIRED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: 0 };
   }
 
   if (user.role !== UserRole.USER) {
-    return { status: 'ADMIN', trialEndsAt: null, daysLeft: 0, dailyPublishLimit: null };
+    return { status: 'ADMIN', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
   }
 
   const activeSub = await prisma.subscription.findFirst({
@@ -46,7 +53,7 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
     select: { id: true },
   });
   if (activeSub) {
-    return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, dailyPublishLimit: null };
+    return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
   }
 
   const now = new Date();
@@ -58,7 +65,7 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
   if (!trialing) {
     const reconciled = await reconcileUserStripeSubscriptionForAccess(userId, 'entitlement');
     if (reconciled?.status === 'ACTIVE') {
-      return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, dailyPublishLimit: null };
+      return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
     }
   }
 
@@ -68,20 +75,21 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
       status: 'TRIAL',
       trialEndsAt: user.trialEndsAt,
       daysLeft,
-      dailyPublishLimit: await getNumberSetting(
-        'trial.dailyPublishLimit',
-        user.regionId,
-        TRIAL_DAILY_PUBLISH_LIMIT,
-      ),
+      monthlyPublishLimit: await getTrialMonthlyPublishLimit(user.regionId),
     };
   }
 
-  return { status: 'EXPIRED', trialEndsAt: user.trialEndsAt ?? null, daysLeft: 0, dailyPublishLimit: 0 };
+  return { status: 'EXPIRED', trialEndsAt: user.trialEndsAt ?? null, daysLeft: 0, monthlyPublishLimit: 0 };
 }
 
-export async function publishedToday(userId: string): Promise<number> {
-  return prisma.post.count({
-    where: { userId, status: 'PUBLISHED', publishedAt: { gte: startOfToday() } },
+export async function publishedThisMonth(
+  userId: string,
+  now: Date = new Date(),
+  db: Pick<typeof prisma, 'post'> = prisma,
+): Promise<number> {
+  const { start, end } = getUtcMonthWindow(now);
+  return db.post.count({
+    where: { userId, status: 'PUBLISHED', publishedAt: { gte: start, lt: end } },
   });
 }
 
@@ -114,12 +122,14 @@ export async function canPublish(userId: string): Promise<GateResult> {
     };
   }
 
-  const count = await publishedToday(userId);
-  const dailyLimit = entitlement.dailyPublishLimit ?? TRIAL_DAILY_PUBLISH_LIMIT;
-  if (count >= dailyLimit) {
+  const count = await publishedThisMonth(userId);
+  const monthlyLimit = entitlement.monthlyPublishLimit ?? TRIAL_MONTHLY_PUBLISH_LIMIT;
+  // TODO: Concurrent publishes can pass this check before either external
+  // LinkedIn operation succeeds and updates Post; do not transact over that call.
+  if (count >= monthlyLimit) {
     return {
       allowed: false,
-      reason: `Free trial allows ${dailyLimit} published post per day. Try again tomorrow or subscribe.`,
+      reason: `Free trial allows ${monthlyLimit} published posts per month. Subscribe to continue publishing.`,
       entitlement,
     };
   }

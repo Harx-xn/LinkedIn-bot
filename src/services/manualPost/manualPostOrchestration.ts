@@ -179,7 +179,7 @@ export async function rewriteUnsavedManualPostV2(
     content: normalized.content,
     hashtags: normalized.hashtags || null,
     topic,
-    rewriteCount: usage.usedToday + 1,
+    rewriteCount: usage.usedThisMonth + 1,
   };
 }
 

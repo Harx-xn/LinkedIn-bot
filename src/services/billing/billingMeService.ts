@@ -171,6 +171,10 @@ export async function getBillingMe(userId: string) {
     dailyBatchGenerationLimit: p.dailyBatchGenerationLimit,
     imageGenerationEnabled: p.imageGenerationEnabled,
     dailyImageGenerationLimit: p.dailyImageGenerationLimit,
+    monthlyPostLimit: p.monthlyPostLimit,
+    monthlyBatchGenerationLimit: p.monthlyBatchGenerationLimit,
+    monthlyImageGenerationLimit: p.monthlyImageGenerationLimit,
+    monthlyManualAiOperationLimit: p.monthlyManualAiOperationLimit,
   }));
 
   const subStatus = mapSubStatus(sub?.status ?? null);

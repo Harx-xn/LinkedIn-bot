@@ -105,7 +105,7 @@ describe('specificity scoring', () => {
 
   it('scores atomic entitlement example high', () => {
     const r = scoreSpecificity(
-      "Before publishing, load the user's entitlement and atomically increment the daily usage counter in the same transaction because two requests may race. Reject the request if the update would exceed the plan limit.",
+      "Before publishing, load the user's entitlement and atomically increment the monthly usage counter in the same transaction because two requests may race. Reject the request if the update would exceed the plan limit.",
     );
     assert.ok(r.score >= 65);
     assert.ok(r.signals.includes('named_mechanism'));

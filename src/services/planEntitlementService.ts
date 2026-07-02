@@ -3,6 +3,7 @@ import type { Plan } from '@prisma/client';
 import { prisma } from '../prismaClient';
 import { hasDashboardAccess } from './billing/billingAccessService';
 import { getEntitlement } from './entitlementService';
+import { getUtcMonthWindow } from '../utils/monthlyLimitWindow';
 
 /**
  * Plan entitlement service.
@@ -14,9 +15,9 @@ import { getEntitlement } from './entitlementService';
  * Privileged roles (SUPER_ADMIN / REGIONAL_ADMIN) are never throttled here so
  * admin/sub-admin management flows are not blocked by user plan limits.
  *
- * Daily usage uses UTC day boundaries (the app does not store per-user timezone
- * reliably). `postsToday` counts LinkedIn publishes (`publishedAt`); other
- * counters use `createdAt >= startOfUtcDay()`.
+ * Monthly usage uses UTC calendar-month boundaries. Published-post usage is
+ * derived from `publishedAt`; the other quotas use their usage row's
+ * `createdAt` timestamp.
  */
 
 export type PlanLimitCode =
@@ -41,21 +42,45 @@ export class PlanLimitError extends Error {
 }
 
 export interface PlanEntitlements {
+  usagePeriod: 'MONTHLY';
+  periodStart: Date;
+  periodEnd: Date;
   hasActiveSubscription: boolean;
   planId: string | null;
   planName: string | null;
   fullDashboardUnlock: boolean;
   maxRewritesPerPost: number;
+  monthlyPostLimit: number;
+  monthlyBatchGenerationLimit: number;
+  imageGenerationEnabled: boolean;
+  monthlyImageGenerationLimit: number;
+  monthlyManualAiOperationLimit: number;
+  /** @deprecated Temporary response aliases for older frontend clients. */
   dailyPostLimit: number;
   dailyBatchGenerationLimit: number;
-  imageGenerationEnabled: boolean;
   dailyImageGenerationLimit: number;
   usage: {
+    postsThisMonth: number;
+    batchGenerationsThisMonth: number;
+    imagesGeneratedThisMonth: number;
+    manualAiOperationsThisMonth: number;
+    /** @deprecated Temporary aliases containing monthly usage. */
     postsToday: number;
     batchGenerationsToday: number;
     imagesGeneratedToday: number;
   };
+  limits: {
+    posts: number;
+    batchGenerations: number;
+    images: number;
+    manualAiOperations: number;
+  };
   remaining: {
+    posts: number;
+    batchGenerations: number;
+    images: number;
+    manualAiOperations: number;
+    /** @deprecated Temporary aliases containing monthly remaining usage. */
     postsToday: number;
     batchGenerationsToday: number;
     imagesToday: number;
@@ -70,16 +95,16 @@ const UNLIMITED = 999_999;
 const LOCKED_LIMITS = {
   fullDashboardUnlock: false,
   maxRewritesPerPost: 0,
+  monthlyPostLimit: 0,
+  monthlyBatchGenerationLimit: 0,
+  monthlyImageGenerationLimit: 0,
+  monthlyManualAiOperationLimit: 0,
+  // Temporary frontend compatibility aliases.
   dailyPostLimit: 0,
   dailyBatchGenerationLimit: 0,
   imageGenerationEnabled: false,
   dailyImageGenerationLimit: 0,
 };
-
-function startOfUtcDay(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
-}
 
 type ActiveSubscriptionWithPlan = Awaited<ReturnType<typeof getActiveSubscriptionWithPlan>>;
 type SubscriptionPlan = NonNullable<ActiveSubscriptionWithPlan>['plan'];
@@ -118,38 +143,82 @@ async function getEffectiveEntitlementPlan(
 }
 
 // ---------------------------------------------------------------------------
-// Daily usage counters (UTC day)
+// Monthly usage counters (UTC calendar month)
 // ---------------------------------------------------------------------------
 
 /**
- * Posts actually published to LinkedIn today.
+ * Posts actually published to LinkedIn during the current UTC month.
  *
  * Counts `Post` rows with status PUBLISHED and `publishedAt` within the current
- * UTC day. Drafts, queued/review posts, and scheduling do NOT count — only a
+ * UTC month. Drafts, queued/review posts, and scheduling do NOT count; only a
  * successful LinkedIn publish increments this metric.
  */
-async function countPostsToday(userId: string): Promise<number> {
-  return prisma.post.count({
+async function countPostsThisMonth(userId: string, start: Date, end: Date, db = prisma): Promise<number> {
+  return db.post.count({
     where: {
       userId,
       status: 'PUBLISHED',
-      publishedAt: { gte: startOfUtcDay() },
+      publishedAt: { gte: start, lt: end },
     },
   });
 }
 
-// Batch generation jobs started today.
-async function countBatchGenerationsToday(userId: string): Promise<number> {
-  return prisma.botGenerationJob.count({
-    where: { userId, createdAt: { gte: startOfUtcDay() } },
+// Batch jobs count when their row is created, including jobs that later fail.
+async function countBatchGenerationsThisMonth(userId: string, start: Date, end: Date, db = prisma): Promise<number> {
+  return db.botGenerationJob.count({
+    where: { userId, createdAt: { gte: start, lt: end } },
   });
 }
 
-// Successfully generated images today.
-async function countImagesToday(userId: string): Promise<number> {
-  return prisma.imageGenerationUsage.count({
-    where: { userId, createdAt: { gte: startOfUtcDay() } },
+// Successfully generated images this month.
+async function countImagesThisMonth(userId: string, start: Date, end: Date, db = prisma): Promise<number> {
+  return db.imageGenerationUsage.count({
+    where: { userId, createdAt: { gte: start, lt: end } },
   });
+}
+
+async function countManualAiOpsThisMonth(userId: string, start: Date, end: Date, db = prisma): Promise<number> {
+  return db.manualAiRewriteUsage.count({
+    where: { userId, createdAt: { gte: start, lt: end } },
+  });
+}
+
+export async function getMonthlyEntitlementUsage(
+  userId: string,
+  now: Date = new Date(),
+  db: Pick<
+    typeof prisma,
+    'post' | 'botGenerationJob' | 'imageGenerationUsage' | 'manualAiRewriteUsage'
+  > = prisma,
+) {
+  const { start: periodStart, end: periodEnd } = getUtcMonthWindow(now);
+  const [postsThisMonth, batchGenerationsThisMonth, imagesGeneratedThisMonth, manualAiOperationsThisMonth] =
+    await Promise.all([
+      countPostsThisMonth(userId, periodStart, periodEnd, db as typeof prisma),
+      countBatchGenerationsThisMonth(userId, periodStart, periodEnd, db as typeof prisma),
+      countImagesThisMonth(userId, periodStart, periodEnd, db as typeof prisma),
+      countManualAiOpsThisMonth(userId, periodStart, periodEnd, db as typeof prisma),
+    ]);
+
+  return {
+    periodStart,
+    periodEnd,
+    postsThisMonth,
+    batchGenerationsThisMonth,
+    imagesGeneratedThisMonth,
+    manualAiOperationsThisMonth,
+  };
+}
+
+export function getMonthlyLimits(plan: SubscriptionPlan | Plan) {
+  return {
+    posts: plan.monthlyPostLimit ?? plan.dailyPostLimit * 30,
+    batchGenerations:
+      plan.monthlyBatchGenerationLimit ?? plan.dailyBatchGenerationLimit * 30,
+    images: plan.monthlyImageGenerationLimit ?? plan.dailyImageGenerationLimit * 30,
+    manualAiOperations:
+      plan.monthlyManualAiOperationLimit ?? Math.max(1, plan.maxRewritesPerPost * 150),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -169,80 +238,120 @@ async function isPrivileged(userId: string): Promise<boolean> {
  * Shape matches the GET /entitlements/me contract.
  */
 export async function getUserPlanEntitlements(userId: string): Promise<PlanEntitlements> {
-  const [postsToday, batchGenerationsToday, imagesGeneratedToday] = await Promise.all([
-    countPostsToday(userId),
-    countBatchGenerationsToday(userId),
-    countImagesToday(userId),
-  ]);
+  const {
+    periodStart,
+    periodEnd,
+    postsThisMonth,
+    batchGenerationsThisMonth,
+    imagesGeneratedThisMonth,
+    manualAiOperationsThisMonth,
+  } = await getMonthlyEntitlementUsage(userId);
 
-  const usage = { postsToday, batchGenerationsToday, imagesGeneratedToday };
+  const usage = {
+    postsThisMonth,
+    batchGenerationsThisMonth,
+    imagesGeneratedThisMonth,
+    manualAiOperationsThisMonth,
+    postsToday: postsThisMonth,
+    batchGenerationsToday: batchGenerationsThisMonth,
+    imagesGeneratedToday: imagesGeneratedThisMonth,
+  };
+  const responseBase = { usagePeriod: 'MONTHLY' as const, periodStart, periodEnd };
+  const makeRemaining = (limits: { posts: number; batchGenerations: number; images: number; manualAiOperations: number }) => ({
+    posts: Math.max(0, limits.posts - postsThisMonth),
+    batchGenerations: Math.max(0, limits.batchGenerations - batchGenerationsThisMonth),
+    images: Math.max(0, limits.images - imagesGeneratedThisMonth),
+    manualAiOperations: Math.max(0, limits.manualAiOperations - manualAiOperationsThisMonth),
+    postsToday: Math.max(0, limits.posts - postsThisMonth),
+    batchGenerationsToday: Math.max(0, limits.batchGenerations - batchGenerationsThisMonth),
+    imagesToday: Math.max(0, limits.images - imagesGeneratedThisMonth),
+  });
 
   // Privileged roles are never throttled -> report unlocked + unlimited.
   if (await isPrivileged(userId)) {
+    const limits = {
+      posts: UNLIMITED,
+      batchGenerations: UNLIMITED,
+      images: UNLIMITED,
+      manualAiOperations: UNLIMITED,
+    };
     return {
+      ...responseBase,
       hasActiveSubscription: false,
       planId: null,
       planName: null,
       fullDashboardUnlock: true,
       maxRewritesPerPost: UNLIMITED,
+      monthlyPostLimit: UNLIMITED,
+      monthlyBatchGenerationLimit: UNLIMITED,
+      monthlyImageGenerationLimit: UNLIMITED,
+      monthlyManualAiOperationLimit: UNLIMITED,
       dailyPostLimit: UNLIMITED,
       dailyBatchGenerationLimit: UNLIMITED,
       imageGenerationEnabled: true,
       dailyImageGenerationLimit: UNLIMITED,
       usage,
-      remaining: {
-        postsToday: UNLIMITED,
-        batchGenerationsToday: UNLIMITED,
-        imagesToday: UNLIMITED,
-      },
+      limits,
+      remaining: makeRemaining(limits),
     };
   }
 
   const sub = await getActiveSubscriptionWithPlan(userId);
 
   if (!sub || !sub.plan) {
+    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0 };
     // Locked/free fallback: no active subscription.
     return {
+      ...responseBase,
       hasActiveSubscription: false,
       planId: null,
       planName: null,
       ...LOCKED_LIMITS,
       usage,
-      remaining: { postsToday: 0, batchGenerationsToday: 0, imagesToday: 0 },
+      limits,
+      remaining: makeRemaining(limits),
     };
   }
 
   const plan = await getEffectiveEntitlementPlan(sub);
   if (!plan) {
+    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0 };
     return {
+      ...responseBase,
       hasActiveSubscription: false,
       planId: null,
       planName: null,
       ...LOCKED_LIMITS,
       usage,
-      remaining: { postsToday: 0, batchGenerationsToday: 0, imagesToday: 0 },
+      limits,
+      remaining: makeRemaining(limits),
     };
   }
   const imageGenerationEnabled = plan.imageGenerationEnabled;
-  // If image generation is disabled, effective daily limit is locked to 0.
-  const effectiveImageLimit = imageGenerationEnabled ? plan.dailyImageGenerationLimit : 0;
+  const resolvedLimits = getMonthlyLimits(plan);
+  const limits = {
+    ...resolvedLimits,
+    images: imageGenerationEnabled ? resolvedLimits.images : 0,
+  };
 
   return {
+    ...responseBase,
     hasActiveSubscription: true,
     planId: plan.id,
     planName: plan.name,
     fullDashboardUnlock: plan.fullDashboardUnlock,
     maxRewritesPerPost: plan.maxRewritesPerPost,
-    dailyPostLimit: plan.dailyPostLimit,
-    dailyBatchGenerationLimit: plan.dailyBatchGenerationLimit,
+    monthlyPostLimit: limits.posts,
+    monthlyBatchGenerationLimit: limits.batchGenerations,
+    monthlyImageGenerationLimit: limits.images,
+    monthlyManualAiOperationLimit: limits.manualAiOperations,
+    dailyPostLimit: limits.posts,
+    dailyBatchGenerationLimit: limits.batchGenerations,
     imageGenerationEnabled,
-    dailyImageGenerationLimit: plan.dailyImageGenerationLimit,
+    dailyImageGenerationLimit: limits.images,
     usage,
-    remaining: {
-      postsToday: Math.max(0, plan.dailyPostLimit - postsToday),
-      batchGenerationsToday: Math.max(0, plan.dailyBatchGenerationLimit - batchGenerationsToday),
-      imagesToday: Math.max(0, effectiveImageLimit - imagesGeneratedToday),
-    },
+    limits,
+    remaining: makeRemaining(limits),
   };
 }
 
@@ -337,34 +446,40 @@ export async function canPublishToLinkedIn(
   const plan = await getEffectiveEntitlementPlan(sub);
   if (!plan) return;
 
-  const published = await countPostsToday(userId);
-  if (published + additionalCount > plan.dailyPostLimit) {
+  const { start, end } = getUtcMonthWindow();
+  const published = await countPostsThisMonth(userId, start, end);
+  const monthlyLimit = getMonthlyLimits(plan).posts;
+  // TODO: Concurrent requests can both pass before either successful LinkedIn
+  // publish updates Post. Do not hold a transaction over the external API.
+  if (published + additionalCount > monthlyLimit) {
     throw new PlanLimitError(
       'DAILY_POST_LIMIT_REACHED',
-      'Daily post limit reached for your current plan.',
+      'Monthly post limit reached for your current plan.',
     );
   }
 }
 
-/** @deprecated Use canPublishToLinkedIn — daily limit is LinkedIn publishes only. */
+/** @deprecated Use canPublishToLinkedIn; quota applies only to LinkedIn publishes. */
 export const canCreateOrSchedulePost = canPublishToLinkedIn;
 
-// Daily batch generation gate.
+// Monthly batch generation gate.
 export async function canStartBatchGeneration(userId: string): Promise<void> {
   if (await isPrivileged(userId)) return;
 
   const ent = await getUserPlanEntitlements(userId);
-  if (ent.usage.batchGenerationsToday + 1 > ent.dailyBatchGenerationLimit) {
+  // TODO: The check and BotGenerationJob create should eventually reserve usage
+  // atomically so concurrent starts cannot exceed the monthly quota.
+  if (ent.usage.batchGenerationsThisMonth + 1 > ent.monthlyBatchGenerationLimit) {
     throw new PlanLimitError(
       'DAILY_BATCH_GENERATION_LIMIT_REACHED',
-      'Daily batch generation limit reached for your current plan.',
+      'Monthly batch generation limit reached for your current plan.',
     );
   }
 }
 
 /**
  * Image generation gate: plan must enable image generation and the user must be
- * under their daily image limit.
+ * under their monthly image limit.
  */
 export async function canUseImageGeneration(userId: string): Promise<void> {
   if (await isPrivileged(userId)) return;
@@ -376,10 +491,11 @@ export async function canUseImageGeneration(userId: string): Promise<void> {
       'Image generation is not included in your current plan.',
     );
   }
-  if (ent.usage.imagesGeneratedToday >= ent.dailyImageGenerationLimit) {
+  // TODO: Concurrent generations can both pass before success usage is recorded.
+  if (ent.usage.imagesGeneratedThisMonth >= ent.monthlyImageGenerationLimit) {
     throw new PlanLimitError(
       'DAILY_IMAGE_LIMIT_REACHED',
-      'Daily image generation limit reached for your current plan.',
+      'Monthly image generation limit reached for your current plan.',
     );
   }
 }
@@ -397,36 +513,29 @@ export async function isImageGenerationAllowed(userId: string): Promise<boolean>
   }
 }
 
-const MANUAL_AI_OPS_DAILY_MULTIPLIER = 5;
-
-async function countManualAiOpsToday(userId: string): Promise<number> {
-  return prisma.manualAiRewriteUsage.count({
-    where: { userId, createdAt: { gte: startOfUtcDay() } },
-  });
-}
-
 /**
- * Daily gate for unsaved manual-composer AI generate/rewrite operations.
+ * Monthly gate for unsaved manual-composer AI generate/rewrite operations.
  * Saved posts use per-post rewriteCount via canRewritePost().
  */
 export async function canUseManualAiOperation(userId: string): Promise<{
-  usedToday: number;
-  dailyLimit: number;
+  usedThisMonth: number;
+  monthlyLimit: number;
 }> {
   if (await isPrivileged(userId)) {
-    return { usedToday: 0, dailyLimit: UNLIMITED };
+    return { usedThisMonth: 0, monthlyLimit: UNLIMITED };
   }
 
   const ent = await getUserPlanEntitlements(userId);
-  const dailyLimit = Math.max(1, ent.maxRewritesPerPost * MANUAL_AI_OPS_DAILY_MULTIPLIER);
-  const usedToday = await countManualAiOpsToday(userId);
-  if (usedToday >= dailyLimit) {
+  const monthlyLimit = ent.monthlyManualAiOperationLimit;
+  const usedThisMonth = ent.usage.manualAiOperationsThisMonth;
+  // TODO: Concurrent operations can both pass before their success rows are recorded.
+  if (usedThisMonth >= monthlyLimit) {
     throw new PlanLimitError(
       'REWRITE_LIMIT_REACHED',
-      'Daily AI assistant limit reached for your current plan.',
+      'Monthly AI assistant limit reached for your current plan.',
     );
   }
-  return { usedToday, dailyLimit };
+  return { usedThisMonth, monthlyLimit };
 }
 
 /** Record a successful manual-composer AI operation (generate or unsaved rewrite). */

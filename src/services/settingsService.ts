@@ -35,7 +35,7 @@ export async function listPublicSettings(regionId?: string | null) {
     'auth.inviteOnly',
     'billing.promoCodesEnabled',
     'trial.days',
-    'trial.dailyPublishLimit',
+    'trial.monthlyPublishLimit',
     'ui.supportEmail',
   ];
 

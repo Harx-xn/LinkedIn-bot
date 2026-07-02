@@ -110,7 +110,7 @@ export function startScheduler() {
       try {
         await canPublishToLinkedIn(post.userId, 1);
       } catch (err: any) {
-        console.log(`Skipping post ${post.id}: ${err?.message || "Daily post limit reached"}`);
+        console.log(`Skipping post ${post.id}: ${err?.message || "Monthly post limit reached"}`);
         continue;
       }
 

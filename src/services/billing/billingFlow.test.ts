@@ -179,6 +179,10 @@ describe('billing me overview', () => {
       'dailyBatchGenerationLimit',
       'imageGenerationEnabled',
       'dailyImageGenerationLimit',
+      'monthlyPostLimit',
+      'monthlyBatchGenerationLimit',
+      'monthlyImageGenerationLimit',
+      'monthlyManualAiOperationLimit',
     ]) {
       assert.ok(billingMeSource.includes(field), `missing ${field}`);
     }

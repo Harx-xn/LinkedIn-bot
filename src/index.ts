@@ -23,6 +23,7 @@ import billingRouter from './routes/billing';
 import notificationsRouter from './routes/notifications';
 import entitlementsRouter from './routes/entitlements';
 import supportRouter from './routes/support';
+import dashboardRouter from './routes/dashboard';
 import { handleStripeWebhook } from './routes/stripeWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
@@ -89,6 +90,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/entitlements', entitlementsRouter);
 app.use('/api/support', supportRouter);
+app.use('/api/dashboard', dashboardRouter);
 // Backwards-compatible aliases (pre-/api mounts)
 app.use('/admin', adminRoutes);
 app.use('/regional-admin', regionRoutes);

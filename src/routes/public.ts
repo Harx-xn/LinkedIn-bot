@@ -48,6 +48,10 @@ router.get('/plans', async (req, res) => {
       dailyBatchGenerationLimit: true,
       imageGenerationEnabled: true,
       dailyImageGenerationLimit: true,
+      monthlyPostLimit: true,
+      monthlyBatchGenerationLimit: true,
+      monthlyImageGenerationLimit: true,
+      monthlyManualAiOperationLimit: true,
     },
     orderBy: {
       price: 'asc',

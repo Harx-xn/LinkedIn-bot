@@ -32,6 +32,11 @@ import {
   getCalendarDayUtcRange,
   getCalendarMonthUtcRange,
 } from '../services/calendarMonthService';
+import {
+  BulkPostDeleteValidationError,
+  bulkDeletePosts,
+  parseBulkDeletePostIds,
+} from '../services/bulkPostDeleteService';
 
 const router = Router();
 const imageService = new ImageService();
@@ -147,6 +152,30 @@ router.post('/review/confirm', requireAuth, async (req, res) => {
   }
 
   res.json({ updated: result.count });
+});
+
+router.post('/bulk-delete', requireAuth, async (req, res) => {
+  let postIds: string[];
+  try {
+    postIds = parseBulkDeletePostIds(req.body);
+  } catch (err) {
+    return res.status(400).json({
+      error: err instanceof Error ? err.message : 'Invalid bulk delete request',
+    });
+  }
+
+  try {
+    const result = await bulkDeletePosts(req.userId!, postIds);
+    return res.json(result);
+  } catch (err) {
+    if (err instanceof BulkPostDeleteValidationError) {
+      return res.status(400).json({
+        error: err.message,
+        invalidPosts: err.invalidPosts,
+      });
+    }
+    throw err;
+  }
 });
 
 const CALENDAR_POST_STATUSES = ['REVIEW', 'QUEUED', 'PUBLISHED', 'FAILED', 'DRAFT'] as const;

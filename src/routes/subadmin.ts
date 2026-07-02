@@ -47,7 +47,7 @@ const ALLOWED_PLATFORM_SETTINGS: Record<string, SettingRule> = {
   "auth.inviteOnly": { kind: "boolean" },
   "billing.promoCodesEnabled": { kind: "boolean" },
   "trial.days": { kind: "integer", min: 0, max: 365 },
-  "trial.dailyPublishLimit": { kind: "integer", min: 0, max: 100 },
+  "trial.monthlyPublishLimit": { kind: "integer", min: 0, max: 3_000 },
   "ui.supportEmail": { kind: "string", pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
 };
 
@@ -588,6 +588,12 @@ function validatePlanFeatureFields(body: Record<string, any>, partial: boolean) 
     "dailyBatchGenerationLimit",
     "dailyImageGenerationLimit",
   ] as const;
+  const nullableIntFields = [
+    "monthlyPostLimit",
+    "monthlyBatchGenerationLimit",
+    "monthlyImageGenerationLimit",
+    "monthlyManualAiOperationLimit",
+  ] as const;
 
   for (const key of boolFields) {
     if (body[key] === undefined) continue;
@@ -603,6 +609,19 @@ function validatePlanFeatureFields(body: Record<string, any>, partial: boolean) 
       typeof body[key] === "number" ? body[key] : Number(body[key]);
     if (!Number.isInteger(value) || value < 0) {
       throw new Error(`${key} must be an integer >= 0`);
+    }
+    data[key] = value;
+  }
+
+  for (const key of nullableIntFields) {
+    if (body[key] === undefined) continue;
+    if (body[key] === null) {
+      data[key] = null;
+      continue;
+    }
+    const value = typeof body[key] === "number" ? body[key] : Number(body[key]);
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`${key} must be null or an integer >= 0`);
     }
     data[key] = value;
   }

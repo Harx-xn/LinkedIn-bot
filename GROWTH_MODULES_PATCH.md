@@ -75,7 +75,7 @@ Because the same router is mounted at `/api/sub-admin`, regional admins can mana
 - `auth.inviteOnly` boolean
 - `billing.promoCodesEnabled` boolean
 - `trial.days` number
-- `trial.dailyPublishLimit` number
+- `trial.monthlyPublishLimit` number
 - `ui.supportEmail` string
 
 ## After applying

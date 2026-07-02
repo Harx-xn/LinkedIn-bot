@@ -289,6 +289,10 @@ model LinkedInAccount {
   userId                  String
   regionId                String?
   authorUrn               String
+  linkedInMemberId        String?
+  profileName             String?
+  profileEmail            String?
+  profileImageUrl         String?
   selectedOrganizationUrn String?
   accessToken             String
   refreshToken            String?
@@ -430,8 +434,12 @@ model Plan {
   maxRewritesPerPost        Int     @default(3)
   dailyPostLimit            Int     @default(5)
   dailyBatchGenerationLimit Int     @default(1)
+  monthlyPostLimit          Int?
+  monthlyBatchGenerationLimit Int?
   imageGenerationEnabled    Boolean @default(false)
   dailyImageGenerationLimit Int     @default(0)
+  monthlyImageGenerationLimit Int?
+  monthlyManualAiOperationLimit Int?
 
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)

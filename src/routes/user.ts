@@ -1,7 +1,7 @@
 import { Router, Request } from "express";
 import { prisma } from "../prismaClient";
 import { requireAuth } from "../middleware/auth";
-import { getEntitlement, publishedToday } from "../services/entitlementService";
+import { getEntitlement, publishedThisMonth } from "../services/entitlementService";
 import { isLinkedInAccountUsable } from "../services/linkedinService";
 
 type ThemePreference = "LIGHT" | "DARK";
@@ -54,7 +54,14 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
   const linkedinAccount = await prisma.linkedInAccount.findFirst({
     where: { userId },
     orderBy: { updatedAt: "desc" },
-    select: { id: true, accessToken: true, expiresAt: true },
+    select: {
+      accessToken: true,
+      expiresAt: true,
+      profileName: true,
+      profileEmail: true,
+      profileImageUrl: true,
+      linkedInMemberId: true,
+    },
   });
 
   const activeSubscription = await prisma.subscription.findFirst({
@@ -86,8 +93,8 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
 
   // Trial / subscription entitlement so the UI can show a banner and limits.
   const entitlement = await getEntitlement(userId);
-  const usedToday =
-    entitlement.status === "TRIAL" ? await publishedToday(userId) : 0;
+  const usedThisMonth =
+    entitlement.status === "TRIAL" ? await publishedThisMonth(userId) : 0;
 
   res.json({
     id: user.id,
@@ -117,8 +124,16 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
     ),
 
-    // connection token exists
+    // Safe LinkedIn connection state and display identity. Never expose tokens.
     linkedinConnected: isLinkedInAccountUsable(linkedinAccount),
+    linkedinAccount: linkedinAccount
+      ? {
+          name: linkedinAccount.profileName,
+          email: linkedinAccount.profileEmail,
+          avatarUrl: linkedinAccount.profileImageUrl,
+          memberId: linkedinAccount.linkedInMemberId,
+        }
+      : null,
 
     subscription: activeSubscription
       ? {
@@ -135,8 +150,9 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       status: entitlement.status, // ADMIN | SUBSCRIBED | TRIAL | EXPIRED
       trialEndsAt: entitlement.trialEndsAt,
       daysLeft: entitlement.daysLeft,
-      dailyPublishLimit: entitlement.dailyPublishLimit,
-      publishedToday: usedToday,
+      usagePeriod: "MONTHLY",
+      monthlyPublishLimit: entitlement.monthlyPublishLimit,
+      publishedThisMonth: usedThisMonth,
     },
   });
 });

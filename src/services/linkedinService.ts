@@ -97,24 +97,57 @@ export async function exchangeCodeForToken(
   };
 }
 
-async function getMemberUrn(accessToken: string): Promise<string> {
+type LinkedInUserInfo = {
+  memberId: string;
+  name: string | null;
+  givenName: string | null;
+  familyName: string | null;
+  email: string | null;
+  picture: string | null;
+};
+
+function optionalUserInfoString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function getLinkedInUserInfo(accessToken: string): Promise<LinkedInUserInfo> {
   const { data } = await axios.get('https://api.linkedin.com/v2/userinfo', {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  const memberId = data.sub;
-  return `urn:li:person:${memberId}`;
+  const memberId = optionalUserInfoString(data.sub);
+  if (!memberId) throw new Error('LinkedIn userinfo response did not include a member ID');
+
+  const givenName = optionalUserInfoString(data.given_name);
+  const familyName = optionalUserInfoString(data.family_name);
+  const fallbackName = [givenName, familyName].filter(Boolean).join(' ') || null;
+
+  return {
+    memberId,
+    name: optionalUserInfoString(data.name) ?? fallbackName,
+    givenName,
+    familyName,
+    email: optionalUserInfoString(data.email),
+    picture: optionalUserInfoString(data.picture),
+  };
 }
 
 export async function saveLinkedInAccountForUser(userId: string, accessToken: string, expiresIn: number) {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + expiresIn * 1000);
-  const authorUrn = await getMemberUrn(accessToken);
+  const profile = await getLinkedInUserInfo(accessToken);
+  const authorUrn = `urn:li:person:${profile.memberId}`;
+  const profileData = {
+    linkedInMemberId: profile.memberId,
+    profileName: profile.name,
+    profileEmail: profile.email,
+    profileImageUrl: profile.picture,
+  };
 
   const existing = await prisma.linkedInAccount.findFirst({ where: { userId } });
   if (existing) {
     const account = await prisma.linkedInAccount.update({
       where: { id: existing.id },
-      data: { accessToken, expiresAt, authorUrn }
+      data: { accessToken, expiresAt, authorUrn, ...profileData }
     });
     await repairGoogleSheetPostsAfterLinkedInConnect(userId, account.id);
     return account;
@@ -124,7 +157,8 @@ export async function saveLinkedInAccountForUser(userId: string, accessToken: st
       userId,
       accessToken,
       expiresAt,
-      authorUrn
+      authorUrn,
+      ...profileData,
     }
   });
   await repairGoogleSheetPostsAfterLinkedInConnect(userId, account.id);

@@ -233,7 +233,7 @@ export async function scheduleManualPost(userId: string, postId: string, schedul
 
   const scheduledAt = parseFutureDate(scheduledAtRaw);
   await ensureCanPublishOrSchedule(userId);
-  // Scheduling does not publish to LinkedIn; daily limit is checked at publish time.
+  // Scheduling does not publish to LinkedIn; monthly quota is checked at publish time.
 
   const linkedinAccountId = post.linkedinAccountId ?? (await getLinkedInAccountId(userId));
 
