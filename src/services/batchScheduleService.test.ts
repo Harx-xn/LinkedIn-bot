@@ -12,8 +12,31 @@ import {
   resolveBatchStartDate,
   scheduleSlotsMatch,
   scheduleWindowEnd,
+  selectBatchGenerationSlots,
   serializePostingSchedule,
 } from './batchScheduleService';
+
+describe('selectBatchGenerationSlots', () => {
+  const slots = [
+    new Date('2026-07-06T09:00:00.000Z'),
+    new Date('2026-07-07T09:00:00.000Z'),
+  ];
+
+  it('allows a confirmed partial batch when some slots are occupied', () => {
+    assert.deepEqual(selectBatchGenerationSlots(slots, 3, 7, true), slots);
+  });
+
+  it('still rejects an unconfirmed shortage or a schedule with no free slots', () => {
+    assert.throws(
+      () => selectBatchGenerationSlots(slots, 3, 7),
+      BatchScheduleCapacityError,
+    );
+    assert.throws(
+      () => selectBatchGenerationSlots([], 3, 7, true),
+      BatchScheduleCapacityError,
+    );
+  });
+});
 
 describe('resolveBatchStartDate', () => {
   const now = new Date('2026-06-27T08:00:00.000Z');

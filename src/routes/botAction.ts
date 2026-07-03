@@ -26,6 +26,7 @@
     postsPerWeek: number;
     startDate: string;
     batchPostingSchedule: unknown;
+    allowPartialSchedule?: boolean;
     previewId?: string;
   };
 
@@ -49,7 +50,13 @@
   });
 
   router.post("/generate", requireAuth, async (req, res) => {
-    const { daysWindow, postsPerWeek, startDate, batchPostingSchedule } =
+    const {
+      daysWindow,
+      postsPerWeek,
+      startDate,
+      batchPostingSchedule,
+      allowPartialSchedule,
+    } =
       req.body as BotGenerateRequestBody;
     if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
     if (!startDate) return res.status(400).json({ error: "Missing startDate" });
@@ -120,6 +127,7 @@
         daysWindow: parsedDaysWindow,
         startDate,
         schedule,
+        allowPartialSchedule: allowPartialSchedule === true,
       });
       resolvedSlots = resolved.slots;
     } catch (err) {

@@ -499,3 +499,23 @@ export function buildBatchScheduleSlots(params: {
 export function calculateBatchSlotCount(postsPerWeek: number, daysWindow: number): number {
   return Math.max(1, Math.ceil((postsPerWeek / 7) * daysWindow));
 }
+
+export function selectBatchGenerationSlots(
+  availableSlots: Date[],
+  requestedCount: number,
+  daysWindow: number,
+  allowPartialSchedule: boolean = false,
+): Date[] {
+  if (
+    availableSlots.length === 0 ||
+    (availableSlots.length < requestedCount && !allowPartialSchedule)
+  ) {
+    throw new BatchScheduleCapacityError(
+      requestedCount,
+      availableSlots.length,
+      daysWindow,
+    );
+  }
+
+  return availableSlots.slice(0, requestedCount);
+}
