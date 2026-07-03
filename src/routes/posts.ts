@@ -397,30 +397,13 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
   // Image regeneration is secondary to the text rewrite. Only regenerate when
   // the plan allows it and the user is under their daily image limit; otherwise
   // keep the existing image so the text rewrite is never blocked.
-  let mediaUrl = post.mediaUrl;
-  if (await isImageGenerationAllowed(req.userId!)) {
-    try {
-      mediaUrl = await imageService.createTopicImage(
-        normalized.headline,
-        voice.backgroundImageUrl,
-        {
-          headline: normalized.headline,
-          subheadline: normalized.subheadline,
-          bulletPoints: normalized.bulletPoints,
-        },
-      );
-      await recordImageGeneration(req.userId!);
-    } catch (e) {
-      console.error('Rewrite image generation failed:', e);
-    }
-  }
+ const mediaUrl = post.mediaUrl;
 
   const updated = await prisma.post.update({
     where: { id: post.id },
     data: {
       content: normalized.content,
       hashtags: normalized.hashtags || post.hashtags,
-      mediaUrl,
       rewriteCount: { increment: 1 },
       errorMessage: null,
     },

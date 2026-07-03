@@ -551,6 +551,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     description: string = '',
   ): Promise<GeneratedPostContent> {
     const author: AuthorContext = { description, tone };
+    console.log("rewriting post")
     const prompt = `${GHOSTWRITER_SYSTEM}
 ${buildAuthorBlock(author)}
 
