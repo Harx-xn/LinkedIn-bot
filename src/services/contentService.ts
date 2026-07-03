@@ -557,14 +557,20 @@ ${buildAuthorBlock(author)}
 CURRENT POST:
 ${currentContent}
 
-USER SUGGESTIONS:
+MANDATORY USER REWRITE INSTRUCTIONS:
+"""
 ${suggestions || 'Improve clarity, specificity, and technical accuracy while keeping the same topic.'}
+"""
 
 Rules:
-- Apply suggestions directly.
+- The mandatory user rewrite instructions above are the highest priority for this rewrite.
+- Follow every concrete instruction from the user.
+- Do not ignore, soften, reinterpret, or only partially apply the user instructions.
+- If the user asks for a specific structure, length, tone, format, hook, CTA, or wording style, obey it.
+- Keep the same core topic unless the user explicitly asks to change it.
 - Do not invent unverifiable facts or unsupported first-person claims.
 - Contact/website lines are controlled by app settings; do not add or preserve them unless suggestions explicitly ask.
-
+- Before returning JSON, verify that the rewritten post clearly satisfies the mandatory user instructions.
 ${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
 ${LANGUAGE_RULES}
