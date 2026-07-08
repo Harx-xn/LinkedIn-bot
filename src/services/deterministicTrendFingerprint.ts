@@ -1,4 +1,4 @@
-import type { TopicCluster, TopicFingerprint, TrendCandidate } from './generationTypes';
+import type { TopicFingerprint, TrendCandidate } from './generationTypes';
 import { classifyTopicCluster } from './topicFingerprintService';
 
 const STOP_WORDS = new Set([

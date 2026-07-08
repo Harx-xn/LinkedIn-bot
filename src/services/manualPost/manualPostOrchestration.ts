@@ -12,7 +12,6 @@ import {
   MUTABLE_STATUSES,
 } from '../manualPostService';
 import {
-  type ContentProvider,
   MAX_REWRITE_SUGGESTIONS_LENGTH,
   parseContentProvider,
   validateGenerateInput,

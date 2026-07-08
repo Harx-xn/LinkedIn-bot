@@ -23,7 +23,6 @@ import {
   canPublishToLinkedIn,
   canRewritePost,
   canUseImageGeneration,
-  isImageGenerationAllowed,
   recordImageGeneration,
 } from '../services/planEntitlementService';
 import { safeUpdateTopicHistoryStatus } from '../services/topicHistoryService';
@@ -397,8 +396,6 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
   // Image regeneration is secondary to the text rewrite. Only regenerate when
   // the plan allows it and the user is under their daily image limit; otherwise
   // keep the existing image so the text rewrite is never blocked.
- const mediaUrl = post.mediaUrl;
-
   const updated = await prisma.post.update({
     where: { id: post.id },
     data: {

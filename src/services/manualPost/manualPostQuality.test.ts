@@ -248,14 +248,14 @@ describe('manual finalization', () => {
         description: 'SaaS founder',
         niches: [],
         customLinks: null,
-        contactInfo: 'Email me at hello@veyra.test',
-        websiteUrl: 'https://veyra.test',
+        contactInfo: 'Email me at hello@veyrais.test',
+        websiteUrl: 'https://veyrais.test',
         includeContactInfo: true,
         includeWebsiteLink: true,
       },
     });
-    assert.ok(finalized.content.includes('hello@veyra.test'));
-    assert.ok(finalized.content.includes('https://veyra.test'));
+    assert.ok(finalized.content.includes('hello@veyrais.test'));
+    assert.ok(finalized.content.includes('https://veyrais.test'));
     assert.ok(finalized.content.length <= MANUAL_LINKEDIN_CHAR_LIMIT);
   });
 

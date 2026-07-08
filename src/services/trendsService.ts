@@ -189,7 +189,6 @@ export class TrendsService {
 
     const previewQueries = selectPreviewQueries(plan, cfg.maxQueriesPerNiche);
     const mediumTags = getMediumTagsForPlan(plan);
-    const domain = plan.domain ?? niche;
 
     let results: Trend[] = [];
     const exclusionsList = plan.exclusions ?? exclusions;
@@ -273,7 +272,6 @@ export class TrendsService {
       customFeeds = [],
       customLinks = [],
       customRedditFeeds = [],
-      limit = 10,
       expansionPlan,
     } = input;
 

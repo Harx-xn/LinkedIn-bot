@@ -69,7 +69,7 @@ function isTechDomain(domain: string): boolean {
 }
 
 export function buildEvergreenTopicsForPlan(
-  author: AuthorContext,
+  _author: AuthorContext,
   expansionPlan: NicheExpansionPlan,
   count: number,
   usedClusters: Set<string>,

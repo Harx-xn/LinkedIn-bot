@@ -209,7 +209,7 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
     include: { plan: true },
   });
 
-  const { user, plan, regionId, stripePriceId, meta } = await resolveUserAndPlan({
+  const { user, plan, regionId, meta } = await resolveUserAndPlan({
     stripeSub,
     expectedRegionId,
     currentPlanStripePriceId: existing?.plan.stripePriceId ?? null,

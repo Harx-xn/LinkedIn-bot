@@ -98,7 +98,7 @@ export function buildFallbackFingerprint(trend: TrendCandidate): TopicFingerprin
 export function fingerprintFromBody(
   body: string,
   sourceTitle?: string,
-  angle?: string,
+  _angle?: string,
 ): TopicFingerprint {
   const text = `${sourceTitle ?? ''} ${body}`.slice(0, 2000);
   const normalizedTopic = normalizeTrendTitle(sourceTitle ?? body.slice(0, 120));

@@ -578,7 +578,7 @@ router.get("/plans", async (req, res) => {
 
 // Validate the plan feature-toggle / usage-limit fields. `partial` mode (PATCH)
 // only validates the keys that are present; create mode requires the core fields.
-function validatePlanFeatureFields(body: Record<string, any>, partial: boolean) {
+function validatePlanFeatureFields(body: Record<string, any>, _partial: boolean) {
   const data: any = {};
 
   const boolFields = ["fullDashboardUnlock", "imageGenerationEnabled"] as const;

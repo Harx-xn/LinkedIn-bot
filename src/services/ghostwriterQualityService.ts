@@ -59,7 +59,7 @@ export function hasSpecificity(text: string): boolean {
 export function evaluatePostQuality(
   post: GeneratedPostContent,
   author: AuthorContext,
-  batchPlans: BatchPostPlan[],
+  _batchPlans: BatchPostPlan[],
   acceptedBodies: string[],
   plan?: BatchPostPlan,
 ): PostQualityResult {

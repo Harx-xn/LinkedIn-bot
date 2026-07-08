@@ -21,9 +21,9 @@ const AUTHOR = {
 };
 
 describe('first-person claims', () => {
-  it('detects In building Veyra, I encountered', () => {
+  it('detects In building Veyrais, I encountered', () => {
     const flags = detectUnsupportedFirstPersonClaims(
-      'In building Veyra, I encountered a scheduling issue with duplicate jobs.',
+      'In building Veyrais, I encountered a scheduling issue with duplicate jobs.',
       AUTHOR.description,
     );
     assert.ok(flags.length > 0);
@@ -221,7 +221,7 @@ describe('regression fixtures', () => {
         headline: 'Scheduling',
         subheadline: '',
         bulletPoints: [],
-        body: 'In building Veyra, I encountered a scheduling issue. I set up a job queue and I was able to fix it by lowering concurrency.',
+        body: 'In building Veyrais, I encountered a scheduling issue. I set up a job queue and I was able to fix it by lowering concurrency.',
         hashtags: '#SaaS',
       },
       AUTHOR,
