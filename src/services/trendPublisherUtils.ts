@@ -70,7 +70,6 @@ export function scoreDiscoverySourceQuality(
   if (ds.includes('linkedin')) return TREND_SOURCE_SCORES.linkedInPost;
   if (ds.includes('google news')) return TREND_SOURCE_SCORES.unknownPublisher;
   if (ds.includes('rss')) return TREND_SOURCE_SCORES.customTrustedRss;
-  if (ds.includes('custom')) return TREND_SOURCE_SCORES.customLink;
   if (ds.includes('quora')) return TREND_SOURCE_SCORES.quora;
   return TREND_SOURCE_SCORES.unknownPublisher;
 }

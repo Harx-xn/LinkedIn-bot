@@ -78,7 +78,6 @@ describe('manual post V2 parsing and formatting', () => {
         tone: 'Professional',
         description: 'SaaS founder',
         niches: [],
-        customLinks: null,
         contactInfo: 'Email me at hello@veyrais.test',
         websiteUrl: 'https://veyrais.test',
         includeContactInfo: true,

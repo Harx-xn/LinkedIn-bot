@@ -63,6 +63,14 @@ export type TrendCandidate = {
   keyPoints?: string[];
   contentType?: TrendContentType;
   fingerprint?: TopicFingerprint;
+  // Runtime strategy metadata for previews, selection, and generation prompts.
+  // GeneratedTopicHistory persists normalized topic/cluster/core claim/angle only.
+  matchedPillar?: string;
+  suggestedAngle?: string;
+  audienceRelevance?: string;
+  strategyScore?: number;
+  strategyReasons?: string[];
+  strategyRiskFlags?: string[];
 };
 
 export type NicheExpansionPlan = {
@@ -101,6 +109,9 @@ export type RankedTrendCandidate = {
   totalScore: number;
   novelty: NoveltyEvaluation;
   contentType?: TrendContentType;
+  matchedPillar?: string;
+  suggestedAngle?: string;
+  audienceRelevance?: string;
 };
 
 export type TrendPoolStats = {
@@ -135,6 +146,9 @@ export type PreviewTrendItem = {
   noveltyScore?: number;
   contentType?: string;
   cluster?: string;
+  matchedPillar?: string;
+  suggestedAngle?: string;
+  audienceRelevance?: string;
 };
 
 export type PreviewTrendsResponse = {
@@ -199,6 +213,7 @@ export type AuthorContext = {
   tone: string;
   niches?: string[];
   targetAudience?: string[];
+  strategy?: import('./botStrategyService').EffectiveBotStrategy;
 };
 
 export type PostAngle =
@@ -243,6 +258,9 @@ export type BatchPostPlan = {
   normalizedTopic?: string;
   coreClaim?: string;
   mechanismFocus?: string[];
+  matchedPillar?: string;
+  suggestedAngle?: string;
+  audienceRelevance?: string;
 };
 
 export type ImageContentMode =

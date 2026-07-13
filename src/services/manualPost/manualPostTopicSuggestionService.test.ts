@@ -8,6 +8,7 @@ import {
   isOutdatedTopic,
   sanitizeTopicSuggestions,
 } from './manualPostTopicSuggestionService';
+import { buildEffectiveBotStrategy } from '../botStrategyService';
 
 const voiceFixture = {
   tone: 'Professional',
@@ -15,7 +16,6 @@ const voiceFixture = {
   niches: ['SaaS', 'productivity'],
   websiteUrl: 'https://example.com',
   contactInfo: null,
-  customLinks: null,
   includeContactInfo: false,
   includeWebsiteLink: false,
 };
@@ -96,5 +96,47 @@ describe('manualPostTopicSuggestionService', () => {
     assert.equal(fallbacks.length, 3);
     assert.ok(fallbacks[0].title.includes('SaaS'));
     assert.ok(fallbacks[0].description.length > 0);
+  });
+
+  it('adds strategy-aware metadata to topic suggestions', () => {
+    const strategy = buildEffectiveBotStrategy({
+      description: 'I help founders improve activation.',
+      tone: 'Direct',
+      niches: JSON.stringify(['SaaS']),
+      contentPillars: {
+        primaryPillars: [
+          {
+            name: 'Activation systems',
+            audienceRelevance: 'Helps founders reduce onboarding drop-off',
+            trendKeywords: ['user onboarding'],
+            exampleAngles: ['Audit the first-week handoff'],
+          },
+        ],
+      },
+      targetAudience: {
+        primaryAudience: 'B2B SaaS founders',
+        painPoints: ['onboarding drop-off'],
+      },
+    });
+
+    const topics = finalizeTopicSuggestions(
+      [
+        {
+          title: 'Why user onboarding fails after the first week',
+          description: 'A concrete activation systems post for founders.',
+          reason: 'Specific and useful.',
+        },
+      ],
+      voiceFixture,
+      ['google'],
+      1,
+      strategy,
+    );
+
+    assert.equal(topics[0].matchedPillar, 'Activation systems');
+    assert.equal(topics[0].targetAudience, 'B2B SaaS founders');
+    assert.equal(topics[0].contentGoal, 'authority');
+    assert.equal(typeof topics[0].relevanceScore, 'number');
+    assert.ok(topics[0].suggestedAngle);
   });
 });

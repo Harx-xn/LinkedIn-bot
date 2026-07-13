@@ -30,6 +30,8 @@ import {
   buildPreviewScoreInput,
   calculatePreviewScore,
 } from './trendPreviewScore';
+import type { EffectiveBotStrategy } from './botStrategyService';
+import { scoreTrendForStrategy } from './botStrategyTrendService';
 
 export type TrendSelectionStats = TrendPoolStats & {
   openAiCalls?: number;
@@ -119,17 +121,37 @@ function rankGenerationCandidate(
     + depth * 0.15
     + novelty.score * 0.25;
 
+  const strategyScore = author.strategy
+    ? scoreTrendForStrategy(trend, author.strategy, { recentHistory: history, fingerprint })
+    : null;
+  const adjustedTotalScore = strategyScore
+    ? totalScore * 0.65 + strategyScore.score * 0.35
+    : totalScore;
+
   return {
-    trend: { ...trend, fingerprint, contentType: classifyTrendContentType(trend) },
+    trend: {
+      ...trend,
+      fingerprint,
+      contentType: classifyTrendContentType(trend),
+      matchedPillar: strategyScore?.matchedPillar,
+      suggestedAngle: strategyScore?.suggestedAngle,
+      audienceRelevance: strategyScore?.audienceRelevance,
+      strategyScore: strategyScore?.score,
+      strategyReasons: strategyScore?.reasons,
+      strategyRiskFlags: strategyScore?.riskFlags,
+    },
     fingerprint,
     relevanceScore: relevance,
     sourceQualityScore: sourceQ,
     recencyScore: recency,
     technicalDepthScore: depth,
     noveltyScore: novelty.score,
-    totalScore,
+    totalScore: adjustedTotalScore,
     novelty,
     contentType: classifyTrendContentType(trend),
+    matchedPillar: strategyScore?.matchedPillar,
+    suggestedAngle: strategyScore?.suggestedAngle,
+    audienceRelevance: strategyScore?.audienceRelevance,
   };
 }
 
@@ -142,18 +164,37 @@ function rankPreviewCandidate(
   const relevance = relevanceScore(trend, author, plan);
   const previewInput = buildPreviewScoreInput(trend, relevance);
   const totalScore = calculatePreviewScore(previewInput);
+  const strategyScore = author.strategy
+    ? scoreTrendForStrategy(trend, author.strategy, { fingerprint })
+    : null;
+  const adjustedTotalScore = strategyScore
+    ? totalScore * 0.65 + strategyScore.score * 0.35
+    : totalScore;
 
   return {
-    trend: { ...trend, fingerprint, contentType: classifyTrendContentType(trend) },
+    trend: {
+      ...trend,
+      fingerprint,
+      contentType: classifyTrendContentType(trend),
+      matchedPillar: strategyScore?.matchedPillar,
+      suggestedAngle: strategyScore?.suggestedAngle,
+      audienceRelevance: strategyScore?.audienceRelevance,
+      strategyScore: strategyScore?.score,
+      strategyReasons: strategyScore?.reasons,
+      strategyRiskFlags: strategyScore?.riskFlags,
+    },
     fingerprint,
     relevanceScore: relevance,
     sourceQualityScore: previewInput.sourceQualityScore,
     recencyScore: previewInput.recencyScore,
     technicalDepthScore: technicalDepthScore(trend.topic),
     noveltyScore: 100,
-    totalScore,
+    totalScore: adjustedTotalScore,
     novelty: { allowed: true, score: 100, reasons: [] },
     contentType: classifyTrendContentType(trend),
+    matchedPillar: strategyScore?.matchedPillar,
+    suggestedAngle: strategyScore?.suggestedAngle,
+    audienceRelevance: strategyScore?.audienceRelevance,
   };
 }
 
@@ -179,6 +220,7 @@ export async function processTrendCandidates(params: {
   history?: TopicHistoryRow[];
   mode?: 'preview' | 'batch' | 'generation';
   pipelineMode?: TrendPipelineMode;
+  strategy?: EffectiveBotStrategy;
 }): Promise<{ ranked: RankedTrendCandidate[]; selected: RankedTrendCandidate[]; stats: TrendSelectionStats }> {
   const pipelineMode = params.pipelineMode ?? toPipelineMode(params.mode ?? 'generation');
   const cfg = getPipelineConfig(pipelineMode);
@@ -200,6 +242,17 @@ export async function processTrendCandidates(params: {
     : nearDedupeTrends(afterExact, nearThreshold);
   let candidates = nearResult.kept;
   const nearDuplicatesRemoved = nearResult.removed;
+  const strategy = params.strategy ?? params.author.strategy;
+  let rejectedByStrategy = 0;
+
+  if (strategy && pipelineMode === 'preview') {
+    candidates = candidates.filter((candidate) => {
+      const score = scoreTrendForStrategy(candidate, strategy);
+      if (score.accepted) return true;
+      rejectedByStrategy++;
+      return false;
+    });
+  }
 
   const preRanked = candidates
     .map((t) => ({
@@ -226,9 +279,18 @@ export async function processTrendCandidates(params: {
     const history = params.history ?? (cfg.useHistoryMatching
       ? await loadRecentTopicHistory(params.userId)
       : []);
-
     const fingerprintLimit = cfg.maxFingerprintCandidates;
     const toFingerprint = preRanked.slice(0, fingerprintLimit);
+    if (strategy) {
+      const beforeStrategy = toFingerprint.length;
+      const strategyAccepted = toFingerprint.filter((candidate) => {
+        const score = scoreTrendForStrategy(candidate, strategy, { recentHistory: history });
+        return score.accepted;
+      });
+      rejectedByStrategy += beforeStrategy - strategyAccepted.length;
+      toFingerprint.length = 0;
+      toFingerprint.push(...strategyAccepted);
+    }
 
     if (cfg.useAiFingerprints) {
       await params.fingerprintService.fingerprintTrends(
@@ -278,7 +340,7 @@ export async function processTrendCandidates(params: {
     selected,
     stats: {
       rawCount: params.rawTrends.length,
-      rejectedLowValue,
+      rejectedLowValue: rejectedLowValue + rejectedByStrategy,
       rejectedByExclusions,
       exactDuplicatesRemoved,
       nearDuplicatesRemoved,
@@ -296,6 +358,7 @@ export async function upgradePreviewPoolForGeneration(params: {
   userId: string;
   previewCandidates: RankedTrendCandidate[];
   author: AuthorContext;
+  strategy?: EffectiveBotStrategy;
   plans: NicheExpansionPlan[];
   slotCount: number;
   fingerprintService: TopicFingerprintService;

@@ -17,9 +17,6 @@ const store = new Map<string, StoredTrendPreview>();
 export type TrendConfigHashInput = {
   niches: string[];
   sources: string[];
-  customFeeds: string[];
-  customLinks: string[];
-  customRedditFeeds: string[];
 };
 
 export function buildTrendConfigHash(input: TrendConfigHashInput): string {

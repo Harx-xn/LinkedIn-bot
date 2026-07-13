@@ -43,6 +43,13 @@ function toAuthorContext(voice: Awaited<ReturnType<typeof getBotVoice>>) {
     description: voice.description,
     tone: voice.tone,
     niches: voice.niches,
+    targetAudience: voice.strategy
+      ? [
+          voice.strategy.targetAudience.primaryAudience,
+          ...(voice.strategy.targetAudience.secondaryAudiences ?? []),
+        ].filter(Boolean)
+      : undefined,
+    strategy: voice.strategy,
   };
 }
 

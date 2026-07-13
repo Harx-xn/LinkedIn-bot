@@ -7,7 +7,6 @@ export const TREND_SOURCE_SCORES = {
   medium: 52,
   linkedInPost: 48,
   reddit: 42,
-  customLink: 50,
   quora: 45,
 } as const;
 

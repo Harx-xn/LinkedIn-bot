@@ -320,6 +320,8 @@ Requirements:
 - Do not invent statistics, customers, incidents, or personal experiences.
 - Avoid excessive one-line fragments and unnecessary emojis.
 - Avoid repetitive generic AI phrasing.
+- Target 2,000 to 2,800 characters when the topic supports it.
+- Do not use Markdown bold markers or double asterisks.
 - Keep the final formatted post within LinkedIn's 3,000-character limit.
 - Use hashtags only when they add value.
 
@@ -549,8 +551,9 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     tone: string = 'Professional',
     description: string = '',
+    strategy?: AuthorContext['strategy'],
   ): Promise<GeneratedPostContent> {
-    const author: AuthorContext = { description, tone };
+    const author: AuthorContext = { description, tone, strategy };
     console.log("rewriting post")
     const prompt = `${GHOSTWRITER_SYSTEM}
 ${buildAuthorBlock(author)}

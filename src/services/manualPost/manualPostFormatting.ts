@@ -66,7 +66,6 @@ export function finalizeManualGeneratedPostV2(
       contactInfo: options.voice.contactInfo,
       websiteUrl: options.voice.websiteUrl,
       description: options.voice.description,
-      customLinks: options.voice.customLinks,
     },
   );
 

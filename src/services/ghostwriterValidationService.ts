@@ -447,8 +447,16 @@ export function validateFormattedBody(
   const tagCount = hashtags.split(/\s+/).filter((t) => t.startsWith('#')).length;
   if (tagCount > 3) issues.push({ code: 'too_many_hashtags_after_format', severity: 'error' });
 
-  if (body.length < 100 || body.length > 2000) {
-    issues.push({ code: 'body_length_out_of_bounds', severity: 'warning' });
+  if (body.includes('**')) {
+    issues.push({ code: 'markdown_bold_markers', severity: 'error' });
+  }
+
+  if (body.length < 2000) {
+    issues.push({ code: 'body_below_target_length', severity: 'warning' });
+  }
+
+  if (body.length > 3000) {
+    issues.push({ code: 'body_above_linkedin_limit', severity: 'error' });
   }
 
   const paragraphs = body.split(/\n\n+/);

@@ -1,4 +1,6 @@
 import { prisma } from '../prismaClient';
+import { buildEffectiveBotStrategy } from './botStrategyService';
+import { getStrategyNiches, hasStrategyGenerationContext } from './botStrategyTrendService';
 
 export const GHOSTWRITER_CONFIG_REQUIRED_CODE =
   'GHOSTWRITER_CONFIG_REQUIRED';
@@ -33,12 +35,12 @@ export function parseSavedGhostwriterNiches(
 export async function getSavedGhostwriterRequirements(userId: string) {
   const config = await prisma.botConfig.findUnique({
     where: { userId },
-    select: { description: true, niches: true },
   });
+  const strategy = buildEffectiveBotStrategy(config);
 
   return {
-    hasDescription: hasGhostwriterDescription(config?.description),
-    niches: parseSavedGhostwriterNiches(config?.niches),
+    hasDescription: hasStrategyGenerationContext(strategy),
+    niches: getStrategyNiches(strategy),
   };
 }
 
@@ -47,8 +49,8 @@ export async function hasSavedGhostwriterDescription(
 ): Promise<boolean> {
   const config = await prisma.botConfig.findUnique({
     where: { userId },
-    select: { description: true },
   });
+  const strategy = buildEffectiveBotStrategy(config);
 
-  return hasGhostwriterDescription(config?.description);
+  return hasStrategyGenerationContext(strategy);
 }

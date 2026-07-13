@@ -31,9 +31,12 @@ import { fingerprintFromBody } from "./topicFingerprintService";
 import {
   GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
   GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
-  hasGhostwriterDescription,
-  parseSavedGhostwriterNiches,
 } from "./ghostwriterConfigRequirementService";
+import { buildEffectiveBotStrategy } from "./botStrategyService";
+import {
+  getStrategyNiches,
+  hasStrategyGenerationContext,
+} from "./botStrategyTrendService";
 
 function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undefined {
   if (!websiteUrl?.trim()) return undefined;
@@ -94,14 +97,15 @@ export class TrendingBotService {
     for (const config of configs) {
       console.log(`Processing config for user ${config.userId}`);
 
-      if (!hasGhostwriterDescription(config.description)) {
+      const strategy = buildEffectiveBotStrategy(config);
+      if (!hasStrategyGenerationContext(strategy)) {
         console.warn("Skipping trend fetch: ghostwriter description is missing", {
           userId: config.userId,
         });
         continue;
       }
 
-      const niches = parseSavedGhostwriterNiches(config.niches);
+      const niches = getStrategyNiches(strategy);
       if (niches.length === 0) {
         console.warn("Skipping trend fetch: no saved niches", {
           userId: config.userId,
@@ -118,37 +122,7 @@ export class TrendingBotService {
         console.log(`--- Processing Niche: ${niche} ---`);
         try {
           const sources = parseTrendSources(config.sources);
-          let customRssFeeds: string[] = [];
-          try {
-            customRssFeeds = config.customRssFeeds
-              ? JSON.parse(config.customRssFeeds)
-              : [];
-          } catch {}
-          let customLinks: string[] = [];
-          try {
-            customLinks = (config as any).customLinks
-              ? JSON.parse((config as any).customLinks)
-              : [];
-          } catch {}
-          let customRedditFeeds: string[] = [];
-          try {
-            customRedditFeeds = (config as any).customRedditFeeds
-              ? JSON.parse((config as any).customRedditFeeds)
-              : [];
-          } catch {}
-
-          const trends = await this.trendsService.fetchTrends(
-            niche,
-            sources,
-            customRssFeeds,
-            customLinks,
-            customRedditFeeds,
-          );
-          if (trends.length === 0) {
-            console.log(`No trends found for ${niche}`);
-            continue;
-          }
-
+    
           const botConfig: GhostwriterBotConfig = {
             tone: config.tone,
             description: config.description,
@@ -158,17 +132,22 @@ export class TrendingBotService {
             imageInstructions: config.imageInstructions,
             imageStyle: config.imageStyle,
             imageAspectRatio: config.imageAspectRatio,
-            customLinks: config.customLinks,
             contactInfo: config.contactInfo,
             websiteUrl: config.websiteUrl,
             includeContactInfo: config.includeContactInfo,
             includeWebsiteLink: config.includeWebsiteLink,
+            strategy,
           };
 
           const author = {
-            description: config.description || '',
-            tone: config.tone || 'Professional',
+            description: strategy.profilePositioning.positioningStatement || config.description || '',
+            tone: strategy.writingStyle.tone[0] || config.tone || 'Professional',
             niches: [niche],
+            targetAudience: [
+              strategy.targetAudience.primaryAudience,
+              ...(strategy.targetAudience.secondaryAudiences ?? []),
+            ].filter(Boolean),
+            strategy,
           };
 
           const openaiKey = decryptSecret(
@@ -183,10 +162,8 @@ export class TrendingBotService {
             niches: [niche],
             author,
             sources,
-            customFeeds: customRssFeeds,
-            customLinks,
-            customRedditFeeds,
             slotCount: 1,
+            strategy,
           });
           const selectedRanked = pool.ranked[0];
           const selectedTrend: Trend | null = selectedRanked
@@ -289,7 +266,8 @@ export class TrendingBotService {
     if (!config) {
       throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
     }
-    if (!hasGhostwriterDescription(config.description)) {
+    const strategy = buildEffectiveBotStrategy(config);
+    if (!hasStrategyGenerationContext(strategy)) {
       throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
     }
 
@@ -302,31 +280,13 @@ export class TrendingBotService {
 
     const contentService = await this.getContentService(userId);
 
-    const niches = parseSavedGhostwriterNiches(config.niches);
+    const niches = getStrategyNiches(strategy);
     if (niches.length === 0) {
       throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
     }
 
     const sources = parseTrendSources(config.sources);
-    let customRssFeeds: string[] = [];
-    try {
-      customRssFeeds = config.customRssFeeds
-        ? JSON.parse(config.customRssFeeds)
-        : [];
-    } catch {}
-    let customLinks: string[] = [];
-    try {
-      customLinks = (config as any).customLinks
-        ? JSON.parse((config as any).customLinks)
-        : [];
-    } catch {}
-    let customRedditFeeds: string[] = [];
-    try {
-      customRedditFeeds = (config as any).customRedditFeeds
-        ? JSON.parse((config as any).customRedditFeeds)
-        : [];
-    } catch {}
-
+  
     if (jobId) {
       await prisma.botGenerationJob.update({
         where: { id: jobId },
@@ -351,20 +311,17 @@ export class TrendingBotService {
       brandLogoUrl: config.brandLogoUrl,
       brandLogoEnabled: config.brandLogoEnabled,
       brandLogoPosition: config.brandLogoPosition,
-      customLinks: config.customLinks,
       contactInfo: config.contactInfo,
       websiteUrl: config.websiteUrl,
       includeContactInfo: config.includeContactInfo,
       includeWebsiteLink: config.includeWebsiteLink,
+      strategy,
     };
 
     const configHash = buildTrendConfigHash({
       niches,
       sources,
-      customFeeds: customRssFeeds,
-      customLinks,
-      customRedditFeeds,
-    });
+     });
 
     const { author, eligible, ranked } = await prepareBatchContextV2({
       userId,
@@ -372,9 +329,6 @@ export class TrendingBotService {
       config: botConfig,
       slotCount: slots.length,
       sources,
-      customFeeds: customRssFeeds,
-      customLinks,
-      customRedditFeeds,
       openaiApiKey: openaiKey,
       previewId: options?.previewId,
       configHash,
@@ -568,11 +522,12 @@ export class TrendingBotService {
       return options?.debug ? { trends: [] } : [];
     }
 
-    if (!hasGhostwriterDescription(config.description)) {
+    const strategy = buildEffectiveBotStrategy(config);
+    if (!hasStrategyGenerationContext(strategy)) {
       throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
     }
 
-    const niches = parseSavedGhostwriterNiches(config.niches);
+    const niches = getStrategyNiches(strategy);
     if (niches.length === 0) {
       throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
     }
@@ -582,11 +537,7 @@ export class TrendingBotService {
       console.warn("[previewTrends] No trend sources configured; defaulting to Google News", { userId });
     }
 
-    const customRssFeeds = this.parseStringArrayConfig(config.customRssFeeds, "customRssFeeds", userId);
-    const customLinks = this.parseStringArrayConfig(config.customLinks, "customLinks", userId);
-    const customRedditFeeds = this.parseStringArrayConfig(config.customRedditFeeds, "customRedditFeeds", userId);
-
-    const user = await prisma.user.findUnique({
+     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { region: { select: { openaiApiKey: true } } },
     });
@@ -595,27 +546,27 @@ export class TrendingBotService {
     const limit = options?.limit ?? 20;
     const configHash = buildTrendConfigHash({
       niches,
-      sources,
-      customFeeds: customRssFeeds,
-      customLinks,
-      customRedditFeeds,
-    });
+      sources
+     });
 
     const orchestrator = new TrendOrchestrationService(openaiKey);
     const pool = await orchestrator.getRankedTrendPool({
       userId,
       niches,
       author: {
-        description: config.description || "",
-        tone: config.tone || "Professional",
+        description: strategy.profilePositioning.positioningStatement || config.description || "",
+        tone: strategy.writingStyle.tone[0] || config.tone || "Professional",
         niches,
+        targetAudience: [
+          strategy.targetAudience.primaryAudience,
+          ...(strategy.targetAudience.secondaryAudiences ?? []),
+        ].filter(Boolean),
+        strategy,
       },
       sources,
-      customFeeds: customRssFeeds,
-      customLinks,
-      customRedditFeeds,
       limit,
       mode: "preview",
+      strategy,
     });
 
     const stored = saveTrendPreviewPool({

@@ -122,7 +122,6 @@ describe('manual post AI formatting', () => {
           tone: 'Professional',
           description: '',
           niches: [],
-          customLinks: null,
           contactInfo: null,
           websiteUrl: null,
           includeContactInfo: false,

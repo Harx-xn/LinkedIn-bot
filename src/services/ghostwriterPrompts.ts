@@ -58,12 +58,25 @@ export const LINKEDIN_LINE_FORMAT_RULES = `FORMAT AND RHYTHM: Write in a clear, 
    
    Do not repeat definitions that are already obvious from the headline or image. Do not invent metrics, customers, incidents, implementation history, or personal experience.`;
 
+export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
+- Topic clarity: one specific topic, one central claim, and no mixed angles.
+- Clear niche match: make the post obviously relevant to the selected niche or pillar.
+- Topic-audience match: connect the idea to the target audience's pain, goal, objection, or desired outcome.
+- Profile alignment: write from the author's saved positioning and expertise without inventing biography.
+- Original insight: include a useful mechanism, reframing, trade-off, or decision rule instead of generic advice.
+- Dwell quality: create a post worth reading slowly, with progression, specificity, and no filler.
+- Conversational potential: end with a useful takeaway or specific conversation-worthy observation, not engagement bait.
+- Credibility/proof: use supplied proof when available; otherwise use technical reasoning, concrete examples, or labeled hypotheticals.
+- Minimum length: target 2,000 to 2,800 characters for the body when the topic supports it, while staying under LinkedIn's 3,000-character limit.
+- Formatting: never use Markdown bold markers or double asterisks. Do not include ** anywhere in the output.`;
+
  export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
 - Write as a ghostwriter for the supplied author profile.
 - Write an original LinkedIn post, not a summary of the source article.
 - Use the assigned angle, hook style, ending style, and layout as guidance.
-- Aim for roughly 600 to 1,300 characters when the subject supports it.
+- Aim for at least 2,000 characters and no more than 2,800 characters when the subject supports it.
 - Prioritize substance over reaching a target length.
+- Do not use Markdown bold markers or double asterisks.
 - Avoid repeating the same point in the introduction, middle, and conclusion.
 - Every section should move the idea forward.
 
@@ -141,6 +154,31 @@ ${TECHNICAL_DISTINCTIONS}`;
 export function buildAuthorBlock(author: AuthorContext): string {
   const niches = (author.niches ?? []).join(', ') || 'general technology';
   const audience = (author.targetAudience ?? []).join(', ') || 'builders and operators';
+  const strategy = author.strategy;
+  const strategyBlock = strategy ? `
+STRATEGY CONTEXT (use for topic angle and audience fit):
+- Positioning: ${strategy.profilePositioning.positioningStatement || strategy.legacy.description || 'Use the author profile above.'}
+- Point of view: ${strategy.profilePositioning.uniquePointOfView || 'Choose a defensible, specific point of view from the supplied topic.'}
+- Target audience: ${strategy.targetAudience.primaryAudience || audience}
+- Audience pains: ${strategy.targetAudience.painPoints.join('; ') || 'infer only from supplied source facts and author context'}
+- Desired outcomes: ${strategy.targetAudience.desiredOutcomes.join('; ') || 'make the post useful to the target audience'}
+- Primary goal: ${strategy.contentGoals.primaryGoal}
+- Content pillars: ${[
+    ...strategy.contentPillars.primaryPillars.map((pillar) => pillar.name),
+    ...strategy.contentPillars.secondaryPillars.map((pillar) => pillar.name),
+  ].join(', ') || niches}
+- Excluded topics: ${strategy.contentPillars.excludedTopics.join(', ') || 'none specified'}
+- Rejected patterns: ${strategy.topicRules.rejectedPatterns.join(', ') || 'none specified'}
+- Writing style: ${strategy.writingStyle.tone.join(', ') || author.tone}; formality ${strategy.writingStyle.formality}; length ${strategy.writingStyle.postLength}; formats ${strategy.writingStyle.preferredFormats.join(', ') || 'use existing LinkedIn formatting rules'}
+
+STRATEGY RULES:
+- Do not write generic niche commentary.
+- Connect the topic to a target-audience pain, goal, objection, or desired outcome.
+- Make the angle fit the author's positioning and point of view.
+- Respect excluded topics and rejected patterns.
+- Use writing style only for tone, structure, and formatting. Do not let style replace strategy.
+- Avoid repeating recent topic angles supplied elsewhere in context.
+` : '';
   return `
 AUTHOR PROFILE (highest priority):
 ${author.description.trim() || 'Professional operator in the selected niches.'}
@@ -148,6 +186,8 @@ ${author.description.trim() || 'Professional operator in the selected niches.'}
 NICHES: ${niches}
 AUDIENCE: ${audience}
 TONE: ${author.tone}
+${strategyBlock}
+${POST_QUALITY_CONTEXT}
 `;
 }
 

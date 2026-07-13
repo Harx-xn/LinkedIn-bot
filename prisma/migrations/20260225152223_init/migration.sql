@@ -20,7 +20,6 @@ CREATE TABLE "BotConfig" (
     "userId" TEXT NOT NULL,
     "niches" TEXT NOT NULL,
     "sources" TEXT NOT NULL,
-    "customRssFeeds" TEXT,
     "customLinks" TEXT,
     "customRedditFeeds" TEXT,
     "backgroundImageUrl" TEXT,

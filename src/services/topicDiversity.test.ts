@@ -356,7 +356,7 @@ describe('final post topic validation', () => {
         normalizedTopic: 'authentication authorization server',
         topicCluster: 'authentication_authorization',
         coreClaim: 'authentication proves identity authorization controls tenant access server',
-        angle: null, status: 'PUBLISHED', generatedAt: new Date('2026-06-01'), publishedAt: null,
+        angle: null, status: 'PUBLISHED', generatedAt: new Date(), publishedAt: null,
       }],
     );
     assert.ok(issues.some((i) => i.code === 'historical_topic_duplicate'));

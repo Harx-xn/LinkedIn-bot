@@ -5,7 +5,6 @@ export const TREND_CACHE_TTL_SECONDS = {
   medium: 60 * 60,
   linkedin: 30 * 60,
   reddit: 15 * 60,
-  customRss: 15 * 60,
   quora: 30 * 60,
 } as const;
 
@@ -46,7 +45,7 @@ export function buildTrendCacheKey(input: {
 
 function ttlForSource(source: string): number {
   const key = source.toLowerCase();
-  if (key.includes('rss') || key.includes('custom')) return TREND_CACHE_TTL_SECONDS.customRss * 1000;
+  
   if (key in TREND_CACHE_TTL_SECONDS) {
     return TREND_CACHE_TTL_SECONDS[key as keyof typeof TREND_CACHE_TTL_SECONDS] * 1000;
   }

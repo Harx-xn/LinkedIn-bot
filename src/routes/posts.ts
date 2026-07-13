@@ -381,6 +381,7 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
     'OPENAI',
     voice.tone,
     voice.description,
+    voice.strategy,
   );
 
   const normalized = normalizeGeneratedContent(generated, post.content, {
@@ -390,7 +391,6 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
     contactInfo: voice.contactInfo,
     websiteUrl: voice.websiteUrl,
     description: voice.description,
-    customLinks: voice.customLinks,
   });
 
   // Image regeneration is secondary to the text rewrite. Only regenerate when

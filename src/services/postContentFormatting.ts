@@ -10,7 +10,7 @@ import { normalizeLinkedInLineBody } from './linkedinLineFormatting';
  *
  * Nothing here invents user data: contact/website come only from the user's own
  * BotConfig fields (contactInfo, websiteUrl) or, as a fallback, description /
- * customLinks.
+
  */
 
 // Safe boolean coercion so strings like "false" / 0 don't become true.
@@ -182,7 +182,7 @@ function coerceUrl(raw: string): string | null {
   return null;
 }
 
-// First URL from a JSON array string (customLinks is stored as a JSON string),
+
 // also tolerant of comma/newline separated plain text.
 export function extractFirstUrlFromJsonArrayString(value?: string | null): string | null {
   if (!value) return null;
@@ -234,7 +234,7 @@ export interface ContactWebsiteOptions {
   contactInfo?: string | null;
   websiteUrl?: string | null;
   description?: string | null;
-  customLinks?: string | null;
+
 }
 
 // Extract email or phone from free text (supports markdown mailto links).
@@ -268,7 +268,7 @@ function formatContactLine(value: string): string {
   return `Contact: ${trimmed}`;
 }
 
-// Resolve website URL: dedicated field first, then contactInfo/customLinks/description.
+
 function resolveWebsiteUrl(options: ContactWebsiteOptions): string | null {
   const direct = (options.websiteUrl || '').trim();
   if (direct) return direct;
@@ -276,7 +276,7 @@ function resolveWebsiteUrl(options: ContactWebsiteOptions): string | null {
   const fromContactInfo = extractFirstUrl(options.contactInfo);
   if (fromContactInfo) return fromContactInfo;
 
-  return extractFirstUrlFromJsonArrayString(options.customLinks) || extractFirstUrl(options.description);
+  return extractFirstUrl(options.description);
 }
 
 // Resolve contact display value; null means use generic CTA fallback.
@@ -462,7 +462,7 @@ export function normalizeHashtags(hashtags: string, body: string, topic?: string
 export function normalizeTaplioStyleBody(body: string): string {
   if (!body) return '';
   const normalized = stripRawJsonIfNeeded(body);
-  return normalizeLinkedInLineBody(normalized);
+  return normalizeLinkedInLineBody(normalized.replace(/\*\*/g, ''));
 }
 
 // ---------------------------------------------------------------------------

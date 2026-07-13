@@ -52,9 +52,6 @@ export type TrendFetchInput = {
   queries?: string[];
   exclusions?: string[];
   sources?: string[];
-  customFeeds?: string[];
-  customLinks?: string[];
-  customRedditFeeds?: string[];
   limit?: number;
   expansionPlan?: NicheExpansionPlan;
   pipelineMode?: TrendPipelineMode;
@@ -104,17 +101,11 @@ export class TrendsService {
   async fetchTrends(
     niche: string,
     sources: string[] = ['google'],
-    customFeeds: string[] = [],
-    customLinks: string[] = [],
-    customRedditFeeds: string[] = [],
-    limit: number = 10,
+       limit: number = 10,
   ): Promise<Trend[]> {
     return this.fetchTrendsWithInput({
       niche,
       sources,
-      customFeeds,
-      customLinks,
-      customRedditFeeds,
       limit,
       pipelineMode: 'generation',
     });
@@ -169,9 +160,6 @@ export class TrendsService {
     const {
       niche,
       exclusions = [],
-      customFeeds = [],
-      customLinks = [],
-      customRedditFeeds = [],
       expansionPlan,
       sources: rawSources = [...DEFAULT_TREND_SOURCES],
     } = input;
@@ -205,30 +193,21 @@ export class TrendsService {
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: entry.query })));
     });
 
-    // Phase 2: custom RSS
-    if (!hasEnough() && customFeeds.length) {
-      for (const url of customFeeds.slice(0, 3)) {
-        if (hasEnough()) break;
-        const batch = await this.fetchCustomRssTrends(url, 6);
-        results.push(...batch.map((t) => ({ ...t, niche, searchQuery: niche })));
-      }
-    }
-
-    // Phase 3: Medium (tags only, one logical fetch)
+    // Phase 2: Medium (tags only, one logical fetch)
     if (!hasEnough() && sources.some((s) => s.toLowerCase() === 'medium')) {
       const mediumLimit = Math.min(6, candidateTarget);
       const batch = await this.fetchMediumTrends(niche, mediumLimit, mediumTags);
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: selectPreviewMediumQuery(previewQueries) ?? niche })));
     }
 
-    // Phase 4: LinkedIn at most one query
+    // Phase 3: LinkedIn at most one query
     if (!hasEnough() && sources.some((s) => s.toLowerCase() === 'linkedin')) {
       const linkedInQuery = selectPreviewLinkedInQuery(previewQueries) ?? plan.niche;
       const batch = await this.fetchGoogleSearchTrends(linkedInQuery, 'linkedin.com', 4);
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: linkedInQuery })));
     }
 
-    // Phase 5: limited Google 30d fallback on top queries only
+    // Phase 4: limited Google 30d fallback on top queries only
     if (!hasEnough() && sources.some((s) => s.toLowerCase() === 'google')) {
       const shortfall = candidateTarget - countUsableTrends(results, niche, exclusionsList);
       const topQueries = previewQueries.slice(0, 2);
@@ -243,18 +222,7 @@ export class TrendsService {
       }
     }
 
-    if (customRedditFeeds.length && isRedditConfigured() && !isRedditCircuitOpen()) {
-      for (const url of customRedditFeeds.slice(0, 2)) {
-        if (hasEnough()) break;
-        const batch = await this.fetchRedditJsonTrends(url, 4);
-        results.push(...batch.map((t) => ({ ...t, niche, searchQuery: niche })));
-      }
-    }
-
-    if (customLinks.length && !hasEnough()) {
-      const batch = await this.fetchCustomTrends(customLinks, Math.min(customLinks.length, 4));
-      results.push(...batch.map((t) => ({ ...t, niche, searchQuery: niche })));
-    }
+ 
 
     const deduped = this.dedupeTrends(results);
     const sorted = deduped.sort((a, b) => this.safeTime(b.pubDate) - this.safeTime(a.pubDate));
@@ -269,10 +237,7 @@ export class TrendsService {
       niche,
       queries = [niche],
       sources: rawSources = [...DEFAULT_TREND_SOURCES],
-      customFeeds = [],
-      customLinks = [],
-      customRedditFeeds = [],
-      expansionPlan,
+       expansionPlan,
     } = input;
 
     const sources = this.effectiveSources(rawSources, 'generation');
@@ -309,27 +274,7 @@ export class TrendsService {
       }
     }
 
-    if (customFeeds.length) {
-      for (const url of customFeeds.slice(0, 5)) {
-        fetchJobs.push(() => this.fetchCustomRssTrends(url, 5).then((items) =>
-          items.map((t) => ({ ...t, niche, searchQuery: niche })),
-        ));
-      }
-    }
-
-    if (customRedditFeeds.length && isRedditConfigured() && !isRedditCircuitOpen()) {
-      for (const url of customRedditFeeds.slice(0, 3)) {
-        fetchJobs.push(() => this.fetchRedditJsonTrends(url, 5).then((items) =>
-          items.map((t) => ({ ...t, niche, searchQuery: niche })),
-        ));
-      }
-    }
-
-    if (customLinks.length) {
-      fetchJobs.push(() => this.fetchCustomTrends(customLinks, Math.min(customLinks.length, 8)).then((items) =>
-        items.map((t) => ({ ...t, niche, searchQuery: niche })),
-      ));
-    }
+  
 
     const results: Trend[] = [];
     await mapWithConcurrency(fetchJobs, cfg.sourceConcurrency, async (job) => {
@@ -562,58 +507,6 @@ export class TrendsService {
 
   async fetchGoogleTrends(topic: string, limit: number = 5): Promise<Trend[]> {
     return this.fetchGoogleTrendsLayered(topic, limit);
-  }
-
-  async fetchCustomRssTrends(url: string, limit: number = 5): Promise<Trend[]> {
-    const cacheKey = buildTrendCacheKey({ source: 'customRss', query: url });
-    try {
-      return await fetchTrendsWithCache(cacheKey, 'customRss', async () => {
-        this.trackSourceRequest();
-        const resp = await axios.get(url, {
-          timeout: 10000,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          responseType: 'text',
-          validateStatus: () => true,
-        });
-
-        const contentType = (resp.headers['content-type'] || '').toLowerCase();
-        const text = typeof resp.data === 'string' ? resp.data : '';
-
-        const looksLikeXml =
-          text.trimStart().startsWith('<?xml')
-          || text.trimStart().startsWith('<rss')
-          || text.trimStart().startsWith('<feed');
-        const isXmlType = contentType.includes('xml') || contentType.includes('rss') || contentType.includes('atom');
-
-        if (!looksLikeXml && !isXmlType) {
-          console.warn(`[RSS SKIP] Not an RSS/Atom feed: ${url} (content-type: ${contentType || 'unknown'})`);
-          return [];
-        }
-
-        const feed = await this.parser.parseString(text);
-        let hostname = 'RSS';
-        try {
-          hostname = new URL(url).hostname;
-        } catch {
-          // keep default
-        }
-
-        return (feed.items || []).slice(0, limit).map((item) => ({
-          title: item.title || 'No Title',
-          link: item.link || '',
-          pubDate: item.pubDate || '',
-          source: hostname,
-          publisher: hostname,
-          discoverySource: `RSS (${hostname})`,
-        }));
-      });
-    } catch (error: unknown) {
-      console.warn('[trends] custom RSS fetch failed', {
-        url: url.slice(0, 120),
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
   }
 
   async fetchCustomTrends(links: string[], limit: number = 5): Promise<Trend[]> {

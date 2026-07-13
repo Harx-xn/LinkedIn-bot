@@ -66,6 +66,9 @@ export type ManualCriticScores = {
   focus: number;
   credibility: number;
   originality: number;
+  audienceFit?: number;
+  conversationPotential?: number;
+  dwellQuality?: number;
   readability: number;
   genericAiRisk: number;
 };

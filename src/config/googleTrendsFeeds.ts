@@ -1,5 +1,5 @@
 // Google Trends RSS Feeds Configuration
-// These feeds can be added to your Bot Config's customRssFeeds field
+// These feeds are used internally as Google Trends sources.
 
 export const GOOGLE_TRENDS_FEEDS = {
     // United States

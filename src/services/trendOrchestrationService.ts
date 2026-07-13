@@ -21,6 +21,8 @@ import { TrendsService } from './trendsService';
 import type { Trend } from './trendsService';
 import { mapWithConcurrency } from './concurrencyUtils';
 import { PipelineTimer } from './trendPipelineTiming';
+import type { EffectiveBotStrategy } from './botStrategyService';
+import { buildStrategyExpansionPlan } from './botStrategyTrendService';
 
 export type OrchestratedTrendPool = {
   eligible: TrendCandidate[];
@@ -35,13 +37,11 @@ export type RankedTrendPoolParams = {
   niches: string[];
   author: AuthorContext;
   sources: string[];
-  customFeeds: string[];
-  customLinks: string[];
-  customRedditFeeds: string[];
   limit?: number;
   slotCount?: number;
   mode: 'preview' | 'batch' | 'generation';
   reuseRanked?: RankedTrendCandidate[];
+  strategy?: EffectiveBotStrategy;
 };
 
 export type RankedTrendPoolResult = OrchestratedTrendPool;
@@ -123,7 +123,9 @@ export class TrendOrchestrationService {
       cfg.nicheConcurrency,
       async (niche): Promise<NicheResult> => {
         const nicheTimer = performance.now();
-        const plan = await this.resolveExpansionPlan(params.userId, niche);
+        const plan = params.strategy
+          ? buildStrategyExpansionPlan(params.strategy, niche)
+          : await this.resolveExpansionPlan(params.userId, niche);
 
         let rawTrends: Trend[] = [];
         try {
@@ -132,9 +134,6 @@ export class TrendOrchestrationService {
             queries: plan.queries,
             exclusions: plan.exclusions,
             sources: params.sources,
-            customFeeds: params.customFeeds,
-            customLinks: params.customLinks,
-            customRedditFeeds: params.customRedditFeeds,
             limit: perNicheLimit,
             expansionPlan: plan,
             pipelineMode,
@@ -177,6 +176,7 @@ export class TrendOrchestrationService {
           limit: perNicheLimit,
           fingerprintService: this.fingerprintService,
           pipelineMode,
+          strategy: params.strategy,
         });
 
         return {
@@ -321,6 +321,7 @@ export class TrendOrchestrationService {
     userId: string;
     previewCandidates: RankedTrendCandidate[];
     author: AuthorContext;
+    strategy?: EffectiveBotStrategy;
     plans: NicheExpansionPlan[];
     slotCount: number;
   }): Promise<{ ranked: RankedTrendCandidate[]; eligible: TrendCandidate[]; openAiCalls: number }> {
@@ -349,6 +350,9 @@ export function rankedToPreviewItems(ranked: RankedTrendCandidate[]): PreviewTre
     noveltyScore: r.noveltyScore,
     contentType: r.contentType,
     cluster: r.fingerprint.topicCluster,
+    matchedPillar: r.matchedPillar,
+    suggestedAngle: r.suggestedAngle,
+    audienceRelevance: r.audienceRelevance,
   }));
 }
 

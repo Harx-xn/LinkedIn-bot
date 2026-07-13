@@ -238,7 +238,7 @@ async function tryAcceptPost(
     contactInfo: config.contactInfo,
     websiteUrl: config.websiteUrl,
     description: config.description,
-    customLinks: config.customLinks,
+   
   });
 
   const formatIssues = validateFormattedBody(finalized.body, finalized.hashtags, author.description, {
@@ -392,7 +392,7 @@ export async function generateSlotPost(
         contactInfo: config.contactInfo,
         websiteUrl: config.websiteUrl,
         description: config.description,
-        customLinks: config.customLinks,
+       
       });
     }
   }

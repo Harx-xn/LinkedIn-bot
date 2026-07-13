@@ -1,9 +1,21 @@
 import type { BotVoice } from '../userContentContext';
+import type { EffectiveBotStrategy } from '../botStrategyService';
+import { scoreTrendForStrategy } from '../botStrategyTrendService';
 
 export type ManualTopicSuggestion = {
   title: string;
   description: string;
   reason: string;
+  normalizedTopic?: string;
+  topicCluster?: string;
+  matchedPillar?: string;
+  targetAudience?: string;
+  whyAudienceCares?: string;
+  suggestedAngle?: string;
+  contentGoal?: string;
+  relevanceScore?: number;
+  sourceTitle?: string;
+  sourceUrl?: string;
 };
 
 export const DEFAULT_TOPIC_SUGGESTION_COUNT = 5;
@@ -38,6 +50,12 @@ export function isGenericTopicTitle(title: string): boolean {
 
 function normalizeTitleKey(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function inferTopicCluster(topic: string, strategy?: EffectiveBotStrategy): string {
+  const matchedPillar = strategy?.contentPillars.primaryPillars
+    .find((pillar) => normalizeTitleKey(topic).includes(normalizeTitleKey(pillar.name)));
+  return normalizeTitleKey(matchedPillar?.name || topic).split(' ').slice(0, 4).join('_') || 'other';
 }
 
 export function areNearDuplicateTitles(a: string, b: string): boolean {
@@ -89,10 +107,13 @@ export function buildFallbackTopicSuggestions(
   trendSources: string[],
   count: number,
   currentYear: number,
+  strategy?: EffectiveBotStrategy,
 ): ManualTopicSuggestion[] {
-  const primaryNiche = voice.niches.find((niche) => niche.trim()) || 'your niche';
+  const primaryPillar = strategy?.contentPillars.primaryPillars[0];
+  const primaryNiche = primaryPillar?.name || voice.niches.find((niche) => niche.trim()) || 'your niche';
   const sourceHint = trendSources.length > 0 ? trendSources.join(', ') : 'industry news';
-  const tone = voice.tone || 'Professional';
+  const tone = strategy?.writingStyle.tone[0] || voice.tone || 'Professional';
+  const audience = strategy?.targetAudience.primaryAudience || 'your audience';
 
   const templates: Array<{ title: string; description: string }> = [
     {
@@ -101,7 +122,7 @@ export function buildFallbackTopicSuggestions(
     },
     {
       title: `What ${primaryNiche} buyers notice before they trust your content`,
-      description: `Share a concrete credibility signal your audience cares about, grounded in your profile expertise.`,
+      description: `Share a concrete credibility signal ${audience} cares about, grounded in your profile expertise.`,
     },
     {
       title: `The tradeoff teams miss when they automate ${primaryNiche} content`,
@@ -132,24 +153,51 @@ export function buildFallbackTopicSuggestions(
   }));
 }
 
+function addStrategyMetadata(
+  topic: ManualTopicSuggestion,
+  strategy?: EffectiveBotStrategy,
+): ManualTopicSuggestion {
+  if (!strategy) return topic;
+  const score = scoreTrendForStrategy(
+    {
+      topic: topic.title,
+      summary: topic.description,
+      source: 'manual_topic_suggestion',
+    },
+    strategy,
+  );
+  return {
+    ...topic,
+    normalizedTopic: normalizeTitleKey(topic.title),
+    topicCluster: inferTopicCluster(topic.title, strategy),
+    matchedPillar: score.matchedPillar,
+    targetAudience: strategy.targetAudience.primaryAudience,
+    whyAudienceCares: score.audienceRelevance || topic.reason,
+    suggestedAngle: score.suggestedAngle || topic.description,
+    contentGoal: strategy.contentGoals.primaryGoal,
+    relevanceScore: score.score,
+  };
+}
+
 export function finalizeTopicSuggestions(
   aiTopics: ManualTopicSuggestion[],
   voice: BotVoice,
   trendSources: string[],
   count = DEFAULT_TOPIC_SUGGESTION_COUNT,
+  strategy?: EffectiveBotStrategy,
 ): ManualTopicSuggestion[] {
   const currentYear = new Date().getFullYear();
   const sanitized = sanitizeTopicSuggestions(aiTopics, { currentYear, maxCount: count });
 
   if (sanitized.length >= count) {
-    return sanitized.slice(0, count);
+    return sanitized.slice(0, count).map((topic) => addStrategyMetadata(topic, strategy));
   }
 
-  const fallbacks = buildFallbackTopicSuggestions(voice, trendSources, count, currentYear);
+  const fallbacks = buildFallbackTopicSuggestions(voice, trendSources, count, currentYear, strategy);
   const merged = sanitizeTopicSuggestions([...sanitized, ...fallbacks], {
     currentYear,
     maxCount: count,
   });
 
-  return merged.slice(0, count);
+  return merged.slice(0, count).map((topic) => addStrategyMetadata(topic, strategy));
 }

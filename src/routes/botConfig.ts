@@ -1,4 +1,5 @@
 import { Router, Request } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../prismaClient';
 import { requireAuth } from '../middleware/auth';
 import {
@@ -13,12 +14,37 @@ import {
   resolveBotImageMode,
 } from '../services/botImageModeService';
 import { getOwnedBrandLogoKey, normalizeBrandLogoPosition } from '../services/brandLogoService';
+import {
+  BOT_STRATEGY_FIELDS,
+  BotStrategyValidationError,
+  buildEffectiveBotStrategy,
+  hasAnyStrategyFields,
+  parseStrategyFieldUpdate,
+  resolveOnboardingStatus,
+  type BotStrategyField,
+} from '../services/botStrategyService';
 
 const router = Router();
 const VALID_IMAGE_STYLES = new Set([
   'professional', 'modern', 'minimal', 'bold', 'corporate', 'abstract',
 ]);
 const VALID_IMAGE_ASPECT_RATIOS = new Set(['1:1', '4:5', '16:9']);
+
+const hasOwn = (body: Record<string, unknown>, key: string) =>
+  Object.prototype.hasOwnProperty.call(body, key);
+
+function serializeBotConfig(config: any) {
+  return {
+    ...config,
+    imageMode: config.imageMode ?? null,
+    effectiveImageMode: resolveBotImageMode(config),
+    contactInfo: config.contactInfo || '',
+    websiteUrl: config.websiteUrl || '',
+    includeContactInfo: config.includeContactInfo ?? false,
+    includeWebsiteLink: config.includeWebsiteLink ?? false,
+    effectiveStrategy: buildEffectiveBotStrategy(config),
+  };
+}
 
 // GET /bot/config - Get current user's bot config
 router.get('/config', requireAuth, async (req: Request, res: any) => {
@@ -27,21 +53,9 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
       where: { userId: req.userId }
     });
 
-    const effectiveImageMode = config
-      ? resolveBotImageMode(config)
-      : 'none';
-
     res.json(
       config
-        ? {
-            ...config,
-            imageMode: config.imageMode ?? null,
-            effectiveImageMode,
-            contactInfo: config.contactInfo || '',
-            websiteUrl: config.websiteUrl || '',
-            includeContactInfo: config.includeContactInfo ?? false,
-            includeWebsiteLink: config.includeWebsiteLink ?? false,
-          }
+        ? serializeBotConfig(config)
         : {
             userId: req.userId,
             niches: '[]',
@@ -58,6 +72,14 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
             brandLogoUrl: '',
             brandLogoEnabled: false,
             brandLogoPosition: 'bottomRight',
+            onboardingStatus: 'LEGACY',
+            profilePositioning: null,
+            targetAudience: null,
+            contentGoals: null,
+            contentPillars: null,
+            topicRules: null,
+            writingStyle: null,
+            effectiveStrategy: buildEffectiveBotStrategy(null),
           }
     );
   } catch (error) {
@@ -73,29 +95,14 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
   const {
     niches,
     sources,
-    customRssFeeds,
-    customLinks,
-    customRedditFeeds,
     backgroundImageUrl,
     isEnabled,
     tone,
     description,
   } = body;
 
-  const includeContactInfo = parseBoolean(body.includeContactInfo, false);
-  const includeWebsiteLink = parseBoolean(body.includeWebsiteLink, false);
-
-  let normalizedWebsiteUrl: string | null = null;
-  try {
-    normalizedWebsiteUrl = normalizeWebsiteUrl(body.websiteUrl);
-  } catch {
-    return res.status(400).json({ error: 'Invalid website URL' });
-  }
-
-  const cleanedContactInfo = cleanOptionalText(body.contactInfo, 500);
-
   let imageModeUpdate: string | null | undefined;
-  if (Object.prototype.hasOwnProperty.call(body, 'imageMode')) {
+  if (hasOwn(body, 'imageMode')) {
     try {
       imageModeUpdate = parseBotImageModeInput(body.imageMode);
     } catch (err) {
@@ -105,7 +112,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
   }
 
   let imageStyleUpdate: string | undefined;
-  if (Object.prototype.hasOwnProperty.call(body, 'imageStyle')) {
+  if (hasOwn(body, 'imageStyle')) {
     if (body.imageStyle !== null && body.imageStyle !== '') {
       if (typeof body.imageStyle !== 'string') {
         return res.status(400).json({ error: 'Invalid imageStyle' });
@@ -118,7 +125,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
   }
 
   let imageAspectRatioUpdate: string | undefined;
-  if (Object.prototype.hasOwnProperty.call(body, 'imageAspectRatio')) {
+  if (hasOwn(body, 'imageAspectRatio')) {
     if (body.imageAspectRatio !== null && body.imageAspectRatio !== '') {
       if (typeof body.imageAspectRatio !== 'string') {
         return res.status(400).json({ error: 'Invalid imageAspectRatio' });
@@ -130,7 +137,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     }
   }
 
-  const hasImageInstructions = Object.prototype.hasOwnProperty.call(body, 'imageInstructions');
+  const hasImageInstructions = hasOwn(body, 'imageInstructions');
   const imageInstructionsUpdate = hasImageInstructions
     ? (typeof body.imageInstructions === 'string' && body.imageInstructions.trim()
         ? body.imageInstructions.trim()
@@ -138,16 +145,44 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     : undefined;
 
   try {
-    const nichesStr = typeof niches === 'string' ? niches : JSON.stringify(niches || []);
-    const sourcesStr = typeof sources === 'string' ? sources : JSON.stringify(sources || []);
-    const customRssFeedsStr =
-      typeof customRssFeeds === 'string' ? customRssFeeds : JSON.stringify(customRssFeeds || []);
-    const customLinksStr =
-      typeof customLinks === 'string' ? customLinks : JSON.stringify(customLinks || []);
-    const customRedditFeedsStr =
-      typeof customRedditFeeds === 'string'
-        ? customRedditFeeds
-        : JSON.stringify(customRedditFeeds || []);
+    const existingConfig = await prisma.botConfig.findUnique({
+      where: { userId: req.userId! },
+    });
+
+    const hasNiches = hasOwn(body, 'niches');
+    const hasSources = hasOwn(body, 'sources');
+    const hasBackgroundImageUrl = hasOwn(body, 'backgroundImageUrl');
+    const hasTone = hasOwn(body, 'tone');
+    const hasDescription = hasOwn(body, 'description');
+    const hasIsEnabled = hasOwn(body, 'isEnabled');
+    const hasIncludeContactInfo = hasOwn(body, 'includeContactInfo');
+    const hasIncludeWebsiteLink = hasOwn(body, 'includeWebsiteLink');
+    const hasContactInfo = hasOwn(body, 'contactInfo');
+    const hasWebsiteUrl = hasOwn(body, 'websiteUrl');
+    const hasBrandLogoUrl = hasOwn(body, 'brandLogoUrl');
+    const hasBrandLogoEnabled = hasOwn(body, 'brandLogoEnabled');
+    const hasBrandLogoPosition = hasOwn(body, 'brandLogoPosition');
+
+    const nichesStr = hasNiches
+      ? (typeof niches === 'string' ? niches : JSON.stringify(niches || []))
+      : existingConfig?.niches ?? '[]';
+    const sourcesStr = hasSources
+      ? (typeof sources === 'string' ? sources : JSON.stringify(sources || []))
+      : existingConfig?.sources ?? '["google"]';
+
+
+    let normalizedWebsiteUrl: string | null | undefined;
+    if (hasWebsiteUrl) {
+      try {
+        normalizedWebsiteUrl = normalizeWebsiteUrl(body.websiteUrl);
+      } catch {
+        return res.status(400).json({ error: 'Invalid website URL' });
+      }
+    }
+
+    const cleanedContactInfo = hasContactInfo
+      ? cleanOptionalText(body.contactInfo, 500)
+      : undefined;
 
     const owner = await prisma.user.findUnique({
       where: { id: req.userId! },
@@ -155,36 +190,79 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     });
     const regionId = owner?.regionId ?? null;
 
-    const normalizedBackgroundImageUrl =
-      typeof backgroundImageUrl === 'string' && backgroundImageUrl.trim()
+    const normalizedBackgroundImageUrl = hasBackgroundImageUrl
+      ? (typeof backgroundImageUrl === 'string' && backgroundImageUrl.trim()
         ? backgroundImageUrl.trim()
-        : null;
-    const brandLogoUrl = typeof body.brandLogoUrl === 'string' ? body.brandLogoUrl.trim() : '';
-    if (brandLogoUrl && !getOwnedBrandLogoKey(brandLogoUrl, req.userId!)) {
+        : null)
+      : undefined;
+
+    const brandLogoUrl = hasBrandLogoUrl
+      ? (typeof body.brandLogoUrl === 'string' ? body.brandLogoUrl.trim() : '')
+      : existingConfig?.brandLogoUrl ?? '';
+    if (hasBrandLogoUrl && brandLogoUrl && !getOwnedBrandLogoKey(brandLogoUrl, req.userId!)) {
       return res.status(400).json({ error: 'Invalid brand logo upload' });
     }
-    const normalizedBrandLogoUrl = brandLogoUrl || null;
-    const brandLogoEnabled = parseBoolean(body.brandLogoEnabled, false) && !!normalizedBrandLogoUrl;
-    const brandLogoPosition = normalizeBrandLogoPosition(body.brandLogoPosition);
+    const normalizedBrandLogoUrl = hasBrandLogoUrl ? brandLogoUrl || null : undefined;
+    const brandLogoEnabled = hasBrandLogoEnabled
+      ? parseBoolean(body.brandLogoEnabled, false) && !!brandLogoUrl
+      : undefined;
+    const brandLogoPosition = hasBrandLogoPosition
+      ? normalizeBrandLogoPosition(body.brandLogoPosition)
+      : undefined;
 
-    const sharedContentFields = {
-      regionId,
+    const legacyForStrategy = {
+      ...existingConfig,
       niches: nichesStr,
       sources: sourcesStr,
-      customRssFeeds: customRssFeedsStr,
-      customLinks: customLinksStr,
-      customRedditFeeds: customRedditFeedsStr,
-      backgroundImageUrl: normalizedBackgroundImageUrl,
-      brandLogoUrl: normalizedBrandLogoUrl,
-      brandLogoEnabled,
-      brandLogoPosition,
-      tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional',
-      isEnabled: !!isEnabled,
-      description: typeof description === 'string' ? description : '',
-      includeContactInfo,
-      includeWebsiteLink,
-      contactInfo: cleanedContactInfo,
-      websiteUrl: normalizedWebsiteUrl,
+      tone: hasTone
+        ? (typeof tone === 'string' && tone.trim() ? tone : 'Professional')
+        : existingConfig?.tone ?? 'Professional',
+      description: hasDescription
+        ? (typeof description === 'string' ? description : '')
+        : existingConfig?.description ?? '',
+    };
+
+    const strategyUpdates: Partial<Record<BotStrategyField, Prisma.InputJsonValue | typeof Prisma.DbNull>> = {};
+    for (const field of BOT_STRATEGY_FIELDS) {
+      if (!hasOwn(body, field)) continue;
+      try {
+        const parsed = parseStrategyFieldUpdate(field, body[field], legacyForStrategy);
+        strategyUpdates[field] = parsed === null ? Prisma.DbNull : parsed as Prisma.InputJsonValue;
+      } catch (err) {
+        if (err instanceof BotStrategyValidationError) {
+          return res.status(400).json({ error: err.message });
+        }
+        throw err;
+      }
+    }
+
+    const mergedStrategyState = Object.fromEntries(
+      BOT_STRATEGY_FIELDS.map((field) => [
+        field,
+        hasOwn(strategyUpdates, field)
+          ? strategyUpdates[field]
+          : existingConfig?.[field] ?? null,
+      ]),
+    ) as Partial<Record<BotStrategyField, unknown>>;
+    const onboardingStatus = resolveOnboardingStatus(hasAnyStrategyFields(mergedStrategyState));
+
+    const updateFields = {
+      regionId,
+      ...(hasNiches ? { niches: nichesStr } : {}),
+      ...(hasSources ? { sources: sourcesStr } : {}),
+      ...(hasBackgroundImageUrl ? { backgroundImageUrl: normalizedBackgroundImageUrl } : {}),
+      ...(hasBrandLogoUrl ? { brandLogoUrl: normalizedBrandLogoUrl } : {}),
+      ...(hasBrandLogoEnabled ? { brandLogoEnabled } : {}),
+      ...(hasBrandLogoPosition ? { brandLogoPosition } : {}),
+      ...(hasTone
+        ? { tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional' }
+        : {}),
+      ...(hasIsEnabled ? { isEnabled: !!isEnabled } : {}),
+      ...(hasDescription ? { description: typeof description === 'string' ? description : '' } : {}),
+      ...(hasIncludeContactInfo ? { includeContactInfo: parseBoolean(body.includeContactInfo, false) } : {}),
+      ...(hasIncludeWebsiteLink ? { includeWebsiteLink: parseBoolean(body.includeWebsiteLink, false) } : {}),
+      ...(hasContactInfo ? { contactInfo: cleanedContactInfo } : {}),
+      ...(hasWebsiteUrl ? { websiteUrl: normalizedWebsiteUrl } : {}),
       ...(imageModeUpdate !== undefined ? { imageMode: imageModeUpdate } : {}),
       ...(imageInstructionsUpdate !== undefined
         ? { imageInstructions: imageInstructionsUpdate }
@@ -193,30 +271,43 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       ...(imageAspectRatioUpdate !== undefined
         ? { imageAspectRatio: imageAspectRatioUpdate }
         : {}),
+      ...strategyUpdates,
+      onboardingStatus,
+    };
+
+    const createFields = {
+      regionId,
+      niches: nichesStr,
+      sources: sourcesStr,
+      backgroundImageUrl: normalizedBackgroundImageUrl ?? null,
+      brandLogoUrl: normalizedBrandLogoUrl ?? null,
+      brandLogoEnabled: brandLogoEnabled ?? false,
+      brandLogoPosition: brandLogoPosition ?? 'bottomRight',
+      tone: hasTone && typeof tone === 'string' && tone.trim() ? tone : 'Professional',
+      isEnabled: hasIsEnabled ? !!isEnabled : false,
+      description: hasDescription && typeof description === 'string' ? description : '',
+      includeContactInfo: hasIncludeContactInfo ? parseBoolean(body.includeContactInfo, false) : false,
+      includeWebsiteLink: hasIncludeWebsiteLink ? parseBoolean(body.includeWebsiteLink, false) : false,
+      contactInfo: cleanedContactInfo ?? null,
+      websiteUrl: normalizedWebsiteUrl ?? null,
+      imageMode: imageModeUpdate ?? null,
+      imageInstructions: imageInstructionsUpdate ?? null,
+      imageStyle: imageStyleUpdate ?? null,
+      imageAspectRatio: imageAspectRatioUpdate ?? null,
+      ...strategyUpdates,
+      onboardingStatus,
     };
 
     const config = await prisma.botConfig.upsert({
       where: { userId: req.userId! },
       create: {
         userId: req.userId!,
-        imageMode: imageModeUpdate ?? null,
-        imageInstructions: imageInstructionsUpdate ?? null,
-        imageStyle: imageStyleUpdate ?? null,
-        imageAspectRatio: imageAspectRatioUpdate ?? null,
-        ...sharedContentFields,
+        ...createFields,
       },
-      update: sharedContentFields,
+      update: updateFields,
     });
 
-    res.json({
-      ...config,
-      imageMode: config.imageMode ?? null,
-      effectiveImageMode: resolveBotImageMode(config),
-      contactInfo: config.contactInfo || '',
-      websiteUrl: config.websiteUrl || '',
-      includeContactInfo: config.includeContactInfo ?? false,
-      includeWebsiteLink: config.includeWebsiteLink ?? false,
-    });
+    res.json(serializeBotConfig(config));
   } catch (error) {
     console.error('Error saving bot config:', error);
     res.status(500).json({ error: 'Failed to save config' });

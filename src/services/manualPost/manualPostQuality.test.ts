@@ -91,6 +91,9 @@ describe('unsupported experience prevention in prompts', () => {
     });
     assert.ok(prompt.includes('labeled hypothetical'));
     assert.ok(prompt.includes('No personal experience claims'));
+    assert.ok(prompt.includes('Topic clarity'));
+    assert.ok(prompt.includes('2,000 to 2,800 characters'));
+    assert.ok(prompt.includes('Do not include **'));
     assert.ok(!prompt.includes('User-supplied supporting context'));
   });
 
@@ -219,7 +222,6 @@ describe('manual finalization', () => {
           tone: 'Professional',
           description: '',
           niches: [],
-          customLinks: null,
           contactInfo: null,
           websiteUrl: null,
           includeContactInfo: false,
@@ -247,7 +249,6 @@ describe('manual finalization', () => {
         tone: 'Professional',
         description: 'SaaS founder',
         niches: [],
-        customLinks: null,
         contactInfo: 'Email me at hello@veyrais.test',
         websiteUrl: 'https://veyrais.test',
         includeContactInfo: true,
@@ -263,6 +264,29 @@ describe('manual finalization', () => {
     const body = assembleManualPostBody(validManualPost());
     assert.ok(body.includes('Most multi-tenant bugs'));
     assert.ok(body.includes('Treat tenant scope as a request invariant'));
+  });
+
+  it('removes markdown bold markers during finalization', () => {
+    const finalized = finalizeManualGeneratedPostV2(
+      validManualPost({
+        hook: '**Tenant scope** is not a UI detail.',
+        body: 'Server-side checks should own **tenant authorization** for every protected request.',
+      }),
+      'fallback',
+      {
+        topic: 'Tenant authorization',
+        voice: {
+          tone: 'Professional',
+          description: '',
+          niches: [],
+          contactInfo: null,
+          websiteUrl: null,
+          includeContactInfo: false,
+          includeWebsiteLink: false,
+        },
+      },
+    );
+    assert.ok(!finalized.content.includes('**'));
   });
 });
 

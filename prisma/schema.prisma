@@ -257,9 +257,6 @@ model BotConfig {
   regionId           String?
   niches             String
   sources            String
-  customRssFeeds     String?
-  customLinks        String?
-  customRedditFeeds  String?
   backgroundImageUrl String?
   imageMode          String? // none | providedBackground | aiGenerated
   imageInstructions  String?
@@ -275,6 +272,13 @@ model BotConfig {
   includeWebsiteLink Boolean  @default(false)
   contactInfo        String?
   websiteUrl         String?
+  profilePositioning Json?
+  targetAudience     Json?
+  contentGoals       Json?
+  contentPillars     Json?
+  topicRules         Json?
+  writingStyle       Json?
+  onboardingStatus   String   @default("LEGACY")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -282,6 +286,7 @@ model BotConfig {
   region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
   @@index([regionId])
+  @@index([onboardingStatus])
 }
 
 model LinkedInAccount {

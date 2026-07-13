@@ -50,7 +50,6 @@ function voiceContextFixture(): ManualVoiceContext {
       tone: 'Professional',
       description: 'Backend engineer writing about SaaS architecture',
       niches: ['SaaS'],
-      customLinks: null,
       contactInfo: null,
       websiteUrl: null,
       includeContactInfo: false,

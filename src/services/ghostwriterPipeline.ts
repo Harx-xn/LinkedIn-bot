@@ -13,6 +13,7 @@ import { validatePlanTopicDiversity } from './trendDiversityService';
 export type { GeneratedSlotResult };
 
 import type { BotImageMode } from './botImageModeService';
+import type { EffectiveBotStrategy } from './botStrategyService';
 
 export type GhostwriterBotConfig = {
   tone?: string | null;
@@ -26,11 +27,11 @@ export type GhostwriterBotConfig = {
   brandLogoUrl?: string | null;
   brandLogoEnabled?: boolean;
   brandLogoPosition?: string | null;
-  customLinks?: string | null;
   contactInfo?: string | null;
   websiteUrl?: string | null;
   includeContactInfo?: boolean;
   includeWebsiteLink?: boolean;
+  strategy?: EffectiveBotStrategy;
 };
 
 function toTrendCandidates(trends: Trend[], niche?: string): TrendCandidate[] {
@@ -55,9 +56,16 @@ export async function prepareBatchContext(
   slotCount: number,
 ) {
   const author: AuthorContext = {
-    description: config.description || '',
-    tone: config.tone || 'Professional',
+    description: config.strategy?.profilePositioning.positioningStatement || config.description || '',
+    tone: config.strategy?.writingStyle.tone[0] || config.tone || 'Professional',
     niches,
+    targetAudience: config.strategy
+      ? [
+          config.strategy.targetAudience.primaryAudience,
+          ...(config.strategy.targetAudience.secondaryAudiences ?? []),
+        ].filter(Boolean)
+      : undefined,
+    strategy: config.strategy,
   };
 
   const allCandidates: TrendCandidate[] = [];
@@ -74,17 +82,21 @@ export async function prepareBatchContextV2(params: {
   config: GhostwriterBotConfig;
   slotCount: number;
   sources: string[];
-  customFeeds: string[];
-  customLinks: string[];
-  customRedditFeeds: string[];
   openaiApiKey?: string | null;
   previewId?: string;
   configHash?: string;
 }) {
   const author: AuthorContext = {
-    description: params.config.description || '',
-    tone: params.config.tone || 'Professional',
+    description: params.config.strategy?.profilePositioning.positioningStatement || params.config.description || '',
+    tone: params.config.strategy?.writingStyle.tone[0] || params.config.tone || 'Professional',
     niches: params.niches,
+    targetAudience: params.config.strategy
+      ? [
+          params.config.strategy.targetAudience.primaryAudience,
+          ...(params.config.strategy.targetAudience.secondaryAudiences ?? []),
+        ].filter(Boolean)
+      : undefined,
+    strategy: params.config.strategy,
   };
 
   const orchestrator = new TrendOrchestrationService(params.openaiApiKey);
@@ -97,6 +109,7 @@ export async function prepareBatchContextV2(params: {
         userId: params.userId,
         previewCandidates: stored.pool.candidates,
         author,
+        strategy: params.config.strategy,
         plans: [],
         slotCount: params.slotCount,
       });
@@ -136,10 +149,8 @@ export async function prepareBatchContextV2(params: {
     userId: params.userId,
     niches: params.niches,
     author,
+    strategy: params.config.strategy,
     sources: params.sources,
-    customFeeds: params.customFeeds,
-    customLinks: params.customLinks,
-    customRedditFeeds: params.customRedditFeeds,
     slotCount: params.slotCount,
     mode: 'generation',
   });

@@ -4,17 +4,18 @@ import { GenerativeImagesService } from './generativeImagesService';
 import { decryptSecret, decryptSecretArray } from './secretCrypto';
 import { finalizeGeneratedPostContent } from './postContentFormatting';
 import type { GeneratedPostContent } from './generationTypes';
+import { buildEffectiveBotStrategy, type EffectiveBotStrategy } from './botStrategyService';
 
 export type BotVoice = {
   tone: string;
   description: string;
   backgroundImageUrl?: string;
-  customLinks: string | null;
   contactInfo: string | null;
   websiteUrl: string | null;
   includeContactInfo: boolean;
   includeWebsiteLink: boolean;
   niches: string[];
+  strategy?: EffectiveBotStrategy;
 };
 
 export type NormalizeGeneratedOptions = {
@@ -24,7 +25,6 @@ export type NormalizeGeneratedOptions = {
   contactInfo?: string | null;
   websiteUrl?: string | null;
   description?: string | null;
-  customLinks?: string | null;
 };
 
 export async function getDecryptedGeminiKeysForUser(userId: string): Promise<string[]> {
@@ -62,37 +62,37 @@ export async function getBotVoice(userId: string): Promise<BotVoice> {
       tone: true,
       description: true,
       backgroundImageUrl: true,
-      customLinks: true,
       contactInfo: true,
       websiteUrl: true,
       includeContactInfo: true,
       includeWebsiteLink: true,
       niches: true,
+      sources: true,
+      profilePositioning: true,
+      targetAudience: true,
+      contentGoals: true,
+      contentPillars: true,
+      topicRules: true,
+      writingStyle: true,
     },
   });
 
-  let niches: string[] = [];
-  if (config?.niches) {
-    try {
-      const parsed = JSON.parse(config.niches);
-      if (Array.isArray(parsed)) {
-        niches = parsed.filter((v): v is string => typeof v === 'string');
-      }
-    } catch {
-      niches = [];
-    }
-  }
+  const strategy = buildEffectiveBotStrategy(config);
+  const niches = [
+    ...strategy.contentPillars.primaryPillars.map((pillar) => pillar.name),
+    ...strategy.legacy.niches,
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
 
   return {
-    tone: config?.tone || 'Professional',
-    description: config?.description || '',
+    tone: strategy.writingStyle.tone[0] || config?.tone || 'Professional',
+    description: strategy.profilePositioning.positioningStatement || config?.description || '',
     backgroundImageUrl: config?.backgroundImageUrl || undefined,
-    customLinks: config?.customLinks || null,
     contactInfo: config?.contactInfo || null,
     websiteUrl: config?.websiteUrl || null,
     includeContactInfo: config?.includeContactInfo ?? false,
     includeWebsiteLink: config?.includeWebsiteLink ?? false,
     niches,
+    strategy,
   };
 }
 
@@ -108,7 +108,6 @@ export function normalizeGeneratedContent(
     contactInfo: options.contactInfo,
     websiteUrl: options.websiteUrl,
     description: options.description,
-    customLinks: options.customLinks,
   });
 }
 

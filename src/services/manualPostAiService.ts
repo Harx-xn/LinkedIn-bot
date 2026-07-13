@@ -21,6 +21,8 @@ import {
   fetchReadableArticleFromUrl,
   type ReadableArticle,
 } from './manualPost/articleUrlFetcher';
+import { buildEffectiveBotStrategy } from './botStrategyService';
+import { hasStrategyGenerationContext } from './botStrategyTrendService';
 
 export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
 export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = DEFAULT_TOPIC_SUGGESTION_COUNT;
@@ -226,27 +228,26 @@ export async function suggestManualPostTopics(
   }
 
   const voice = await getBotVoice(userId);
-  if (!voice.description.trim()) {
-    throw new ManualPostError(400, 'Complete your ghostwriter profile before suggesting topics.');
-  }
-
   const count = clampTopicSuggestionCount(options?.count ?? DEFAULT_TOPIC_SUGGESTION_COUNT);
   const provider = parseContentProvider(options?.provider);
   const [voiceContext, botConfig] = await Promise.all([
     getManualVoiceContext(userId),
     prisma.botConfig.findUnique({
       where: { userId },
-      select: { sources: true },
     }),
   ]);
+  const strategy = buildEffectiveBotStrategy(botConfig);
+  if (!voice.description.trim() && !hasStrategyGenerationContext(strategy)) {
+    throw new ManualPostError(400, 'Complete your ghostwriter profile before suggesting topics.');
+  }
   const trendSources = parseTrendSources(botConfig?.sources);
   const currentYear = new Date().getFullYear();
   const contentService = await resolveManualContentService(userId, provider);
   const prompt = buildManualTopicSuggestionPrompt({
     voice: {
-      tone: voice.tone,
-      description: voice.description,
-      niches: voice.niches,
+      tone: strategy.writingStyle.tone[0] || voice.tone,
+      description: strategy.profilePositioning.positioningStatement || voice.description,
+      niches: strategy.contentPillars.primaryPillars.map((pillar) => pillar.name).concat(voice.niches),
       websiteUrl: voice.websiteUrl,
       contactInfo: voice.contactInfo,
     },
@@ -275,7 +276,7 @@ export async function suggestManualPostTopics(
     });
   }
 
-  const topics = finalizeTopicSuggestions(parsedTopics, voice, trendSources, count);
+  const topics = finalizeTopicSuggestions(parsedTopics, voice, trendSources, count, strategy);
   if (topics.length === 0) {
     throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
   }

@@ -133,10 +133,7 @@ describe('trend preview pipeline', () => {
     const configHash = buildTrendConfigHash({
       niches: ['SaaS'],
       sources: ['google'],
-      customFeeds: [],
-      customLinks: [],
-      customRedditFeeds: [],
-    });
+   });
     const stored = saveTrendPreviewPool({
       userId: 'user-1',
       configHash,
@@ -151,10 +148,7 @@ describe('trend preview pipeline', () => {
     const hash = buildTrendConfigHash({
       niches: ['SaaS'],
       sources: ['google'],
-      customFeeds: [],
-      customLinks: [],
-      customRedditFeeds: [],
-    });
+     });
     const stored = saveTrendPreviewPool({
       userId: 'user-1',
       configHash: hash,

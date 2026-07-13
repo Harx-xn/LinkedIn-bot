@@ -26,6 +26,8 @@ export const MANUAL_QUALITY_RULES = `Quality requirements:
 - No invented metrics, clients, incidents, revenue, costs, timelines, quotes, or regulatory outcomes.
 - Avoid generic AI phrasing and filler transitions.
 - Maximum three relevant hashtags.
+- Target 2,000 to 2,800 characters when the topic supports it.
+- Do not use Markdown bold markers or double asterisks. Do not include ** anywhere.
 - Keep assembled post content within LinkedIn's 3,000-character limit.`;
 
 export const MANUAL_OUTPUT_SCHEMA_RULES = `Output MUST be valid JSON with this exact shape:
@@ -171,6 +173,9 @@ export const MANUAL_CRITIC_OUTPUT_SCHEMA = `Output MUST be valid JSON with this 
     "focus": 9,
     "credibility": 9,
     "originality": 7,
+    "audienceFit": 8,
+    "conversationPotential": 8,
+    "dwellQuality": 8,
     "readability": 8,
     "genericAiRisk": 2
   },
@@ -342,7 +347,7 @@ Deterministic issues already detected:
 ${input.deterministicIssues.length ? input.deterministicIssues.map((issue) => `- ${issue}`).join('\n') : '- none'}
 
 Critic rules:
-- Score hook, specificity, voiceMatch, focus, credibility, originality, readability, and genericAiRisk (0-10).
+- Score hook, specificity, voiceMatch, focus, credibility, originality, audienceFit, conversationPotential, dwellQuality, readability, and genericAiRisk (0-10).
 - Use decision PASS when the draft is strong enough.
 - Use decision REVISE only when a bounded rewrite is needed.
 - If REVISE, return revised.hook/body/closingLine with targeted fixes only.

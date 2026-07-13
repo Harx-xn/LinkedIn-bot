@@ -30,6 +30,9 @@ export function criticScoresNeedRewrite(scores: ManualCriticScores): boolean {
     scores.specificity < 7 ||
     scores.focus < 8 ||
     scores.credibility < 7 ||
+    (scores.audienceFit ?? 8) < 7 ||
+    (scores.conversationPotential ?? 8) < 7 ||
+    (scores.dwellQuality ?? 8) < 7 ||
     scores.genericAiRisk > 4
   );
 }
@@ -50,6 +53,9 @@ export function parseManualCriticResult(raw: string): ManualCriticResult {
     focus: clampScore(scoresObj.focus),
     credibility: clampScore(scoresObj.credibility),
     originality: clampScore(scoresObj.originality),
+    audienceFit: clampScore(scoresObj.audienceFit, 8),
+    conversationPotential: clampScore(scoresObj.conversationPotential, 8),
+    dwellQuality: clampScore(scoresObj.dwellQuality, 8),
     readability: clampScore(scoresObj.readability),
     genericAiRisk: clampScore(scoresObj.genericAiRisk),
   };
@@ -96,12 +102,29 @@ export function applyBoundedManualRevision(
 }
 
 export function extractPreservedFactTokens(text: string): string[] {
+  const genericSentenceStarters = new Set([
+    'A',
+    'An',
+    'The',
+    'This',
+    'That',
+    'These',
+    'Those',
+    'Here',
+    'What',
+    'Why',
+    'How',
+    'Most',
+    'Many',
+    'When',
+    'In',
+  ]);
   return Array.from(
     new Set(
       text
         .match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b|\b\d+(?:\.\d+)?%|\$[\d,]+(?:\.\d+)?\b/g) ?? [],
     ),
-  );
+  ).filter((token) => !genericSentenceStarters.has(token));
 }
 
 export function preservedFactsSurviveRevision(
