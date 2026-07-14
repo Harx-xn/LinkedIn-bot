@@ -23,6 +23,11 @@ import {
 } from './manualPost/articleUrlFetcher';
 import { buildEffectiveBotStrategy } from './botStrategyService';
 import { hasStrategyGenerationContext } from './botStrategyTrendService';
+import {
+  improveWeakTopicSuggestions,
+  STRONG_TOPIC_SCORE,
+} from './manualPost/topicImprovementService';
+import { areNearDuplicateTitles } from './manualPost/manualPostTopicSuggestionService';
 
 export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
 export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = DEFAULT_TOPIC_SUGGESTION_COUNT;
@@ -204,7 +209,14 @@ export function parseManualTopicSuggestionsResponse(raw: string): ManualTopicSug
         ? record.reason.trim()
         : description;
     if (!title || !description) continue;
-    topics.push({ title, description, reason });
+    topics.push({
+      title,
+      description,
+      reason,
+      sourceTitle: typeof record.sourceTitle === 'string' ? record.sourceTitle.trim() : undefined,
+      sourceUrl: typeof record.sourceUrl === 'string' ? record.sourceUrl.trim() : undefined,
+      sourcePlatform: typeof record.sourcePlatform === 'string' ? record.sourcePlatform.trim() : undefined,
+    });
   }
 
   if (topics.length === 0) {
@@ -217,7 +229,7 @@ export function parseManualTopicSuggestionsResponse(raw: string): ManualTopicSug
 export async function suggestManualPostTopics(
   userId: string,
   options?: { count?: unknown; provider?: unknown },
-): Promise<{ topics: ManualTopicSuggestion[] }> {
+): Promise<{ topics: ManualTopicSuggestion[]; metadata?: { requested: number; accepted: number; discarded: number; additionalDiscoveryRuns: number; minimumScore: number } }> {
   const gate = await canGenerate(userId);
   if (!gate.allowed) {
     throw new ManualPostError(
@@ -243,6 +255,7 @@ export async function suggestManualPostTopics(
   const trendSources = parseTrendSources(botConfig?.sources);
   const currentYear = new Date().getFullYear();
   const contentService = await resolveManualContentService(userId, provider);
+  const discoveryCount = Math.min(MAX_MANUAL_TOPIC_SUGGESTIONS, Math.max(count * 2, count));
   const prompt = buildManualTopicSuggestionPrompt({
     voice: {
       tone: strategy.writingStyle.tone[0] || voice.tone,
@@ -253,35 +266,69 @@ export async function suggestManualPostTopics(
     },
     voiceContext,
     trendSources,
-    count,
+    count: discoveryCount,
     currentYear,
   });
 
-  let raw: string;
-  try {
-    // Use rewrite raw transport so OpenAI is not forced into manual-post JSON schema.
-    raw = await contentService.fetchComposerRewriteRaw(prompt, provider);
-  } catch (err) {
-    console.error('[manual-posts] suggest-topics provider error:', err instanceof Error ? err.message : err);
-    throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
+  const discover = async (): Promise<ManualTopicSuggestion[]> => {
+    let raw: string;
+    try {
+      // Use rewrite raw transport so OpenAI is not forced into manual-post JSON schema.
+      raw = await contentService.fetchComposerRewriteRaw(prompt, provider);
+    } catch (err) {
+      console.error('[manual-posts] suggest-topics provider error:', err instanceof Error ? err.message : err);
+      throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
+    }
+    let parsedTopics: ManualTopicSuggestion[] = [];
+    try {
+      parsedTopics = parseManualTopicSuggestionsResponse(raw);
+    } catch (err) {
+      console.warn('[manual-posts] suggest-topics AI parse failed; using profile fallbacks', {
+        userId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return finalizeTopicSuggestions(parsedTopics, voice, trendSources, discoveryCount, strategy);
+  };
+
+  const improveBatch = (improvementPrompt: string) =>
+    contentService.fetchComposerRewriteRaw(improvementPrompt, provider);
+  let discarded = 0;
+  let additionalDiscoveryRuns = 0;
+  const first = await improveWeakTopicSuggestions({ topics: await discover(), strategy, improveBatch });
+  let accepted = first.accepted;
+  discarded += first.discarded.length;
+
+  if (accepted.length < count) {
+    additionalDiscoveryRuns = 1;
+    const second = await improveWeakTopicSuggestions({ topics: await discover(), strategy, improveBatch });
+    discarded += second.discarded.length;
+    for (const topic of second.accepted) {
+      if (!accepted.some((existing) =>
+        areNearDuplicateTitles(existing.title, topic.title)
+        || (existing.sourceUrl && topic.sourceUrl && existing.sourceUrl === topic.sourceUrl)
+        || (existing.suggestedAngle && topic.suggestedAngle && areNearDuplicateTitles(existing.suggestedAngle, topic.suggestedAngle)))) {
+        accepted.push(topic);
+      }
+    }
   }
 
-  let parsedTopics: ManualTopicSuggestion[] = [];
-  try {
-    parsedTopics = parseManualTopicSuggestionsResponse(raw);
-  } catch (err) {
-    console.warn('[manual-posts] suggest-topics AI parse failed; using profile fallbacks', {
-      userId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  const topics = finalizeTopicSuggestions(parsedTopics, voice, trendSources, count, strategy);
+  const topics = accepted
+    .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0))
+    .slice(0, count);
   if (topics.length === 0) {
     throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
   }
-
-  return { topics };
+  console.info('[topic-improvement] run complete', {
+    requested: count,
+    accepted: topics.length,
+    discarded,
+    additionalDiscoveryRuns,
+  });
+  return {
+    topics,
+    metadata: { requested: count, accepted: topics.length, discarded, additionalDiscoveryRuns, minimumScore: STRONG_TOPIC_SCORE },
+  };
 }
 
 function pickOptionalString(

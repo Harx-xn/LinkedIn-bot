@@ -16,6 +16,7 @@ export type ManualTopicSuggestion = {
   relevanceScore?: number;
   sourceTitle?: string;
   sourceUrl?: string;
+  sourcePlatform?: string;
 };
 
 export const DEFAULT_TOPIC_SUGGESTION_COUNT = 5;
@@ -90,7 +91,7 @@ export function sanitizeTopicSuggestions(
     if (isGenericTopicTitle(title)) continue;
     if (!isValidSuggestion({ title, description, reason })) continue;
 
-    const candidate = { title, description, reason };
+    const candidate: ManualTopicSuggestion = { ...topic, title, description, reason };
     if (accepted.some((existing) => areNearDuplicateTitles(existing.title, candidate.title))) {
       continue;
     }

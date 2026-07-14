@@ -18,6 +18,15 @@ export type StrategyTrendScore = {
   suggestedAngle?: string;
   audienceRelevance?: string;
   riskFlags?: string[];
+  breakdown: {
+    pillarMatch: number;
+    audienceMatch: number;
+    goalMatch: number;
+    positioningMatch: number;
+    freshness: number;
+    exclusionPenalty: number;
+    finalScore: number;
+  };
 };
 
 function normalizeText(value: string | null | undefined): string {
@@ -149,6 +158,9 @@ function candidateText(candidate: TrendCandidate): string {
     candidate.summary,
     candidate.searchQuery,
     candidate.niche,
+    candidate.matchedPillar,
+    candidate.suggestedAngle,
+    candidate.audienceRelevance,
     ...(candidate.keyPoints ?? []),
   ].filter(Boolean).join(' ');
 }
@@ -192,6 +204,15 @@ export function scoreTrendForStrategy(
   const text = candidateText(candidate);
   const reasons: string[] = [];
   const riskFlags: string[] = [];
+  const breakdown = {
+    pillarMatch: 0,
+    audienceMatch: 0,
+    goalMatch: 0,
+    positioningMatch: 0,
+    freshness: 0,
+    exclusionPenalty: 0,
+    finalScore: 0,
+  };
 
   const excluded = textMatchesAny(text, [
     ...strategy.contentPillars.excludedTopics,
@@ -205,9 +226,11 @@ export function scoreTrendForStrategy(
   let score = 0;
   if (pillar) {
     score += 25;
+    breakdown.pillarMatch = 25;
     reasons.push(`pillar_match:${pillar.name}`);
   } else if (strategy.legacy.niches.some((niche) => normalizeText(text).includes(normalizeText(niche)))) {
     score += 15;
+    breakdown.pillarMatch = 15;
     reasons.push('legacy_niche_match');
   }
 
@@ -223,6 +246,7 @@ export function scoreTrendForStrategy(
   const audienceMatch = textMatchesAny(text, audienceSignals);
   if (audienceMatch) {
     score += 35;
+    breakdown.audienceMatch = 35;
     reasons.push(`audience_match:${audienceMatch}`);
   }
 
@@ -233,6 +257,7 @@ export function scoreTrendForStrategy(
   ].filter(Boolean);
   if (textMatchesAny(text, goalSignals)) {
     score += 15;
+    breakdown.goalMatch = 15;
     reasons.push('content_goal_alignment');
   }
 
@@ -244,14 +269,17 @@ export function scoreTrendForStrategy(
   const hasPositioningStrategy = positioningSignals.some((value) => value.trim());
   if (textMatchesAny(text, positioningSignals)) {
     score += 10;
+    breakdown.positioningMatch = 10;
     reasons.push('positioning_fit');
   }
 
   if (candidate.publishedAt) {
     score += 10;
+    breakdown.freshness = 10;
     reasons.push('timely_source');
   } else {
     score += 4;
+    breakdown.freshness = 4;
   }
 
   const duplicate = isDuplicateRecentTopic(candidate, options.recentHistory ?? [], strategy);
@@ -259,8 +287,12 @@ export function scoreTrendForStrategy(
     riskFlags.push(`recent_duplicate:${duplicate.id}`);
   }
 
-  if (excluded) score -= 5;
+  if (excluded) {
+    score -= 5;
+    breakdown.exclusionPenalty = -5;
+  }
   score = Math.max(0, Math.min(100, score));
+  breakdown.finalScore = score;
 
   const minimumScore = !hasAudienceStrategy && !hasPositioningStrategy
     ? Math.min(strategy.topicRules.minimumRelevanceScore, 35)
@@ -287,5 +319,6 @@ export function scoreTrendForStrategy(
     suggestedAngle: (pillar?.exampleAngles[0] ?? strategy.profilePositioning.uniquePointOfView) || undefined,
     audienceRelevance: pillar?.audienceRelevance || audienceMatch,
     riskFlags,
+    breakdown,
   };
 }
