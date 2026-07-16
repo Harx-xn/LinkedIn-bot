@@ -82,6 +82,7 @@ export async function getBillingMe(userId: string) {
     trialEndsAt: true,
     trialRedeemedAt: true,
     stripeCustomerId: true,
+    isBillingExempt: true,
   } as const;
 
   let user = await prisma.user.findUnique({
@@ -93,8 +94,10 @@ export async function getBillingMe(userId: string) {
     throw new Error('User not found');
   }
 
-  if (user.role !== UserRole.USER) {
+  if (user.role !== UserRole.USER || user.isBillingExempt) {
     return {
+      billingExempt: user.isBillingExempt,
+      unlimited: true,
       billingRequired: false,
       dashboardAccess: true,
       trialEligible: false,
@@ -181,6 +184,8 @@ export async function getBillingMe(userId: string) {
   const cancelAtPeriodEnd = sub?.cancelAtPeriodEnd ?? false;
 
   return {
+    billingExempt: false,
+    unlimited: false,
     billingRequired,
     dashboardAccess,
     trialEligible,

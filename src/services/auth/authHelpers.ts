@@ -18,6 +18,7 @@ const USER_SELECT = {
   role: true,
   regionId: true,
   trialEndsAt: true,
+  isBillingExempt: true,
   region: {
     select: {
       id: true,
@@ -35,6 +36,13 @@ export type AuthUserResponse = {
   role: string;
   regionId: string | null;
   trialEndsAt?: Date | null;
+  isBillingExempt: boolean;
+  effectiveAccess: {
+    hasAccess: boolean;
+    unlimited: boolean;
+    billingExempt: boolean;
+    accessSource: 'BILLING_EXEMPT' | 'PRIVILEGED_ROLE' | 'STANDARD';
+  };
   region: {
     id: string;
     name: string;
@@ -66,6 +74,7 @@ export function buildAuthUserResponse(user: {
   role: string;
   regionId: string | null;
   trialEndsAt?: Date | null;
+  isBillingExempt: boolean;
   region: AuthUserResponse['region'];
 }): AuthUserResponse {
   return {
@@ -75,6 +84,15 @@ export function buildAuthUserResponse(user: {
     role: user.role,
     regionId: user.regionId,
     trialEndsAt: user.trialEndsAt ?? null,
+    isBillingExempt: user.isBillingExempt,
+    effectiveAccess: user.isBillingExempt
+      ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
+      : {
+          hasAccess: user.role !== 'USER',
+          unlimited: user.role !== 'USER',
+          billingExempt: false,
+          accessSource: user.role !== 'USER' ? 'PRIVILEGED_ROLE' : 'STANDARD',
+        },
     region: user.region,
   };
 }

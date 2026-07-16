@@ -33,6 +33,7 @@ export async function getUserBillingContext(userId: string) {
       trialRedeemedAt: true,
       billingAccessStatus: true,
       stripeCustomerId: true,
+      isBillingExempt: true,
     },
   });
 }
@@ -149,6 +150,7 @@ export function mapStripeStatusToBillingAccess(
 export async function hasDashboardAccess(userId: string): Promise<boolean> {
   const user = await getUserBillingContext(userId);
   if (!user) return false;
+  if (user.isBillingExempt) return true;
   if (user.role !== UserRole.USER) return true;
 
   const status = user.billingAccessStatus;

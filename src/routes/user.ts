@@ -34,6 +34,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       role: true,
       themePreference: true,
       hasCompletedOnboardingTour: true,
+      isBillingExempt: true,
 
       regionId: true,
       region: {
@@ -101,6 +102,13 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     email: user.email,
     username: user.username,
     role: user.role,
+    isBillingExempt: user.isBillingExempt,
+    effectiveAccess: {
+      hasAccess: entitlement.hasAccess,
+      unlimited: entitlement.unlimited,
+      billingExempt: entitlement.billingExempt,
+      accessSource: entitlement.accessSource,
+    },
     themePreference: user.themePreference || "LIGHT",
     hasCompletedOnboardingTour: user.hasCompletedOnboardingTour,
 

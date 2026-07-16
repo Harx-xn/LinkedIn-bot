@@ -114,6 +114,10 @@ model User {
   trialRedeemedAt     DateTime?
   billingAccessStatus BillingAccessStatus @default(BILLING_REQUIRED)
   stripeCustomerId    String?
+  isBillingExempt     Boolean   @default(false)
+  billingExemptAt     DateTime?
+  billingExemptById   String?
+  billingExemptReason String?
 
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
@@ -148,6 +152,7 @@ model User {
 
   @@index([regionId])
   @@index([role])
+  @@index([isBillingExempt])
 }
 
 model AuthProviderAccount {

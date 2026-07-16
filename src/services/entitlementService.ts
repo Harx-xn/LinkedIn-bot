@@ -4,18 +4,23 @@ import { hasDashboardAccess } from './billing/billingAccessService';
 import { reconcileUserStripeSubscriptionForAccess } from './billing/billingReconciliationService';
 import { getNumberSetting } from './settingsService';
 import { getUtcMonthWindow } from '../utils/monthlyLimitWindow';
+import { getEffectiveAccess } from './billing/billingExemptionService';
 
 export const TRIAL_DAYS = 14;
 export const TRIAL_MONTHLY_PUBLISH_LIMIT = 30;
 export const TRIAL_MONTHLY_PUBLISH_SETTING_KEY = 'trial.monthlyPublishLimit';
 
-export type EntitlementStatus = 'ADMIN' | 'SUBSCRIBED' | 'TRIAL' | 'EXPIRED';
+export type EntitlementStatus = 'ADMIN' | 'BILLING_EXEMPT' | 'SUBSCRIBED' | 'TRIAL' | 'EXPIRED';
 
 export interface Entitlement {
   status: EntitlementStatus;
+  hasAccess: boolean;
   trialEndsAt: Date | null;
   daysLeft: number;
   monthlyPublishLimit: number | null;
+  unlimited: boolean;
+  billingExempt: boolean;
+  accessSource: 'BILLING_EXEMPT' | 'PRIVILEGED_ROLE' | 'STANDARD';
 }
 
 export function getTrialMonthlyPublishLimit(
@@ -30,6 +35,7 @@ export function getTrialMonthlyPublishLimit(
 }
 
 export async function getEntitlement(userId: string): Promise<Entitlement> {
+  const effectiveAccess = await getEffectiveAccess(userId);
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
@@ -41,11 +47,15 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
   });
 
   if (!user) {
-    return { status: 'EXPIRED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: 0 };
+    return { status: 'EXPIRED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: 0, ...effectiveAccess };
+  }
+
+  if (effectiveAccess.billingExempt) {
+    return { status: 'BILLING_EXEMPT', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null, ...effectiveAccess };
   }
 
   if (user.role !== UserRole.USER) {
-    return { status: 'ADMIN', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
+    return { status: 'ADMIN', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null, ...effectiveAccess };
   }
 
   const activeSub = await prisma.subscription.findFirst({
@@ -53,7 +63,7 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
     select: { id: true },
   });
   if (activeSub) {
-    return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
+    return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null, ...effectiveAccess };
   }
 
   const now = new Date();
@@ -65,7 +75,7 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
   if (!trialing) {
     const reconciled = await reconcileUserStripeSubscriptionForAccess(userId, 'entitlement');
     if (reconciled?.status === 'ACTIVE') {
-      return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null };
+      return { status: 'SUBSCRIBED', trialEndsAt: null, daysLeft: 0, monthlyPublishLimit: null, ...effectiveAccess };
     }
   }
 
@@ -76,10 +86,11 @@ export async function getEntitlement(userId: string): Promise<Entitlement> {
       trialEndsAt: user.trialEndsAt,
       daysLeft,
       monthlyPublishLimit: await getTrialMonthlyPublishLimit(user.regionId),
+      ...effectiveAccess,
     };
   }
 
-  return { status: 'EXPIRED', trialEndsAt: user.trialEndsAt ?? null, daysLeft: 0, monthlyPublishLimit: 0 };
+  return { status: 'EXPIRED', trialEndsAt: user.trialEndsAt ?? null, daysLeft: 0, monthlyPublishLimit: 0, ...effectiveAccess };
 }
 
 export async function publishedThisMonth(
@@ -102,7 +113,7 @@ export interface GateResult {
 export async function canPublish(userId: string): Promise<GateResult> {
   const entitlement = await getEntitlement(userId);
 
-  if (entitlement.status === 'ADMIN' || entitlement.status === 'SUBSCRIBED') {
+  if (entitlement.unlimited || entitlement.status === 'ADMIN' || entitlement.status === 'SUBSCRIBED') {
     return { allowed: true, entitlement };
   }
 
@@ -139,6 +150,8 @@ export async function canPublish(userId: string): Promise<GateResult> {
 
 export async function canGenerate(userId: string): Promise<GateResult> {
   const entitlement = await getEntitlement(userId);
+
+  if (entitlement.unlimited) return { allowed: true, entitlement };
 
   if (!(await hasDashboardAccess(userId))) {
     await logGenerationDenied(userId, 'dashboard_access_missing');

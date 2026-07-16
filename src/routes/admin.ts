@@ -8,6 +8,7 @@ import { prisma } from '../prismaClient';
 import { authMiddleware } from '../middleware/authMiddleware';
 import { requireRole } from '../middleware/requireRole';
 import { isValidUsername } from '../services/auth/authHelpers';
+import { getEffectiveAccess } from '../services/billing/billingExemptionService';
 
 const router = Router();
 
@@ -331,6 +332,64 @@ router.get('/users', async (_req, res) => {
   });
 
   return res.json(users);
+});
+
+router.patch('/users/:userId/billing-exemption', async (req, res) => {
+  const { userId } = req.params;
+  const { enabled, reason } = req.body as { enabled?: unknown; reason?: unknown };
+
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ message: 'enabled must be a boolean' });
+  }
+  if (userId === req.user!.id) {
+    return res.status(400).json({ message: 'You cannot change your own billing exemption' });
+  }
+  const normalizedReason = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
+  const target = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, role: true, isBillingExempt: true },
+  });
+  if (!target) return res.status(404).json({ message: 'User not found' });
+  if (target.role !== UserRole.USER) {
+    return res.status(400).json({ message: 'Billing exemption is only available for user accounts' });
+  }
+
+  const updatedUser = await prisma.user.update({
+    where: { id: userId },
+    data: enabled
+      ? {
+          isBillingExempt: true,
+          billingExemptAt: new Date(),
+          billingExemptById: req.user!.id,
+          billingExemptReason: normalizedReason || null,
+        }
+      : {
+          isBillingExempt: false,
+          billingExemptAt: null,
+          billingExemptById: null,
+          billingExemptReason: null,
+        },
+    select: {
+      id: true,
+      email: true,
+      username: true,
+      role: true,
+      isActive: true,
+      isBillingExempt: true,
+      billingExemptAt: true,
+    },
+  });
+
+  console.info('[audit] billing exemption changed', {
+    targetUserId: userId,
+    superAdminId: req.user!.id,
+    previousState: target.isBillingExempt,
+    newState: enabled,
+    reason: normalizedReason || null,
+    timestamp: new Date().toISOString(),
+  });
+
+  return res.json({ user: updatedUser, effectiveAccess: await getEffectiveAccess(userId) });
 });
 
 export default router;

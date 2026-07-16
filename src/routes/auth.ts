@@ -157,6 +157,10 @@ router.post('/login', async (req, res) => {
       email: user.email,
       username: user.username,
       role: user.role,
+      isBillingExempt: user.isBillingExempt,
+      effectiveAccess: user.isBillingExempt
+        ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
+        : { hasAccess: user.role !== 'USER', unlimited: user.role !== 'USER', billingExempt: false, accessSource: user.role !== 'USER' ? 'PRIVILEGED_ROLE' : 'STANDARD' },
       regionId: user.regionId,
       region: user.region,
     },

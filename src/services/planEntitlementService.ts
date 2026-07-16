@@ -4,6 +4,7 @@ import { prisma } from '../prismaClient';
 import { hasDashboardAccess } from './billing/billingAccessService';
 import { getEntitlement } from './entitlementService';
 import { getUtcMonthWindow } from '../utils/monthlyLimitWindow';
+import { getEffectiveAccess } from './billing/billingExemptionService';
 
 /**
  * Plan entitlement service.
@@ -46,6 +47,9 @@ export interface PlanEntitlements {
   periodStart: Date;
   periodEnd: Date;
   hasActiveSubscription: boolean;
+  unlimited: boolean;
+  billingExempt: boolean;
+  accessSource: 'BILLING_EXEMPT' | 'PRIVILEGED_ROLE' | 'STANDARD';
   planId: string | null;
   planName: string | null;
   fullDashboardUnlock: boolean;
@@ -226,11 +230,7 @@ export function getMonthlyLimits(plan: SubscriptionPlan | Plan) {
 // ---------------------------------------------------------------------------
 
 async function isPrivileged(userId: string): Promise<boolean> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { role: true },
-  });
-  return !!user && user.role !== UserRole.USER;
+  return (await getEffectiveAccess(userId)).unlimited;
 }
 
 /**
@@ -238,6 +238,7 @@ async function isPrivileged(userId: string): Promise<boolean> {
  * Shape matches the GET /entitlements/me contract.
  */
 export async function getUserPlanEntitlements(userId: string): Promise<PlanEntitlements> {
+  const effectiveAccess = await getEffectiveAccess(userId);
   const {
     periodStart,
     periodEnd,
@@ -256,7 +257,14 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
     batchGenerationsToday: batchGenerationsThisMonth,
     imagesGeneratedToday: imagesGeneratedThisMonth,
   };
-  const responseBase = { usagePeriod: 'MONTHLY' as const, periodStart, periodEnd };
+  const responseBase = {
+    usagePeriod: 'MONTHLY' as const,
+    periodStart,
+    periodEnd,
+    unlimited: effectiveAccess.unlimited,
+    billingExempt: effectiveAccess.billingExempt,
+    accessSource: effectiveAccess.accessSource,
+  };
   const makeRemaining = (limits: { posts: number; batchGenerations: number; images: number; manualAiOperations: number }) => ({
     posts: Math.max(0, limits.posts - postsThisMonth),
     batchGenerations: Math.max(0, limits.batchGenerations - batchGenerationsThisMonth),
@@ -268,7 +276,7 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
   });
 
   // Privileged roles are never throttled -> report unlocked + unlimited.
-  if (await isPrivileged(userId)) {
+  if (effectiveAccess.unlimited) {
     const limits = {
       posts: UNLIMITED,
       batchGenerations: UNLIMITED,
