@@ -29,6 +29,7 @@ import {
 import { processTrendCandidates, countUsableTrends } from './trendSelectionService';
 import { TopicFingerprintService } from './topicFingerprintService';
 import type { RankedTrendCandidate } from './generationTypes';
+import { buildEffectiveBotStrategy } from './botStrategyService';
 
 function mockRanked(title: string, niche = 'SaaS'): RankedTrendCandidate {
   return {
@@ -162,6 +163,37 @@ describe('trend preview pipeline', () => {
   it('target candidate count scales with requested preview size', () => {
     const count = targetCandidateCount('preview', 12);
     assert.ok(count >= 25 && count <= 40);
+  });
+
+  it('retains safe fetched trends when strict preview strategy matching rejects the pool', async () => {
+    const plan = buildFallbackExpansionPlan('Industry Alpha');
+    const strategy = buildEffectiveBotStrategy({
+      description: 'I write exclusively for Audience Beta.',
+      niches: JSON.stringify(['Industry Beta']),
+      tone: 'Professional',
+    });
+    const result = await processTrendCandidates({
+      userId: 'user-generic-preview',
+      rawTrends: [
+        {
+          title: 'Quantum computing research reaches a new error-correction milestone',
+          link: 'https://example.com/quantum-milestone',
+          pubDate: new Date().toISOString(),
+          source: 'Research Journal',
+        },
+      ],
+      niche: 'Industry Alpha',
+      plan,
+      author: { description: strategy.profilePositioning.positioningStatement, tone: 'Professional', niches: ['Industry Alpha'] },
+      limit: 3,
+      fingerprintService: new TopicFingerprintService(null),
+      pipelineMode: 'preview',
+      strategy,
+      history: [],
+    });
+
+    assert.equal(result.selected.length, 1);
+    assert.equal(result.selected[0].trend.source, 'Research Journal');
   });
 
   it('countUsableTrends applies cheap filtering', () => {

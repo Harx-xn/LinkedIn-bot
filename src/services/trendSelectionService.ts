@@ -246,12 +246,27 @@ export async function processTrendCandidates(params: {
   let rejectedByStrategy = 0;
 
   if (strategy && pipelineMode === 'preview') {
-    candidates = candidates.filter((candidate) => {
+    const strategyAccepted = candidates.filter((candidate) => {
       const score = scoreTrendForStrategy(candidate, strategy);
       if (score.accepted) return true;
       rejectedByStrategy++;
       return false;
     });
+    // Preview is a view over real fetched trends, not a generation gate. If
+    // strict strategy scoring rejects every otherwise-safe candidate, retain
+    // the fetched pool and let relevance ranking put the best matches first.
+    // This is niche-agnostic and avoids inventing hard-coded fallback topics.
+    if (strategyAccepted.length > 0) {
+      candidates = strategyAccepted;
+    } else if (candidates.length > 0) {
+      console.info({
+        event: 'trend_preview_strategy_filter_relaxed',
+        userId: params.userId,
+        niche: params.niche,
+        candidateCount: candidates.length,
+      });
+      rejectedByStrategy = 0;
+    }
   }
 
   const preRanked = candidates
