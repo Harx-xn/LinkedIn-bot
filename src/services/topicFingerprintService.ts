@@ -126,7 +126,13 @@ export class TopicFingerprintService {
   }
 
   getCached(trend: TrendCandidate): TopicFingerprint | undefined {
-    return fingerprintCache.get(cacheKey(trend));
+    const cached = fingerprintCache.get(cacheKey(trend));
+    if (!cached || cached.topicCluster !== 'other') return cached;
+    const deterministicCluster = classifyTopicCluster(`${trend.topic} ${trend.niche ?? ''}`);
+    if (deterministicCluster === 'other') return cached;
+    const corrected = { ...cached, topicCluster: deterministicCluster };
+    fingerprintCache.set(cacheKey(trend), corrected);
+    return corrected;
   }
 
   cacheFingerprint(trend: TrendCandidate, fingerprint: TopicFingerprint): TopicFingerprint {
@@ -175,9 +181,13 @@ Summary: ${trend.summary ?? ''}`,
         return this.cacheFingerprint(trend, buildFallbackFingerprint(trend));
       }
 
+      const aiCluster = coerceCluster(parsed.data.topicCluster);
+      const deterministicCluster = classifyTopicCluster(`${trend.topic} ${trend.niche ?? ''}`);
       const fp: TopicFingerprint = {
         normalizedTopic: parsed.data.normalizedTopic,
-        topicCluster: coerceCluster(parsed.data.topicCluster),
+        topicCluster: aiCluster === 'other' && deterministicCluster !== 'other'
+          ? deterministicCluster
+          : aiCluster,
         coreClaim: parsed.data.coreClaim,
         entities: parsed.data.entities.slice(0, 8),
         mechanisms: parsed.data.mechanisms.slice(0, 8),

@@ -129,6 +129,23 @@ describe('trend preview quality', () => {
     assert.ok(mediumCount <= 2);
   });
 
+  it('deduplicates the same fingerprinted trend returned through multiple niches', () => {
+    const title = 'AI startup raises funding for workflow automation platform';
+    const fingerprint = {
+      normalizedTopic: 'ai startup workflow automation funding',
+      topicCluster: 'ai_automation' as const,
+      coreClaim: 'AI startup raises funding for workflow automation',
+      entities: ['AI startup'],
+      mechanisms: ['workflow automation'],
+    };
+    const selected = selectDiverseRankedCandidates([
+      mockRanked({ title, trend: { topic: title, niche: 'SaaS' }, fingerprint }),
+      mockRanked({ title, trend: { topic: title, niche: 'AI Automation' }, fingerprint }),
+    ], 2);
+
+    assert.equal(selected.length, 1);
+  });
+
   it('timely news outranks evergreen by score composition', () => {
     const news = mockRanked({
       title: 'Acme announces major platform launch',

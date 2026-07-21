@@ -29,9 +29,23 @@ const VALID_IMAGE_STYLES = new Set([
   'professional', 'modern', 'minimal', 'bold', 'corporate', 'abstract',
 ]);
 const VALID_IMAGE_ASPECT_RATIOS = new Set(['1:1', '4:5', '16:9']);
+const TIME_SLOT_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const hasOwn = (body: Record<string, unknown>, key: string) =>
   Object.prototype.hasOwnProperty.call(body, key);
+
+function parseTimeSlots(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('Add at least one time slot.');
+  }
+  const slots = value.map((slot) => typeof slot === 'string' ? slot.trim() : '');
+  if (slots.some((slot) => !TIME_SLOT_PATTERN.test(slot))) {
+    throw new Error('Each time slot must use HH:mm format.');
+  }
+  const unique = Array.from(new Set(slots));
+  if (unique.length !== slots.length) throw new Error('Time slots must be unique.');
+  return unique.sort();
+}
 
 function serializeBotConfig(config: any) {
   return {
@@ -49,39 +63,22 @@ function serializeBotConfig(config: any) {
 // GET /bot/config - Get current user's bot config
 router.get('/config', requireAuth, async (req: Request, res: any) => {
   try {
-    const config = await prisma.botConfig.findUnique({
-      where: { userId: req.userId }
+    const owner = await prisma.user.findUnique({
+      where: { id: req.userId! },
+      select: { regionId: true },
     });
-
-    res.json(
-      config
-        ? serializeBotConfig(config)
-        : {
-            userId: req.userId,
-            niches: '[]',
-            sources: '["google"]',
-            backgroundImageUrl: '',
-            imageMode: null,
-            effectiveImageMode: 'none',
-            isEnabled: false,
-            description: '',
-            contactInfo: '',
-            websiteUrl: '',
-            includeContactInfo: false,
-            includeWebsiteLink: false,
-            brandLogoUrl: '',
-            brandLogoEnabled: false,
-            brandLogoPosition: 'bottomRight',
-            onboardingStatus: 'LEGACY',
-            profilePositioning: null,
-            targetAudience: null,
-            contentGoals: null,
-            contentPillars: null,
-            topicRules: null,
-            writingStyle: null,
-            effectiveStrategy: buildEffectiveBotStrategy(null),
-          }
-    );
+    const config = await prisma.botConfig.upsert({
+      where: { userId: req.userId! },
+      create: {
+        userId: req.userId!,
+        regionId: owner?.regionId ?? null,
+        niches: '[]',
+        sources: '["google"]',
+        timeSlots: ['09:00'],
+      },
+      update: {},
+    });
+    res.json(serializeBotConfig(config));
   } catch (error) {
     console.error('Error fetching bot config:', error);
     res.status(500).json({ error: 'Failed to fetch config' });
@@ -162,6 +159,15 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     const hasBrandLogoUrl = hasOwn(body, 'brandLogoUrl');
     const hasBrandLogoEnabled = hasOwn(body, 'brandLogoEnabled');
     const hasBrandLogoPosition = hasOwn(body, 'brandLogoPosition');
+    const hasTimeSlots = hasOwn(body, 'timeSlots');
+    let timeSlotsUpdate: string[] | undefined;
+    if (hasTimeSlots) {
+      try {
+        timeSlotsUpdate = parseTimeSlots(body.timeSlots);
+      } catch (err) {
+        return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid time slots' });
+      }
+    }
 
     const nichesStr = hasNiches
       ? (typeof niches === 'string' ? niches : JSON.stringify(niches || []))
@@ -254,6 +260,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       ...(hasBrandLogoUrl ? { brandLogoUrl: normalizedBrandLogoUrl } : {}),
       ...(hasBrandLogoEnabled ? { brandLogoEnabled } : {}),
       ...(hasBrandLogoPosition ? { brandLogoPosition } : {}),
+      ...(timeSlotsUpdate ? { timeSlots: timeSlotsUpdate } : {}),
       ...(hasTone
         ? { tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional' }
         : {}),
@@ -283,6 +290,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       brandLogoUrl: normalizedBrandLogoUrl ?? null,
       brandLogoEnabled: brandLogoEnabled ?? false,
       brandLogoPosition: brandLogoPosition ?? 'bottomRight',
+      timeSlots: timeSlotsUpdate ?? ['09:00'],
       tone: hasTone && typeof tone === 'string' && tone.trim() ? tone : 'Professional',
       isEnabled: hasIsEnabled ? !!isEnabled : false,
       description: hasDescription && typeof description === 'string' ? description : '',

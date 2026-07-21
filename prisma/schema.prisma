@@ -283,6 +283,7 @@ model BotConfig {
   contentPillars     Json?
   topicRules         Json?
   writingStyle       Json?
+  timeSlots          Json     @default("[\"09:00\"]")
   onboardingStatus   String   @default("LEGACY")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt

@@ -232,6 +232,10 @@ export async function processTrendCandidates(params: {
   );
   const rejectedByExclusions = rejected.filter((r) => r.code?.startsWith('exclusion:')).length;
   const rejectedLowValue = rejected.length - rejectedByExclusions;
+  const rejectionCodes = rejected.reduce<Record<string, number>>((counts, item) => {
+    counts[item.code] = (counts[item.code] ?? 0) + 1;
+    return counts;
+  }, {});
 
   const afterExact = exactDedupeTrends(accepted);
   const exactDuplicatesRemoved = accepted.length - afterExact.length;
@@ -244,6 +248,7 @@ export async function processTrendCandidates(params: {
   const nearDuplicatesRemoved = nearResult.removed;
   const strategy = params.strategy ?? params.author.strategy;
   let rejectedByStrategy = 0;
+  const strategyRejectionFlags: Record<string, number> = {};
 
   if (strategy && pipelineMode === 'preview') {
     const strategyAccepted = candidates.filter((candidate) => {
@@ -300,6 +305,11 @@ export async function processTrendCandidates(params: {
       const beforeStrategy = toFingerprint.length;
       const strategyAccepted = toFingerprint.filter((candidate) => {
         const score = scoreTrendForStrategy(candidate, strategy, { recentHistory: history });
+        if (!score.accepted) {
+          for (const flag of score.riskFlags ?? ['strategy_rejected']) {
+            strategyRejectionFlags[flag] = (strategyRejectionFlags[flag] ?? 0) + 1;
+          }
+        }
         return score.accepted;
       });
       rejectedByStrategy += beforeStrategy - strategyAccepted.length;
@@ -349,6 +359,21 @@ export async function processTrendCandidates(params: {
     : selectDiverseRankedCandidates(ranked, params.limit, {
       caps: { maxPerSemanticCluster: TOPIC_DIVERSITY_CONFIG.maxPerClusterInBatch },
     });
+
+  if (pipelineMode === 'generation') {
+    console.info('[trend-selection] quality funnel', {
+      userId: params.userId,
+      niche: params.niche,
+      raw: params.rawTrends.length,
+      rejectedByHeadlineRules: rejected.length,
+      rejectionCodes,
+      rejectedByStrategy,
+      strategyRejectionFlags,
+      fingerprinted: Math.max(0, preRanked.length - rejectedByStrategy),
+      ranked: ranked.length,
+      selected: selected.length,
+    });
+  }
 
   return {
     ranked: ranked.sort((a, b) => b.totalScore - a.totalScore),

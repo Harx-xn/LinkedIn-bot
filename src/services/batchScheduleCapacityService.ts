@@ -1,5 +1,6 @@
 import { prisma } from '../prismaClient';
 import {
+  BatchScheduleError,
   NormalizedPostingScheduleConfig,
   calculateBatchSlotCount,
   resolveAvailableScheduleSlots,
@@ -27,6 +28,7 @@ export async function resolveBatchGenerationSlots(params: {
   startDate: unknown;
   schedule: NormalizedPostingScheduleConfig;
   allowPartialSchedule?: boolean;
+  selectedSlotKeys?: string[];
   now?: Date;
 }): Promise<ResolvedBatchGenerationSlots> {
   const now = params.now ?? new Date();
@@ -63,12 +65,35 @@ export async function resolveBatchGenerationSlots(params: {
     occupiedScheduledAt,
   });
 
-  const selectedSlots = selectBatchGenerationSlots(
-    availableSlots,
-    requestedCount,
-    daysWindow,
-    params.allowPartialSchedule,
-  );
+  let selectedSlots: Date[];
+  if (params.selectedSlotKeys?.length) {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: schedule.timezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    const keyFor = (date: Date) => {
+      const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+      return `${parts.year}-${parts.month}-${parts.day}|${parts.hour}:${parts.minute}`;
+    };
+    const availableByKey = new Map(availableSlots.map((slot) => [keyFor(slot), slot]));
+    const requestedKeys = params.selectedSlotKeys;
+    if (requestedKeys.length !== requestedCount && !params.allowPartialSchedule) {
+      throw new BatchScheduleError(`Select a time slot for all ${requestedCount} posts.`);
+    }
+    selectedSlots = requestedKeys.map((key) => {
+      const slot = availableByKey.get(key);
+      if (!slot) throw new BatchScheduleError(`Selected time slot ${key} is no longer available.`);
+      return slot;
+    });
+  } else {
+    selectedSlots = selectBatchGenerationSlots(
+      availableSlots,
+      requestedCount,
+      daysWindow,
+      params.allowPartialSchedule,
+    );
+  }
 
   return {
     requestedCount,

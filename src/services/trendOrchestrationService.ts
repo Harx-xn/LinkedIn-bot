@@ -15,8 +15,8 @@ import {
 import { NicheExpansionService } from './nicheExpansionService';
 import { TopicFingerprintService } from './topicFingerprintService';
 import { processTrendCandidates } from './trendSelectionService';
-import { fillEvergreenIfNeeded, rankedToTrendCandidates } from './trendDiversityService';
-import { selectPreviewRankedCandidates } from './trendRankingService';
+import { rankedToTrendCandidates } from './trendDiversityService';
+import { selectDiverseRankedCandidates, selectPreviewRankedCandidates } from './trendRankingService';
 import { TrendsService } from './trendsService';
 import type { Trend } from './trendsService';
 import { mapWithConcurrency } from './concurrencyUtils';
@@ -42,6 +42,7 @@ export type RankedTrendPoolParams = {
   mode: 'preview' | 'batch' | 'generation';
   reuseRanked?: RankedTrendCandidate[];
   strategy?: EffectiveBotStrategy;
+  searchAttempt?: number;
 };
 
 export type RankedTrendPoolResult = OrchestratedTrendPool;
@@ -101,9 +102,12 @@ export class TrendOrchestrationService {
     }
 
     const candidateTarget = targetCandidateCount(pipelineMode, limit);
-    const perNicheLimit = Math.max(
-      6,
-      Math.ceil(candidateTarget / Math.max(1, params.niches.length)),
+    const perNicheLimit = Math.min(
+      cfg.maxCandidatesPerNiche,
+      Math.max(
+        pipelineMode === 'generation' ? 18 : 6,
+        Math.ceil(candidateTarget / Math.max(1, params.niches.length)),
+      ),
     );
 
     timer.mark('searchPlanMs');
@@ -123,9 +127,43 @@ export class TrendOrchestrationService {
       cfg.nicheConcurrency,
       async (niche): Promise<NicheResult> => {
         const nicheTimer = performance.now();
-        const plan = params.strategy
+        const basePlan = params.strategy
           ? buildStrategyExpansionPlan(params.strategy, niche)
           : await this.resolveExpansionPlan(params.userId, niche);
+        const focusedSeeds = basePlan.subtopics
+          .filter((seed) => seed.trim().toLowerCase() !== niche.trim().toLowerCase())
+          .slice(0, 3);
+        while (focusedSeeds.length < 3) {
+          focusedSeeds.push(['product innovation', 'customer adoption', 'market competition'][focusedSeeds.length]);
+        }
+        const retryQueries = params.searchAttempt === 1
+          ? [
+              `${niche} ${focusedSeeds[0]} latest news 2026`,
+              `${niche} ${focusedSeeds[1]} recent developments 2026`,
+              `${niche} ${focusedSeeds[2]} industry analysis 2026`,
+            ]
+          : params.searchAttempt === 2
+            ? [
+                `${niche} ${focusedSeeds[0]} case study growth results`,
+                `${niche} ${focusedSeeds[1]} funding partnerships acquisitions`,
+                `${niche} ${focusedSeeds[2]} challenges opportunities research`,
+              ]
+            : params.searchAttempt === 3
+              ? [
+                  `${niche} ${focusedSeeds[0]} founders operators expert insights`,
+                  `${niche} ${focusedSeeds[1]} enterprise benchmarks adoption`,
+                  `${niche} ${focusedSeeds[2]} market outlook predictions`,
+                ]
+              : [];
+        const plan = retryQueries.length
+          ? {
+              ...basePlan,
+              queries: [...retryQueries, ...basePlan.queries],
+              // Retry queries must be authoritative. Otherwise flattenExpansionQueries
+              // prefers the cached query buckets and silently repeats pass one.
+              queryBuckets: undefined,
+            }
+          : basePlan;
 
         let rawTrends: Trend[] = [];
         try {
@@ -161,7 +199,9 @@ export class TrendOrchestrationService {
           console.log('[trend-orchestration] raw trends fetched', {
             userId: params.userId,
             niche,
+            searchAttempt: (params.searchAttempt ?? 0) + 1,
             queryCount: plan.queries.length,
+            querySample: plan.queries.slice(0, 3),
             sourceCount: params.sources.length,
             rawFetched: rawTrends.length,
           });
@@ -236,35 +276,7 @@ export class TrendOrchestrationService {
 
     let ranked = pipelineMode === 'preview'
       ? selectPreviewRankedCandidates(allRanked, limit)
-      : allRanked.slice(0, limit);
-
-    if (pipelineMode === 'generation' && ranked.length < limit) {
-      const { extra, filled } = await fillEvergreenIfNeeded(
-        params.userId,
-        params.author,
-        expansionPlans,
-        ranked,
-        limit - ranked.length,
-      );
-      aggregateStats.evergreenFilled = filled;
-
-      for (const t of extra) {
-        const fp = t.fingerprint ?? (await this.fingerprintService.fingerprintTrend(t));
-        aggregateStats.openAiCalls = (aggregateStats.openAiCalls ?? 0) + 1;
-        ranked.push({
-          trend: { ...t, fingerprint: fp },
-          fingerprint: fp,
-          relevanceScore: 55,
-          sourceQualityScore: 50,
-          recencyScore: 40,
-          technicalDepthScore: 50,
-          noveltyScore: 70,
-          totalScore: 55,
-          novelty: { allowed: true, score: 70, reasons: ['evergreen_fallback'] },
-        });
-      }
-      ranked = ranked.slice(0, limit);
-    }
+      : selectDiverseRankedCandidates(allRanked, limit);
 
     aggregateStats.selected = ranked.length;
     timer.mark('previewPersistenceMs');
@@ -314,7 +326,59 @@ export class TrendOrchestrationService {
       reuseRanked?: RankedTrendCandidate[];
     },
   ): Promise<OrchestratedTrendPool> {
-    return this.getRankedTrendPool({ ...params, mode: params.mode ?? 'generation' });
+    const requested = params.slotCount ?? params.limit ?? 7;
+    let accumulated: RankedTrendCandidate[] = [];
+    let latest: OrchestratedTrendPool | null = null;
+    const totals = {
+      rawCount: 0,
+      rejectedLowValue: 0,
+      rejectedByExclusions: 0,
+      exactDuplicatesRemoved: 0,
+      nearDuplicatesRemoved: 0,
+      historyMatchesRemoved: 0,
+      fingerprinted: 0,
+      selected: 0,
+      evergreenFilled: 0,
+      openAiCalls: 0,
+      sourceRequestCount: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+    };
+
+    for (let searchAttempt = 0; searchAttempt < 4; searchAttempt++) {
+      const pass = await this.getRankedTrendPool({
+        ...params,
+        mode: params.mode ?? 'generation',
+        searchAttempt,
+      });
+      latest = pass;
+      accumulated = selectDiverseRankedCandidates(
+        [...accumulated, ...pass.ranked],
+        requested,
+      );
+      for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
+        if (key === 'selected' || key === 'evergreenFilled') continue;
+        totals[key] += Number(pass.stats[key] ?? 0);
+      }
+      totals.selected = accumulated.length;
+
+      console.info('[trend-orchestration] generation search pass completed', {
+        userId: params.userId,
+        attempt: searchAttempt + 1,
+        requested,
+        qualifiedThisPass: pass.ranked.length,
+        qualifiedAccumulated: accumulated.length,
+      });
+      if (accumulated.length >= requested) break;
+    }
+
+    if (!latest) return this.getRankedTrendPool({ ...params, mode: params.mode ?? 'generation' });
+    return {
+      ...latest,
+      ranked: accumulated,
+      eligible: rankedToTrendCandidates(accumulated),
+      stats: totals,
+    };
   }
 
   async upgradeStoredPreviewPool(params: {

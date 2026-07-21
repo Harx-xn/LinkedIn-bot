@@ -12,7 +12,6 @@ import {
 } from './ghostwriterQualityService';
 import { normalizeHashtags, normalizeTaplioStyleBody } from './postContentFormatting';
 import { scoreTrend } from './trendQualityService';
-import { buildEvergreenTopics } from './trendQualityService';
 
 const AUTHOR = {
   description:
@@ -48,11 +47,6 @@ describe('trend filtering', () => {
     assert.ok(r.score >= 60 || r.accepted);
   });
 
-  it('falls back to evergreen author topics', () => {
-    const topics = buildEvergreenTopics(AUTHOR, 3);
-    assert.equal(topics.length, 3);
-    assert.ok(topics[0].source === 'evergreen');
-  });
 });
 
 describe('unsupported claims', () => {

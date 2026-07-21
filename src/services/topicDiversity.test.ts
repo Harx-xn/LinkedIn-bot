@@ -22,7 +22,7 @@ import {
 } from './topicFingerprintService';
 import { evaluateTopicNovelty, evaluateBatchTopicSimilarity } from './topicNoveltyService';
 import type { TopicFingerprint } from './generationTypes';
-import { validatePlanTopicDiversity, buildEvergreenTopicsForPlan } from './trendDiversityService';
+import { validatePlanTopicDiversity } from './trendDiversityService';
 import { buildTopicDiverseBatchPlan } from './ghostwriterBatchPlanner';
 import { validatePostTopicFingerprints } from './ghostwriterValidationService';
 
@@ -316,17 +316,6 @@ describe('batch diversity', () => {
     assert.ok(issues.some((i) => i.startsWith('repeated_topic_cluster')));
   });
 
-  it('evergreen fallback uses unused clusters', () => {
-    const topics = buildEvergreenTopicsForPlan(
-      { description: '', tone: 'Professional', niches: ['SaaS development'] },
-      buildFallbackExpansionPlan('SaaS development'),
-      3,
-      new Set(['billing_entitlements']),
-      [],
-    );
-    const clusters = topics.map((t) => t.fingerprint?.topicCluster).filter(Boolean);
-    assert.ok(clusters.every((c) => c !== 'billing_entitlements'));
-  });
 });
 
 describe('final post topic validation', () => {

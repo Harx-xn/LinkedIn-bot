@@ -27,6 +27,7 @@
     startDate: string;
     batchPostingSchedule: unknown;
     allowPartialSchedule?: boolean;
+    selectedSlotKeys?: string[];
     previewId?: string;
   };
 
@@ -56,6 +57,7 @@
       startDate,
       batchPostingSchedule,
       allowPartialSchedule,
+      selectedSlotKeys,
     } =
       req.body as BotGenerateRequestBody;
     if (!daysWindow) return res.status(400).json({ error: "Missing daysWindow" });
@@ -128,6 +130,9 @@
         startDate,
         schedule,
         allowPartialSchedule: allowPartialSchedule === true,
+        selectedSlotKeys: Array.isArray(selectedSlotKeys)
+          ? selectedSlotKeys.filter((key): key is string => typeof key === 'string')
+          : undefined,
       });
       resolvedSlots = resolved.slots;
     } catch (err) {

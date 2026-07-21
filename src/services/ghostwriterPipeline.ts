@@ -9,6 +9,7 @@ import {
 } from './ghostwriterGenerationService';
 import { TrendOrchestrationService } from './trendOrchestrationService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
+import { BatchScheduleError } from './batchScheduleService';
 
 export type { GeneratedSlotResult };
 
@@ -86,6 +87,19 @@ export async function prepareBatchContextV2(params: {
   previewId?: string;
   configHash?: string;
 }) {
+  const requireCompleteTrendPool = <T extends { ranked: RankedTrendCandidate[]; eligible: TrendCandidate[] }>(pool: T): T => {
+    if (pool.ranked.length < params.slotCount || pool.eligible.length < params.slotCount) {
+      console.warn('[ghostwriter] insufficient qualified trends for requested batch', {
+        userId: params.userId,
+        requested: params.slotCount,
+        qualified: Math.min(pool.ranked.length, pool.eligible.length),
+      });
+      throw new BatchScheduleError(
+        'No quality topics found. Retry or preview trends.',
+      );
+    }
+    return pool;
+  };
   const author: AuthorContext = {
     description: params.config.strategy?.profilePositioning.positioningStatement || params.config.description || '',
     tone: params.config.strategy?.writingStyle.tone[0] || params.config.tone || 'Professional',
@@ -120,7 +134,7 @@ export async function prepareBatchContextV2(params: {
         candidateCount: stored.pool.candidates.length,
         openAiCalls: upgraded.openAiCalls,
       });
-      return {
+      return requireCompleteTrendPool({
         author,
         eligible: upgraded.eligible,
         ranked: upgraded.ranked,
@@ -136,7 +150,7 @@ export async function prepareBatchContextV2(params: {
           evergreenFilled: 0,
           openAiCalls: upgraded.openAiCalls,
         },
-      };
+      });
     }
     console.warn('[prepareBatchContextV2] preview pool unavailable; using full generation fetch', {
       userId: params.userId,
@@ -155,7 +169,12 @@ export async function prepareBatchContextV2(params: {
     mode: 'generation',
   });
 
-  return { author, eligible: pool.eligible, ranked: pool.ranked, stats: pool.stats };
+  return requireCompleteTrendPool({
+    author,
+    eligible: pool.eligible,
+    ranked: pool.ranked,
+    stats: pool.stats,
+  });
 }
 
 export async function generateSlotPost(

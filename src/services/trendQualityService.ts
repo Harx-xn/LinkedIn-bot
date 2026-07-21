@@ -1,6 +1,4 @@
 import type { AuthorContext, TrendCandidate, TrendQualityResult } from './generationTypes';
-import { buildFallbackExpansionPlan } from './nicheExpansionService';
-import { buildEvergreenTopicsForPlan } from './trendDiversityService';
 
 export const TREND_SCORE_THRESHOLD = Number(process.env.TREND_SCORE_THRESHOLD ?? 60);
 
@@ -192,15 +190,4 @@ export function filterTrends(
   }
 
   return { accepted, rejected };
-}
-
-export function buildEvergreenTopics(author: AuthorContext, count: number): TrendCandidate[] {
-  const niche = author.niches?.[0] ?? 'technology';
-  return buildEvergreenTopicsForPlan(
-    author,
-    buildFallbackExpansionPlan(niche),
-    count,
-    new Set(),
-    [],
-  );
 }
