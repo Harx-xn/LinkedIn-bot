@@ -230,6 +230,27 @@ function pillarFromNiche(niche: string): ContentPillar {
   };
 }
 
+/**
+ * Keep the structured primary pillars aligned with the legacy niche editor.
+ * Matching pillars retain their richer metadata; removed niches cannot remain
+ * behind as stale generation inputs.
+ */
+export function syncPrimaryPillarsToNiches(
+  current: ContentPillars,
+  niches: string[],
+): ContentPillars {
+  const uniqueNiches = Array.from(new Set(niches.map((niche) => niche.trim()).filter(Boolean)));
+  const existingByName = new Map(
+    current.primaryPillars.map((pillar) => [pillar.name.trim().toLowerCase(), pillar]),
+  );
+
+  return {
+    ...current,
+    primaryPillars: uniqueNiches.map((niche) =>
+      existingByName.get(niche.toLowerCase()) ?? pillarFromNiche(niche)),
+  };
+}
+
 function defaultProfilePositioning(source: LegacyStrategySource): ProfilePositioning {
   const niches = parseStringArray(source.niches);
   return {

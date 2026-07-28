@@ -248,8 +248,12 @@ export async function scheduleManualPost(userId: string, postId: string, schedul
 // ---------------------------------------------------------------------------
 // 4. Publish an existing post immediately
 // ---------------------------------------------------------------------------
-export async function publishManualPostNow(userId: string, postId: string) {
-  const post = await findOwnedManualPost(userId, postId);
+export async function publishManualPostNow(
+  userId: string,
+  postId: string,
+  body?: ManualPostInput,
+) {
+  let post = await findOwnedManualPost(userId, postId);
 
   if (post.status === 'PUBLISHED') {
     throw new ManualPostError(409, 'Post already published');
@@ -257,6 +261,20 @@ export async function publishManualPostNow(userId: string, postId: string) {
 
   await ensureCanPublishOrSchedule(userId);
   await canPublishToLinkedIn(userId, 1);
+
+  // Treat the content sent with Post Now as the authoritative editor snapshot.
+  // Persist it and pass the same snapshot to LinkedIn, avoiding a stale re-read
+  // between rewrite, save, and publish.
+  if (body && (body.content !== undefined || body.mediaUrl !== undefined)) {
+    const validated = validateManualPostInput(
+      body.content !== undefined ? body.content : post.content,
+      body.mediaUrl !== undefined ? body.mediaUrl : post.mediaUrl,
+    );
+    post = await prisma.post.update({
+      where: { id: post.id },
+      data: { content: validated.content, mediaUrl: validated.mediaUrl },
+    });
+  }
 
   let linkedinAccountId = post.linkedinAccountId;
   if (!linkedinAccountId) {
@@ -270,7 +288,10 @@ export async function publishManualPostNow(userId: string, postId: string) {
   try {
     // Reuses the existing official LinkedIn API publisher (handles media too).
     // On success it sets status=PUBLISHED, publishedAt, linkedinPostUrn.
-    await postToLinkedInFromPostId(post.id);
+    await postToLinkedInFromPostId(post.id, {
+      content: post.content,
+      mediaUrl: post.mediaUrl,
+    });
   } catch (err: any) {
     // Leave the post in its current (non-published) status; just surface error.
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
@@ -308,7 +329,7 @@ export async function createAndPublishNow(userId: string, body: ManualPostInput)
   });
 
   try {
-    await postToLinkedInFromPostId(post.id);
+    await postToLinkedInFromPostId(post.id, { content, mediaUrl });
   } catch (err: any) {
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
   }

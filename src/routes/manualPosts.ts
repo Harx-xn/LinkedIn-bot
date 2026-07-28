@@ -358,7 +358,7 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const post = await publishManualPostNow(userId, req.params.postId);
+    const post = await publishManualPostNow(userId, req.params.postId, req.body || {});
     res.json(post);
   }),
 );

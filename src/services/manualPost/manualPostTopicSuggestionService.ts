@@ -19,7 +19,7 @@ export type ManualTopicSuggestion = {
   sourcePlatform?: string;
 };
 
-export const DEFAULT_TOPIC_SUGGESTION_COUNT = 5;
+export const DEFAULT_TOPIC_SUGGESTION_COUNT = 3;
 
 const GENERIC_TOPIC_PATTERNS: RegExp[] = [
   /\bleveraging ai\b/i,
@@ -109,6 +109,7 @@ export function buildFallbackTopicSuggestions(
   count: number,
   currentYear: number,
   strategy?: EffectiveBotStrategy,
+  rotation = 0,
 ): ManualTopicSuggestion[] {
   const primaryPillar = strategy?.contentPillars.primaryPillars[0];
   const primaryNiche = primaryPillar?.name || voice.niches.find((niche) => niche.trim()) || 'your niche';
@@ -147,7 +148,9 @@ export function buildFallbackTopicSuggestions(
     },
   ];
 
-  return templates.slice(0, count).map((template) => ({
+  const offset = ((rotation % templates.length) + templates.length) % templates.length;
+  const rotated = [...templates.slice(offset), ...templates.slice(0, offset)];
+  return rotated.slice(0, count).map((template) => ({
     title: template.title,
     description: template.description,
     reason: template.description,
@@ -194,7 +197,14 @@ export function finalizeTopicSuggestions(
     return sanitized.slice(0, count).map((topic) => addStrategyMetadata(topic, strategy));
   }
 
-  const fallbacks = buildFallbackTopicSuggestions(voice, trendSources, count, currentYear, strategy);
+  const fallbacks = buildFallbackTopicSuggestions(
+    voice,
+    trendSources,
+    count,
+    currentYear,
+    strategy,
+    Math.floor(Math.random() * 7),
+  );
   const merged = sanitizeTopicSuggestions([...sanitized, ...fallbacks], {
     currentYear,
     maxCount: count,

@@ -98,6 +98,13 @@ describe('manualPostTopicSuggestionService', () => {
     assert.ok(fallbacks[0].description.length > 0);
   });
 
+  it('rotates fallback topic patterns between suggestion runs', () => {
+    const first = buildFallbackTopicSuggestions(voiceFixture, ['google'], 3, 2026, undefined, 0);
+    const rotated = buildFallbackTopicSuggestions(voiceFixture, ['google'], 3, 2026, undefined, 1);
+    assert.notDeepEqual(rotated.map((topic) => topic.title), first.map((topic) => topic.title));
+    assert.ok(rotated.every((topic) => topic.title.includes('SaaS') || topic.description.includes('SaaS')));
+  });
+
   it('adds strategy-aware metadata to topic suggestions', () => {
     const strategy = buildEffectiveBotStrategy({
       description: 'I help founders improve activation.',

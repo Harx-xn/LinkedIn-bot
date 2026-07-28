@@ -3,6 +3,7 @@ import { config } from '../config';
 import { prisma } from '../prismaClient';
 import { decryptSecret } from './secretCrypto';
 import { updateGoogleSheetPostStatus } from './sheetsService';
+import { prepareLinkedInCommentary } from './linkedinPublishingText';
 
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
@@ -308,7 +309,10 @@ async function uploadImageToLinkedIn(
   return imageUrn;
 }
 
-export async function postToLinkedInFromPostId(postId: string) {
+export async function postToLinkedInFromPostId(
+  postId: string,
+  publishingOverride?: { content: string; mediaUrl: string | null },
+) {
   let post = await prisma.post.findUnique({
     where: { id: postId },
     include: { user: true, linkedinAccount: true }
@@ -342,9 +346,23 @@ export async function postToLinkedInFromPostId(postId: string) {
     activeLinkedInAccount.selectedOrganizationUrn ||
     activeLinkedInAccount.authorUrn;
 
+  // Manual "Post Now" supplies the editor snapshot explicitly. This avoids a
+  // second database read ever publishing the pre-rewrite version of a post.
+  const publishingContent = publishingOverride?.content ?? post.content;
+  const publishingMediaUrl = publishingOverride?.mediaUrl ?? post.mediaUrl;
+  const commentary = prepareLinkedInCommentary(publishingContent);
+
+  console.info('[linkedin-publish] prepared commentary', {
+    postId: post.id,
+    storedLength: post.content.length,
+    submittedLength: publishingContent.length,
+    commentaryLength: commentary.length,
+    usedEditorSnapshot: Boolean(publishingOverride),
+  });
+
   const body: any = {
     author: authorUrn,
-    commentary: post.content.replace(/\n{3,}/g, '\n\n'),
+    commentary,
     visibility: 'PUBLIC',
     distribution: {
       feedDistribution: 'MAIN_FEED',
@@ -356,9 +374,9 @@ export async function postToLinkedInFromPostId(postId: string) {
   };
 
   // If post has an image, upload it and attach
-  if (post.mediaUrl) {
+  if (publishingMediaUrl) {
     try {
-      const imageUrn = await uploadImageToLinkedIn(accessToken, authorUrn, post.mediaUrl, apiVersion);
+      const imageUrn = await uploadImageToLinkedIn(accessToken, authorUrn, publishingMediaUrl, apiVersion);
       body.content = {
         media: {
           id: imageUrn

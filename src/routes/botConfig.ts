@@ -21,6 +21,7 @@ import {
   hasAnyStrategyFields,
   parseStrategyFieldUpdate,
   resolveOnboardingStatus,
+  syncPrimaryPillarsToNiches,
   type BotStrategyField,
 } from '../services/botStrategyService';
 
@@ -240,6 +241,18 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
         }
         throw err;
       }
+    }
+
+    // The simple niche editor and the structured strategy editor represent the
+    // same primary topics. If only niches were changed, remove stale pillars so
+    // topic generation cannot continue prioritizing the previous niche set.
+    if (hasNiches && !hasOwn(body, 'contentPillars')) {
+      const nextNiches = buildEffectiveBotStrategy({ niches: nichesStr }).legacy.niches;
+      const currentPillars = buildEffectiveBotStrategy(existingConfig).contentPillars;
+      strategyUpdates.contentPillars = syncPrimaryPillarsToNiches(
+        currentPillars,
+        nextNiches,
+      ) as Prisma.InputJsonValue;
     }
 
     const mergedStrategyState = Object.fromEntries(

@@ -5,10 +5,37 @@ import { join } from 'node:path';
 import {
   buildEffectiveBotStrategy,
   resolveOnboardingStatus,
+  syncPrimaryPillarsToNiches,
 } from './botStrategyService';
 import { buildAuthorBlock } from './ghostwriterPrompts';
 
 describe('bot strategy config', () => {
+  it('replaces stale primary pillars when the niche list changes', () => {
+    const current = buildEffectiveBotStrategy({
+      niches: JSON.stringify(['Old niche']),
+      contentPillars: {
+        primaryPillars: [{
+          name: 'Old niche',
+          description: 'Stale',
+          audienceRelevance: 'Old audience',
+          exampleAngles: ['Old angle'],
+          trendKeywords: ['old keyword'],
+        }],
+      },
+    }).contentPillars;
+
+    const synced = syncPrimaryPillarsToNiches(current, ['New niche']);
+    assert.deepEqual(synced.primaryPillars.map((pillar) => pillar.name), ['New niche']);
+    assert.ok(!synced.primaryPillars.some((pillar) => pillar.name === 'Old niche'));
+  });
+
+  it('retains pillar metadata when a niche name is unchanged', () => {
+    const current = buildEffectiveBotStrategy({ niches: JSON.stringify(['SaaS']) }).contentPillars;
+    current.primaryPillars[0].exampleAngles = ['Activation teardown'];
+    const synced = syncPrimaryPillarsToNiches(current, [' SaaS ']);
+    assert.deepEqual(synced.primaryPillars[0].exampleAngles, ['Activation teardown']);
+  });
+
   it('derives a valid effective strategy from legacy-only bot config', () => {
     const strategy = buildEffectiveBotStrategy({
       description: 'I help SaaS founders improve activation.',

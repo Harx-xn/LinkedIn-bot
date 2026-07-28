@@ -288,7 +288,13 @@ export async function suggestManualPostTopics(
         message: err instanceof Error ? err.message : String(err),
       });
     }
-    return finalizeTopicSuggestions(parsedTopics, voice, trendSources, discoveryCount, strategy);
+    return finalizeTopicSuggestions(
+      parsedTopics,
+      voice,
+      trendSources,
+      discoveryCount,
+      strategy,
+    );
   };
 
   const improveBatch = (improvementPrompt: string) =>
