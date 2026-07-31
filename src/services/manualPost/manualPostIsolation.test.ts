@@ -31,6 +31,15 @@ describe('manual vs batch architectural isolation', () => {
     assert.ok(!batchGen.includes('executeComposerRewritePrompt'));
   });
 
+  it('batch generation uses bounded waves and skips unused image-copy calls', () => {
+    const trending = readSrc('services/trendingBotService.ts');
+    const batchGen = readSrc('services/ghostwriterGenerationService.ts');
+    assert.ok(trending.includes('BATCH_GENERATION_CONCURRENCY'));
+    assert.ok(trending.includes('Promise.all(waveIndexes.map'));
+    assert.ok(trending.includes('regenerating concurrent batch collision'));
+    assert.ok(batchGen.includes("config.imageMode === 'providedBackground'"));
+  });
+
   it('batch pipeline does not import manual orchestration', () => {
     const pipeline = readSrc('services/ghostwriterPipeline.ts');
     const trending = readSrc('services/trendingBotService.ts');

@@ -15,6 +15,7 @@ export type BotVoice = {
   includeContactInfo: boolean;
   includeWebsiteLink: boolean;
   niches: string[];
+  sources?: string | null;
   strategy?: EffectiveBotStrategy;
 };
 
@@ -92,6 +93,7 @@ export async function getBotVoice(userId: string): Promise<BotVoice> {
     includeContactInfo: config?.includeContactInfo ?? false,
     includeWebsiteLink: config?.includeWebsiteLink ?? false,
     niches,
+    sources: config?.sources ?? null,
     strategy,
   };
 }

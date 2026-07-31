@@ -1,4 +1,6 @@
-export type TopicCluster =
+export type TopicCluster = string;
+/* Legacy cluster names remain valid persisted values. */
+export type LegacyTopicCluster =
   | 'authentication_authorization'
   | 'tenant_isolation'
   | 'billing_entitlements'
@@ -39,6 +41,47 @@ export type TrendContentType =
   | 'evergreen'
   | 'community_discussion';
 
+export type DiscoveryIntent =
+  | 'recent_development' | 'official_update' | 'industry_change'
+  | 'recurring_problem' | 'audience_question' | 'common_mistake' | 'misconception'
+  | 'verified_solution' | 'case_study' | 'research_or_data' | 'beginner_guidance'
+  | 'comparison_or_debate' | 'risk_or_failure' | 'practical_implication' | 'emerging_opportunity';
+
+export type EvidenceRole = 'primary' | 'strong_secondary' | 'practitioner' | 'problem_discovery' | 'question_discovery' | 'idea_only';
+
+export type NicheSourcePlan = {
+  officialEntities: string[];
+  officialDomains: string[];
+  regulatorsAndAssociations: Array<{ name: string; domain?: string }>;
+  researchSources: Array<{ name: string; domain?: string; sourceType: string }>;
+  specialistPublications: Array<{ name: string; domain?: string }>;
+  communitySources: string[];
+  relevantSubreddits: string[];
+  questionSources: string[];
+  excludedDomains: string[];
+  confidence: number;
+};
+
+export type BatchDiscoveryPlan = {
+  requestedPosts: number;
+  intentTargets: Array<{ intent: DiscoveryIntent; desiredCount: number; allowedSources: string[] }>;
+  minimumPrimaryOrStrongSources: number;
+  maximumCommunityOnlyTopics: number;
+  maximumAnglesPerSource: number;
+};
+
+export type SourceReference = { url: string; publisher?: string; source: string; evidenceRole: EvidenceRole };
+
+export type TrendSource = string;
+
+export type CandidateProvenance = {
+  originNiche: string;
+  profileFingerprint: string;
+  originatingQuery: string;
+  queryIntent: DiscoveryIntent;
+  originatingSource: TrendSource;
+};
+
 export type NicheQueryBuckets = {
   newsQueries: string[];
   marketQueries: string[];
@@ -71,6 +114,52 @@ export type TrendCandidate = {
   strategyScore?: number;
   strategyReasons?: string[];
   strategyRiskFlags?: string[];
+  sourceType?: 'searched' | 'strategy_derived' | 'source_derived_angle';
+  selectionMode?: 'normal' | 'zero_result_fallback';
+  discoveryIntent?: DiscoveryIntent;
+  evidenceRole?: EvidenceRole;
+  supportingSources?: SourceReference[];
+  parentSourceId?: string;
+  angleType?: string;
+  sourceUrl?: string;
+  /** Immutable discovery ownership. Optional only for legacy/stored candidates. */
+  originNiche?: string;
+  profileFingerprint?: string;
+  originatingQuery?: string;
+  queryIntent?: DiscoveryIntent;
+  originatingSource?: TrendSource;
+};
+
+export type NormalizedContentPillar = {
+  originalPillar: string;
+  normalizedPillar: string;
+  description: string;
+  subtopics: string[];
+  relatedEntities: string[];
+  searchTerms: string[];
+  excludedTopics: string[];
+};
+
+export type NicheContentCategory = {
+  id: string;
+  label: string;
+  terms: string[];
+};
+
+export type NicheSearchIntent = {
+  id: string;
+  label: string;
+  terms: string[];
+};
+
+export type NicheProfileQuery = {
+  query: string;
+  intent: string;
+  dynamicCategory: string | null;
+  relatedEntity: string | null;
+  relatedPillar: string | null;
+  confidence: number;
+  origin: 'niche_profile' | 'strategy_enriched' | 'retry_regenerated' | 'first_party';
 };
 
 export type NicheExpansionPlan = {
@@ -83,6 +172,61 @@ export type NicheExpansionPlan = {
   queryBuckets?: NicheQueryBuckets;
   generatedAt?: Date;
   version?: number;
+  originalNiche?: string;
+  normalizedNiche?: string;
+  parentIndustry?: string;
+  nicheDescription?: string;
+  audienceTypes?: string[];
+  commonProblems?: string[];
+  desiredOutcomes?: string[];
+  importantEntities?: string[];
+  entityAliases?: string[];
+  productsAndPlatforms?: string[];
+  terminology?: string[];
+  adjacentTopics?: string[];
+  requiredContextTerms?: string[];
+  preferredTerms?: string[];
+  excludedTerms?: string[];
+  excludedInterpretations?: string[];
+  contentCategories?: NicheContentCategory[];
+  normalizedPillars?: NormalizedContentPillar[];
+  searchIntents?: NicheSearchIntent[];
+  inputFingerprint?: string;
+  queryOrigin?: 'niche_profile' | 'strategy_enriched' | 'retry_regenerated' | 'legacy_fallback';
+  profileQueries?: NicheProfileQuery[];
+  sourcePlan?: NicheSourcePlan;
+  selectedDiscoveryIntents?: DiscoveryIntent[];
+};
+
+export type CandidateNicheMatch = {
+  relevant: boolean;
+  relevanceScore: number;
+  confidence: number;
+  matchedCategory: string | null;
+  categoryConfidence: number;
+  matchedPillar: string | null;
+  pillarConfidence: number;
+  matchedMonitorTopic: string | null;
+  avoidTopicMatch: string | null;
+  reasons: string[];
+  rejectionCodes: string[];
+  directEvidence?: string[];
+  matchedTerms?: string[];
+  matchedPlatform?: string | null;
+  matchedEntity?: string | null;
+  matchedAlias?: string | null;
+  matchedForeignPillars?: string[];
+  queryIntent?: string | null;
+  ambiguityResolved?: boolean;
+};
+
+export type CandidateEligibility = {
+  eligible: boolean;
+  rejectionCodes: string[];
+  acceptancePath?: 'direct_evidence' | 'strategy_match' | 'high_confidence_classification';
+  hardRejectionCodes?: string[];
+  softSignals?: string[];
+  failedAcceptancePaths?: string[];
 };
 
 export type NoveltyEvaluation = {

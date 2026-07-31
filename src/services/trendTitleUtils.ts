@@ -119,6 +119,18 @@ export function detectSocialPostAsHeadline(title: string): boolean {
   return socialSignals >= 2;
 }
 
+export function detectProfileBiography(trend: Pick<TrendCandidate, 'topic' | 'link'>): boolean {
+  const title = trend.topic.trim();
+  if (/linkedin\.com\/in\//i.test(trend.link ?? '')) return true;
+  const roleMatches = title.match(/\b(ceo|cmo|cro|cto|cfo|founder|co-founder|speaker|mentor|awardee|consultant|expert)\b/gi) ?? [];
+  const separators = title.match(/[|·•–—]/g) ?? [];
+  const startsLikeName = /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){1,2}\s*[-–—|·]/.test(title);
+  const biographyPhrase = /\b(studied at|works at|certified|enthusiast)\b/i.test(title);
+  return (startsLikeName && separators.length >= 2 && (roleMatches.length >= 2 || biographyPhrase))
+    || (separators.length >= 3 && roleMatches.length >= 3)
+    || (startsLikeName && biographyPhrase);
+}
+
 export function rejectLowValueTrend(
   trend: TrendCandidate,
   exclusions: string[] = [],
@@ -128,6 +140,9 @@ export function rejectLowValueTrend(
 
   if (detectSocialPostAsHeadline(topic)) {
     return { rejected: true, code: 'social_post_body_instead_of_headline' };
+  }
+  if (detectProfileBiography(trend)) {
+    return { rejected: true, code: 'profile_biography' };
   }
 
   const appliedExclusions = exclusions.length

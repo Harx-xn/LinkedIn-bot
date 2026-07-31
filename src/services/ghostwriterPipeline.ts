@@ -86,9 +86,10 @@ export async function prepareBatchContextV2(params: {
   openaiApiKey?: string | null;
   previewId?: string;
   configHash?: string;
+  allowPartial?: boolean;
 }) {
   const requireCompleteTrendPool = <T extends { ranked: RankedTrendCandidate[]; eligible: TrendCandidate[] }>(pool: T): T => {
-    if (pool.ranked.length < params.slotCount || pool.eligible.length < params.slotCount) {
+    if (!params.allowPartial && (pool.ranked.length < params.slotCount || pool.eligible.length < params.slotCount)) {
       console.warn('[ghostwriter] insufficient qualified trends for requested batch', {
         userId: params.userId,
         requested: params.slotCount,

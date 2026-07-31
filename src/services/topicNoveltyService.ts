@@ -118,7 +118,7 @@ export function evaluateTopicNovelty(
   return {
     allowed: score >= 35,
     score,
-    reasons,
+    reasons: [...new Set(reasons)],
     closestMatch,
   };
 }

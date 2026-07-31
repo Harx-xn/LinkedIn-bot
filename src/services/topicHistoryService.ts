@@ -56,13 +56,16 @@ export async function createGeneratedTopicHistory(input: {
   sourceTitle?: string;
   fingerprint: TopicFingerprint;
   angle?: PostAngle;
+  knownNewPost?: boolean;
 }): Promise<void> {
   if (!input.postId) return;
 
-  const existing = await prisma.generatedTopicHistory.findFirst({
-    where: { postId: input.postId },
-  });
-  if (existing) return;
+  if (!input.knownNewPost) {
+    const existing = await prisma.generatedTopicHistory.findFirst({
+      where: { postId: input.postId },
+    });
+    if (existing) return;
+  }
 
   await prisma.generatedTopicHistory.create({
     data: {

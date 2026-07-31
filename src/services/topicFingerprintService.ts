@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
-import type { TopicCluster, TopicFingerprint, TrendCandidate } from './generationTypes';
+import type { NicheExpansionPlan, TopicCluster, TopicFingerprint, TrendCandidate } from './generationTypes';
 import { normalizeTrendTitle } from './trendTitleUtils';
 
 const fingerprintSchema = z.object({
@@ -58,10 +58,11 @@ const CLUSTER_KEYWORDS: Array<{ cluster: TopicCluster; keywords: string[] }> = [
 
 const fingerprintCache = new Map<string, TopicFingerprint>();
 
-function cacheKey(trend: TrendCandidate): string {
+function cacheKey(trend: TrendCandidate, profile?: NicheExpansionPlan): string {
   const title = normalizeTrendTitle(trend.topic);
   const link = (trend.link ?? '').trim().toLowerCase();
-  return link ? `${title}|${link}` : title;
+  const profileKey = profile?.inputFingerprint ?? trend.profileFingerprint ?? trend.originNiche ?? trend.niche ?? 'legacy';
+  return `${link ? `${title}|${link}` : title}|${profileKey}`;
 }
 
 function coerceCluster(value: string): TopicCluster {
@@ -83,9 +84,25 @@ export function classifyTopicCluster(text: string): TopicCluster {
   return best;
 }
 
-export function buildFallbackFingerprint(trend: TrendCandidate): TopicFingerprint {
+export function classifyAgainstNicheProfile(
+  trend: TrendCandidate,
+  profile?: NicheExpansionPlan,
+): { category: string; confidence: number } {
+  if (!profile?.contentCategories?.length) return { category: 'unclassified', confidence: 0 };
+  const text = normalizeTrendTitle([trend.topic, trend.summary, ...(trend.keyPoints ?? [])].filter(Boolean).join(' '));
+  let best = { category: 'unclassified', confidence: 0 };
+  for (const category of profile.contentCategories) {
+    const terms = [category.label, ...category.terms].map(normalizeTrendTitle).filter(Boolean);
+    const hits = terms.filter((term) => text.includes(term)).length;
+    const confidence = terms.length ? hits / Math.min(3, terms.length) : 0;
+    if (confidence > best.confidence) best = { category: category.id, confidence: Math.min(1, confidence) };
+  }
+  return best.confidence >= 0.34 ? best : { category: 'unclassified', confidence: best.confidence };
+}
+
+export function buildFallbackFingerprint(trend: TrendCandidate, profile?: NicheExpansionPlan): TopicFingerprint {
   const normalizedTopic = normalizeTrendTitle(trend.topic) || trend.topic.toLowerCase().trim();
-  const cluster = classifyTopicCluster(`${trend.topic} ${trend.niche ?? ''}`);
+  const cluster = classifyAgainstNicheProfile(trend, profile).category;
   return {
     normalizedTopic,
     topicCluster: cluster,
@@ -125,27 +142,31 @@ export class TopicFingerprintService {
     this.openai = key ? new OpenAI({ apiKey: key }) : null;
   }
 
-  getCached(trend: TrendCandidate): TopicFingerprint | undefined {
-    const cached = fingerprintCache.get(cacheKey(trend));
+  getCached(trend: TrendCandidate, profile?: NicheExpansionPlan): TopicFingerprint | undefined {
+    const cached = fingerprintCache.get(cacheKey(trend, profile));
+    if (cached && profile) {
+      const dynamic = classifyAgainstNicheProfile(trend, profile);
+      return { ...cached, topicCluster: dynamic.category };
+    }
     if (!cached || cached.topicCluster !== 'other') return cached;
     const deterministicCluster = classifyTopicCluster(`${trend.topic} ${trend.niche ?? ''}`);
     if (deterministicCluster === 'other') return cached;
     const corrected = { ...cached, topicCluster: deterministicCluster };
-    fingerprintCache.set(cacheKey(trend), corrected);
+    fingerprintCache.set(cacheKey(trend, profile), corrected);
     return corrected;
   }
 
-  cacheFingerprint(trend: TrendCandidate, fingerprint: TopicFingerprint): TopicFingerprint {
-    fingerprintCache.set(cacheKey(trend), fingerprint);
+  cacheFingerprint(trend: TrendCandidate, fingerprint: TopicFingerprint, profile?: NicheExpansionPlan): TopicFingerprint {
+    fingerprintCache.set(cacheKey(trend, profile), fingerprint);
     return fingerprint;
   }
 
-  async fingerprintTrend(trend: TrendCandidate): Promise<TopicFingerprint> {
-    const cached = this.getCached(trend);
+  async fingerprintTrend(trend: TrendCandidate, profile?: NicheExpansionPlan): Promise<TopicFingerprint> {
+    const cached = this.getCached(trend, profile);
     if (cached) return cached;
 
     if (!this.openai) {
-      return this.cacheFingerprint(trend, buildFallbackFingerprint(trend));
+      return this.cacheFingerprint(trend, buildFallbackFingerprint(trend, profile), profile);
     }
 
     try {
@@ -178,29 +199,27 @@ Summary: ${trend.summary ?? ''}`,
       const raw = response.choices[0].message.content || '';
       const parsed = fingerprintSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) {
-        return this.cacheFingerprint(trend, buildFallbackFingerprint(trend));
+        return this.cacheFingerprint(trend, buildFallbackFingerprint(trend, profile), profile);
       }
 
-      const aiCluster = coerceCluster(parsed.data.topicCluster);
-      const deterministicCluster = classifyTopicCluster(`${trend.topic} ${trend.niche ?? ''}`);
+      const dynamic = classifyAgainstNicheProfile(trend, profile);
       const fp: TopicFingerprint = {
         normalizedTopic: parsed.data.normalizedTopic,
-        topicCluster: aiCluster === 'other' && deterministicCluster !== 'other'
-          ? deterministicCluster
-          : aiCluster,
+        topicCluster: dynamic.category,
         coreClaim: parsed.data.coreClaim,
         entities: parsed.data.entities.slice(0, 8),
         mechanisms: parsed.data.mechanisms.slice(0, 8),
       };
-      return this.cacheFingerprint(trend, fp);
+      return this.cacheFingerprint(trend, fp, profile);
     } catch {
-      return this.cacheFingerprint(trend, buildFallbackFingerprint(trend));
+      return this.cacheFingerprint(trend, buildFallbackFingerprint(trend, profile), profile);
     }
   }
 
   async fingerprintTrends(
     trends: TrendCandidate[],
     concurrency = 4,
+    profile?: NicheExpansionPlan,
   ): Promise<Map<string, TopicFingerprint>> {
     const out = new Map<string, TopicFingerprint>();
     let index = 0;
@@ -208,8 +227,8 @@ Summary: ${trend.summary ?? ''}`,
       while (index < trends.length) {
         const i = index++;
         const trend = trends[i];
-        const fp = await this.fingerprintTrend(trend);
-        out.set(cacheKey(trend), fp);
+        const fp = await this.fingerprintTrend(trend, profile);
+        out.set(cacheKey(trend, profile), fp);
       }
     };
     await Promise.all(

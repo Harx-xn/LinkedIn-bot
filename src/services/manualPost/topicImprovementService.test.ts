@@ -49,4 +49,31 @@ describe('topicImprovementService', () => {
     const result = await improveWeakTopicSuggestions({ topics: [weak], strategy, scoreTopic: score(() => 10), improveBatch: async () => JSON.stringify(payload) });
     assert.equal(result.accepted.length, 0); assert.equal(result.discarded[0].relevanceScore, 10);
   });
+  it('runs independent improvement batches concurrently and honors a one-attempt budget', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const topics = Array.from({ length: 6 }, (_, index) => ({
+      ...weak,
+      title: `Weak automation topic number ${index}`,
+    }));
+    const result = await improveWeakTopicSuggestions({
+      topics,
+      strategy,
+      scoreTopic: score(() => 10),
+      maxAttempts: 1,
+      improveBatch: async () => {
+        calls++;
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return 'not-json';
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(maxActive, 2);
+    assert.equal(result.discarded.length, 6);
+    assert.ok(result.discarded.every((topic) => topic.improvementAttempts === 1));
+  });
 });

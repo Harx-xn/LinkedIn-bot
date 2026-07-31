@@ -213,10 +213,10 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    await requireSavedGhostwriterDescription(userId);
     const result = await suggestManualPostTopics(userId, {
       count: req.body?.count,
       provider: req.body?.provider,
+      refresh: req.body?.refresh === true,
     });
     res.json(result);
   }),

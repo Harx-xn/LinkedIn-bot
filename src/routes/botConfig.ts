@@ -51,6 +51,8 @@ function parseTimeSlots(value: unknown): string[] {
 function serializeBotConfig(config: any) {
   return {
     ...config,
+    sources: '["automatic"]',
+    sourceMode: 'automatic',
     imageMode: config.imageMode ?? null,
     effectiveImageMode: resolveBotImageMode(config),
     contactInfo: config.contactInfo || '',
@@ -74,7 +76,7 @@ router.get('/config', requireAuth, async (req: Request, res: any) => {
         userId: req.userId!,
         regionId: owner?.regionId ?? null,
         niches: '[]',
-        sources: '["google"]',
+        sources: '["automatic"]',
         timeSlots: ['09:00'],
       },
       update: {},
@@ -148,7 +150,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     });
 
     const hasNiches = hasOwn(body, 'niches');
-    const hasSources = hasOwn(body, 'sources');
+    const hasSources = false; // Deprecated: automatic source planning is mandatory.
     const hasBackgroundImageUrl = hasOwn(body, 'backgroundImageUrl');
     const hasTone = hasOwn(body, 'tone');
     const hasDescription = hasOwn(body, 'description');
@@ -173,9 +175,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
     const nichesStr = hasNiches
       ? (typeof niches === 'string' ? niches : JSON.stringify(niches || []))
       : existingConfig?.niches ?? '[]';
-    const sourcesStr = hasSources
-      ? (typeof sources === 'string' ? sources : JSON.stringify(sources || []))
-      : existingConfig?.sources ?? '["google"]';
+    const sourcesStr = '["automatic"]';
 
 
     let normalizedWebsiteUrl: string | null | undefined;

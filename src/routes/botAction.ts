@@ -78,9 +78,10 @@
       return res.status(400).json({ error: "Missing batchPostingSchedule" });
     }
 
-    const ghostwriterRequirements = await getSavedGhostwriterRequirements(
-      req.userId!,
-    );
+    const [ghostwriterRequirements, gate] = await Promise.all([
+      getSavedGhostwriterRequirements(req.userId!),
+      canGenerate(req.userId!),
+    ]);
     if (!ghostwriterRequirements.hasDescription) {
       return res.status(400).json({
         error: GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
@@ -95,7 +96,6 @@
     }
 
     // Block generation once the free trial has ended (subscribers/admins pass).
-    const gate = await canGenerate(req.userId!);
     if (!gate.allowed) {
       return res.status(403).json({ error: gate.reason, entitlement: gate.entitlement });
     }
@@ -122,19 +122,27 @@
 
     const parsedDaysWindow = Number(daysWindow);
     let resolvedSlots: Date[];
+    let owner: { regionId: string | null } | null;
     try {
-      const resolved = await resolveBatchGenerationSlots({
-        userId: req.userId!,
-        postsPerWeek: parsedPostsPerWeek,
-        daysWindow: parsedDaysWindow,
-        startDate,
-        schedule,
-        allowPartialSchedule: allowPartialSchedule === true,
-        selectedSlotKeys: Array.isArray(selectedSlotKeys)
-          ? selectedSlotKeys.filter((key): key is string => typeof key === 'string')
-          : undefined,
-      });
+      const [resolved, resolvedOwner] = await Promise.all([
+        resolveBatchGenerationSlots({
+          userId: req.userId!,
+          postsPerWeek: parsedPostsPerWeek,
+          daysWindow: parsedDaysWindow,
+          startDate,
+          schedule,
+          allowPartialSchedule: allowPartialSchedule === true,
+          selectedSlotKeys: Array.isArray(selectedSlotKeys)
+            ? selectedSlotKeys.filter((key): key is string => typeof key === 'string')
+            : undefined,
+        }),
+        prisma.user.findUnique({
+          where: { id: req.userId! },
+          select: { regionId: true },
+        }),
+      ]);
       resolvedSlots = resolved.slots;
+      owner = resolvedOwner;
     } catch (err) {
       if (err instanceof BatchScheduleError) {
         return res.status(400).json({ error: `Invalid starting date: ${err.message}` });
@@ -150,12 +158,6 @@
       }
       throw err;
     }
-
-    // Attach the region so generation jobs show up in region-scoped analytics.
-    const owner = await prisma.user.findUnique({
-      where: { id: req.userId! },
-      select: { regionId: true },
-    });
 
     const job = await prisma.botGenerationJob.create({
       data: {

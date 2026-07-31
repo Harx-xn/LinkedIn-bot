@@ -125,6 +125,8 @@ export async function improveWeakTopicSuggestions(params: {
   strategy: EffectiveBotStrategy;
   improveBatch: ImproveBatch;
   scoreTopic?: ScoreTopic;
+  maxAttempts?: number;
+  targetAcceptedCount?: number;
 }): Promise<{ accepted: ScoredTopicSuggestion[]; discarded: ScoredTopicSuggestion[] }> {
   const scorer = params.scoreTopic ?? scoreTrendForStrategy;
   let working: ScoredTopicSuggestion[] = params.topics.map((topic) => {
@@ -146,16 +148,29 @@ export async function improveWeakTopicSuggestions(params: {
   const accepted: ScoredTopicSuggestion[] = working.filter((topic) => topic.relevanceScore >= STRONG_TOPIC_SCORE);
   working = working.filter((topic) => (topic.relevanceScore ?? 0) < STRONG_TOPIC_SCORE);
 
-  for (let attempt = 1; attempt <= MAX_TOPIC_IMPROVEMENT_ATTEMPTS && working.length; attempt++) {
-    const next: ScoredTopicSuggestion[] = [];
-    for (let offset = 0; offset < working.length; offset += TOPIC_IMPROVEMENT_BATCH_SIZE) {
-      const batch = working.slice(offset, offset + TOPIC_IMPROVEMENT_BATCH_SIZE).map((topic, index) => ({ id: `candidate-${offset + index}`, topic }));
+  const maxAttempts = params.maxAttempts ?? MAX_TOPIC_IMPROVEMENT_ATTEMPTS;
+  const targetAcceptedCount = params.targetAcceptedCount ?? Number.POSITIVE_INFINITY;
+  for (let attempt = 1; attempt <= maxAttempts && working.length && accepted.length < targetAcceptedCount; attempt++) {
+    const shortfall = Number.isFinite(targetAcceptedCount)
+      ? Math.max(1, targetAcceptedCount - accepted.length)
+      : working.length;
+    const candidatesForAttempt = working.slice(0, shortfall);
+    const next: ScoredTopicSuggestion[] = working.slice(shortfall);
+    const batches: Array<Array<{ id: string; topic: ScoredTopicSuggestion }>> = [];
+    for (let offset = 0; offset < candidatesForAttempt.length; offset += TOPIC_IMPROVEMENT_BATCH_SIZE) {
+      const batch = candidatesForAttempt.slice(offset, offset + TOPIC_IMPROVEMENT_BATCH_SIZE).map((topic, index) => ({ id: `candidate-${offset + index}`, topic }));
+      batches.push(batch);
+    }
+    const batchOutputs = await Promise.all(batches.map(async (batch) => {
       let outputs: ImprovedTopicOutput[] = [];
       try {
         outputs = parseImprovedTopics(await params.improveBatch(buildTopicImprovementPrompt(batch, params.strategy)));
       } catch (error) {
         console.warn('[topic-improvement] provider failure', { attempt, message: error instanceof Error ? error.message : String(error) });
       }
+      return { batch, outputs };
+    }));
+    for (const { batch, outputs } of batchOutputs) {
       for (const entry of batch) {
         const output = outputs.find((item) => item.candidateId === entry.id);
         if (!output || !validateImprovement(output, entry.topic, params.strategy)) {

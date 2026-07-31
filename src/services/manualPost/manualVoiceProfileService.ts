@@ -393,8 +393,12 @@ export async function retrieveRelevantWritingSamples(
     : unique;
 }
 
-export async function getManualVoiceContext(userId: string, topic?: string): Promise<ManualVoiceContext> {
-  const explicitPreferences = await getBotVoice(userId);
+export async function getManualVoiceContext(
+  userId: string,
+  topic?: string,
+  preloadedPreferences?: BotVoice,
+): Promise<ManualVoiceContext> {
+  const explicitPreferences = preloadedPreferences ?? await getBotVoice(userId);
   const learnedVoiceProfile = buildVoiceProfileFromBotConfig(explicitPreferences);
 
   let selectedWritingSamples: ManualWritingSample[] = [];

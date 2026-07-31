@@ -28,6 +28,7 @@ import {
 } from "./trendPreviewPoolStore";
 import { createGeneratedTopicHistory, loadRecentTopicHistory } from "./topicHistoryService";
 import { fingerprintFromBody } from "./topicFingerprintService";
+import { jaccardSimilarity } from "./ghostwriterTextUtils";
 import {
   GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
   GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
@@ -47,6 +48,16 @@ function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undef
   }
 }
 
+const BATCH_GENERATION_CONCURRENCY = Math.min(
+  4,
+  Math.max(1, Number(process.env.BATCH_GENERATION_CONCURRENCY ?? 2) || 2),
+);
+
+type BatchPersistenceContext = {
+  linkedinAccountId: string | null;
+  regionId: string | null;
+};
+
 export class TrendingBotService {
   private trendsService: TrendsService;
   private imageService: ImageService;
@@ -54,6 +65,80 @@ export class TrendingBotService {
   constructor() {
     this.trendsService = new TrendsService();
     this.imageService = new ImageService();
+  }
+
+  /** Internal diagnostics only: real discovery/scoring with no posts, usage, scheduling, or history writes. */
+  async dryRunTopics(userId: string, requestedTopics = 7) {
+    const config = await prisma.botConfig.findUnique({ where: { userId } });
+    if (!config) throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
+    const strategy = buildEffectiveBotStrategy(config);
+    const niches = getStrategyNiches(strategy);
+    if (!niches.length) throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { region: { select: { openaiApiKey: true } } },
+    });
+    const botConfig: GhostwriterBotConfig = {
+      tone: config.tone,
+      description: config.description,
+      niches,
+      strategy,
+    };
+    const pool = await prepareBatchContextV2({
+      userId,
+      niches,
+      config: botConfig,
+      slotCount: Math.max(1, requestedTopics),
+      sources: parseTrendSources(config.sources),
+      openaiApiKey: decryptSecret(user?.region?.openaiApiKey),
+      allowPartial: true,
+    });
+    const selected = pool.ranked.slice(0, requestedTopics).map((item) => ({
+      title: item.trend.topic,
+      sourceUrl: item.trend.link ?? null,
+      publisher: item.trend.publisher ?? item.trend.source ?? null,
+      relevanceScore: item.relevanceScore,
+      category: item.fingerprint.topicCluster,
+      matchedPillar: item.matchedPillar ?? null,
+      totalScore: item.totalScore,
+      rejectionCodes: item.trend.strategyRiskFlags ?? [],
+    }));
+    console.info('[trend-dry-run] completed', { userId, requestedTopics, selectedCount: selected.length, selected });
+    return { dryRun: true, requestedTopics, selectedCount: selected.length, selected, stats: pool.stats };
+  }
+
+  /** Internal acceptance runner for explicit niches; uses automatic discovery without persisting generated content. */
+  async dryRunNiches(userId: string, niches: string[], requestedTopics = 7) {
+    const config = await prisma.botConfig.findUnique({ where: { userId } });
+    if (!config) throw new BatchScheduleError(GHOSTWRITER_CONFIG_REQUIRED_MESSAGE);
+    const baseStrategy = buildEffectiveBotStrategy(config);
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { region: { select: { openaiApiKey: true } } } });
+    const results = [];
+    for (const niche of niches) {
+      const strategy = {
+        ...baseStrategy,
+        contentPillars: {
+          ...baseStrategy.contentPillars,
+          primaryPillars: [{ name: niche, description: niche, audienceRelevance: '', exampleAngles: [], trendKeywords: [] }],
+          secondaryPillars: [], experimentalPillars: [],
+        },
+      };
+      const pool = await prepareBatchContextV2({
+        userId, niches: [niche], config: { tone: config.tone, description: config.description, niches: [niche], strategy },
+        slotCount: requestedTopics, sources: ['automatic'], openaiApiKey: decryptSecret(user?.region?.openaiApiKey), allowPartial: true,
+      });
+      results.push({
+        niche, requestedTopics, selectedCount: pool.ranked.length, stats: pool.stats,
+        topics: pool.ranked.map((item) => ({
+          title: item.trend.topic, intent: item.trend.discoveryIntent ?? null, evidenceRole: item.trend.evidenceRole ?? 'idea_only',
+          discoverySource: item.trend.discoverySource ?? item.trend.source ?? null,
+          supportingSources: item.trend.supportingSources ?? [], sourceType: item.trend.sourceType ?? 'searched',
+          angleType: item.trend.angleType ?? null, relevanceScore: item.relevanceScore, totalScore: item.totalScore,
+        })),
+      });
+    }
+    console.info('[trend-dry-run] multi-niche completed', { userId, results });
+    return { dryRun: true, results };
   }
 
   // Resolve the region a user belongs to (used to stamp generated posts).
@@ -278,8 +363,6 @@ export class TrendingBotService {
 
     console.log(`Generating batch for user ${userId}, slots: ${slots.length}`);
 
-    const contentService = await this.getContentService(userId);
-
     const niches = getStrategyNiches(strategy);
     if (niches.length === 0) {
       throw new BatchScheduleError(GHOSTWRITER_NICHES_REQUIRED_MESSAGE);
@@ -287,17 +370,26 @@ export class TrendingBotService {
 
     const sources = parseTrendSources(config.sources);
   
-    if (jobId) {
-      await prisma.botGenerationJob.update({
-        where: { id: jobId },
-        data: { totalSlots: slots.length, completedSlots: 0 },
-      });
-    }
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { region: { select: { openaiApiKey: true } } },
-    });
+    const [user] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          regionId: true,
+          region: { select: { openaiApiKey: true, geminiApiKeys: true } },
+        },
+      }),
+      jobId
+        ? prisma.botGenerationJob.update({
+            where: { id: jobId },
+            data: { totalSlots: slots.length, completedSlots: 0 },
+          })
+        : Promise.resolve(null),
+    ]);
     const openaiKey = decryptSecret(user?.region?.openaiApiKey);
+    const contentService = new ContentService({
+      openaiApiKey: openaiKey,
+      geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
+    });
 
     const botConfig: GhostwriterBotConfig = {
       tone: config.tone,
@@ -346,68 +438,114 @@ export class TrendingBotService {
 
     const acceptedBodies: string[] = [];
     const batchFingerprints: TopicFingerprint[] = [];
-    const history = await loadRecentTopicHistory(userId);
+    const [history, linkedInAccount] = await Promise.all([
+      loadRecentTopicHistory(userId),
+      prisma.linkedInAccount.findFirst({
+        where: { userId },
+        select: { id: true },
+      }),
+    ]);
+    const persistenceContext: BatchPersistenceContext = {
+      linkedinAccountId: linkedInAccount?.id ?? null,
+      regionId: user?.regionId ?? null,
+    };
     let postsCreated = 0;
 
-    for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
-      const currentSlot = slots[slotIndex];
-      const plan = batchPlan[slotIndex];
-      const trend: TrendCandidate | null = eligible[slotIndex] ?? null;
+    for (let waveStart = 0; waveStart < slots.length; waveStart += BATCH_GENERATION_CONCURRENCY) {
+      const waveIndexes = Array.from(
+        { length: Math.min(BATCH_GENERATION_CONCURRENCY, slots.length - waveStart) },
+        (_, offset) => waveStart + offset,
+      );
+      const contextBodies = [...acceptedBodies];
+      const contextFingerprints = [...batchFingerprints];
+      const waveResults = await Promise.all(waveIndexes.map(async (slotIndex) => {
+        const plan = batchPlan[slotIndex];
+        const trend: TrendCandidate | null = eligible[slotIndex] ?? null;
+        const result = await generateSlotPostUntilSuccess(
+          contentService,
+          plan,
+          trend,
+          author,
+          botConfig,
+          contextBodies,
+          provider,
+          { batchFingerprints: contextFingerprints, recentTopicHistory: history },
+        );
+        return { slotIndex, plan, trend, result };
+      }));
 
-      const shouldMix = niches.length > 1 && (slotIndex + 1) % 4 === 0;
-      if (shouldMix && eligible.length >= 2) {
-        const t1 = eligible[slotIndex];
-        const t2 = eligible[(slotIndex + 1) % eligible.length];
-        const combine = evaluateTopicCombination(t1.topic, t2.topic, author);
-        if (!combine.canCombine) {
-          console.warn('[ghostwriter] skipping weak mixed slot', { reason: combine.reason });
+      for (const item of waveResults) {
+        const sourceTitle = item.trend?.topic ?? item.plan.sourceTopic ?? undefined;
+        const candidateFingerprint = fingerprintFromBody(
+          item.result.finalized.body,
+          sourceTitle,
+          item.plan.angle,
+        );
+        const conflictsWithAccepted = acceptedBodies.some(
+          (body) => jaccardSimilarity(item.result.finalized.body, body) > 0.55,
+        );
+        const conflictsByFingerprint = batchFingerprints.some(
+          (fingerprint) =>
+            fingerprint.normalizedTopic === candidateFingerprint.normalizedTopic
+            || (
+              fingerprint.topicCluster === candidateFingerprint.topicCluster
+              && jaccardSimilarity(fingerprint.coreClaim, candidateFingerprint.coreClaim) > 0.55
+            ),
+        );
+        if (conflictsWithAccepted || conflictsByFingerprint) {
+          console.info('[ghostwriter] regenerating concurrent batch collision', {
+            slotIndex: item.slotIndex,
+            sourceTitle,
+          });
+          item.result = await generateSlotPostUntilSuccess(
+            contentService,
+            item.plan,
+            item.trend,
+            author,
+            botConfig,
+            acceptedBodies,
+            provider,
+            { batchFingerprints, recentTopicHistory: history },
+          );
         }
+        acceptedBodies.push(item.result.finalized.body);
+        batchFingerprints.push(fingerprintFromBody(
+          item.result.finalized.body,
+          sourceTitle,
+          item.plan.angle,
+        ));
       }
 
-      const result = await generateSlotPostUntilSuccess(
-        contentService,
-        plan,
-        trend,
-        author,
-        botConfig,
-        acceptedBodies,
-        provider,
-        { batchFingerprints, recentTopicHistory: history },
-      );
-
-      await this.saveReviewPost(
-        userId,
-        result.finalized,
-        result.imageContent,
-        currentSlot,
-        botConfig,
-        {
-          batchId: jobId,
-          sourceTitle: trend?.topic ?? plan.sourceTopic ?? undefined,
-          fingerprint: trend?.fingerprint
-            ?? (plan.normalizedTopic
-              ? {
-                  normalizedTopic: plan.normalizedTopic,
-                  topicCluster: plan.topicCluster ?? 'other',
-                  coreClaim: plan.coreClaim ?? plan.normalizedTopic,
-                  entities: [],
-                  mechanisms: plan.mechanismFocus ?? [],
-                }
-              : fingerprintFromBody(result.finalized.body, trend?.topic, plan.angle)),
-          angle: plan.angle,
-        },
-      );
-      acceptedBodies.push(result.finalized.body);
-      const postFp = fingerprintFromBody(result.finalized.body, trend?.topic ?? plan.sourceTopic ?? undefined, plan.angle);
-      batchFingerprints.push(postFp);
-      postsCreated++;
-
-      if (jobId) {
-        await prisma.botGenerationJob.update({
-          where: { id: jobId },
-          data: { completedSlots: { increment: 1 } },
-        });
+      const persistResult = async ({ slotIndex, plan, trend, result }: (typeof waveResults)[number]) => {
+        await this.saveReviewPost(
+          userId,
+          result.finalized,
+          result.imageContent,
+          slots[slotIndex],
+          botConfig,
+          persistenceContext,
+          {
+            batchId: jobId,
+            sourceTitle: trend?.topic ?? plan.sourceTopic ?? undefined,
+            fingerprint: fingerprintFromBody(result.finalized.body, trend?.topic ?? plan.sourceTopic ?? undefined, plan.angle),
+            angle: plan.angle,
+          },
+        );
+        if (jobId) {
+          await prisma.botGenerationJob.update({
+            where: { id: jobId },
+            data: { completedSlots: { increment: 1 } },
+          });
+        }
+      };
+      if (botConfig.imageMode === 'none') {
+        await Promise.all(waveResults.map(persistResult));
+      } else {
+        // Image usage checks are not reservational; keep image-bearing saves
+        // ordered so concurrent slots cannot overrun a user's plan allowance.
+        for (const result of waveResults) await persistResult(result);
       }
+      postsCreated += waveResults.length;
     }
 
     console.log(`Batch complete. Created ${postsCreated} posts.`);
@@ -426,6 +564,7 @@ export class TrendingBotService {
     imageContent: { mode: string; headline: string; supportingText?: string; bulletPoints?: string[] } | null,
     scheduledAt: Date,
     config: GhostwriterBotConfig,
+    persistenceContext: BatchPersistenceContext,
     topicMeta?: {
       batchId?: string;
       sourceTitle?: string;
@@ -452,24 +591,17 @@ export class TrendingBotService {
       uploadKeyPrefix: `generated/ai-batch-${userId}`,
     });
 
-    const linkedInAccount = await prisma.linkedInAccount.findFirst({
-      where: { userId },
-      select: { id: true },
-    });
-
-    const regionId = await this.getUserRegionId(userId);
-
     const created = await prisma.post.create({
       data: {
         userId,
-        regionId,
+        regionId: persistenceContext.regionId,
         content: finalized.content,
         status: "REVIEW",
         scheduledAt,
         source: "AI",
         mediaUrl,
         hashtags: finalized.hashtags,
-        linkedinAccountId: linkedInAccount?.id ?? null,
+        linkedinAccountId: persistenceContext.linkedinAccountId,
       },
     });
 
@@ -481,6 +613,7 @@ export class TrendingBotService {
         sourceTitle: topicMeta.sourceTitle,
         fingerprint: topicMeta.fingerprint,
         angle: topicMeta.angle,
+        knownNewPost: true,
       });
     }
 

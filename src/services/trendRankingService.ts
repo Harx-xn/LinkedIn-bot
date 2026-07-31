@@ -174,6 +174,25 @@ export function selectDiverseRankedCandidates(
   return selected.slice(0, limit);
 }
 
+export function selectNicheBalancedCandidates(
+  ranked: RankedTrendCandidate[],
+  limit: number,
+): RankedTrendCandidate[] {
+  const qualified = ranked.filter((candidate) => candidate.novelty.allowed)
+    .sort((a, b) => b.totalScore - a.totalScore);
+  const bestByNiche = new Map<string, RankedTrendCandidate>();
+  for (const candidate of qualified) {
+    const niche = candidate.trend.originNiche ?? candidate.trend.niche;
+    if (niche && !bestByNiche.has(niche)) bestByNiche.set(niche, candidate);
+  }
+  const representatives = selectDiverseRankedCandidates([...bestByNiche.values()], limit, { relaxCaps: false });
+  const remaining = qualified.filter((candidate) =>
+    !representatives.includes(candidate) && !isSemanticallySimilarToSelected(candidate, representatives),
+  );
+  const fill = selectDiverseRankedCandidates(remaining, limit - representatives.length);
+  return [...representatives, ...fill].slice(0, limit);
+}
+
 export function selectPreviewRankedCandidates(
   ranked: RankedTrendCandidate[],
   limit: number,

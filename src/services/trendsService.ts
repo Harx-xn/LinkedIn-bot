@@ -7,9 +7,9 @@ import {
   type TrendPipelineMode,
 } from '../config/trendPipelineConfig';
 import { getSubredditsForNiche } from '../config/redditDomainFeeds';
-import type { NicheExpansionPlan } from './generationTypes';
+import type { DiscoveryIntent, EvidenceRole, NicheExpansionPlan, SourceReference } from './generationTypes';
 import { extractPublisherFromGoogleNewsTitle } from './trendPublisherUtils';
-import { flattenExpansionQueries, getMediumTagsForPlan } from './nicheExpansionService';
+import { flattenExpansionQueries, getMediumTagsForPlan, validateExpansionQuery } from './nicheExpansionService';
 import { selectPreviewQueries } from './trendPreviewQuerySelection';
 import {
   buildTrendCacheKey,
@@ -32,6 +32,54 @@ import {
 } from './trendPreviewQuerySelection';
 import { mapWithConcurrency } from './concurrencyUtils';
 import { countUsableTrends } from './trendSelectionService';
+import { buildBatchDiscoveryPlan, buildNicheSourcePlan, resolveAutomaticProviderJobs } from './trendSourcePlanningService';
+
+const OBVIOUS_LOW_VALUE = /\b(log[ -]?in|sign[ -]?in|privacy policy|terms of (use|service)|careers?|jobs?|vacanc(?:y|ies)|home page|homepage|contact us|about us)\b/i;
+
+function normalizedTerms(plan: NicheExpansionPlan): string[] {
+  return [...new Set([
+    plan.normalizedNiche ?? plan.niche,
+    ...(plan.importantEntities ?? []), ...(plan.entityAliases ?? []),
+    ...(plan.productsAndPlatforms ?? []), ...(plan.commonProblems ?? []),
+    ...(plan.contentCategories?.flatMap((category) => [category.label, ...category.terms]) ?? []),
+    ...(plan.normalizedPillars?.flatMap((pillar) => [pillar.originalPillar, pillar.normalizedPillar, ...pillar.searchTerms, ...pillar.relatedEntities]) ?? []),
+  ].map((value) => value.toLowerCase().trim()).filter((value) => value.length >= 3))];
+}
+
+export function preselectPlausibleTrends(
+  trends: Trend[],
+  plan: NicheExpansionPlan,
+  limit: number,
+): { selected: Trend[]; eligibleCount: number } {
+  const terms = normalizedTerms(plan);
+  const plausible = trends.filter((trend) => {
+    const title = trend.title?.trim() ?? '';
+    if (title.length < 18 || OBVIOUS_LOW_VALUE.test(title)) return false;
+    const evidence = `${title} ${trend.summary ?? ''} ${trend.publisher ?? ''} ${trend.link ?? ''}`.toLowerCase();
+    return terms.some((term) => evidence.includes(term));
+  });
+  const ranked = plausible.sort((a, b) => {
+    const aEvidence = `${a.title} ${a.summary ?? ''}`.toLowerCase();
+    const bEvidence = `${b.title} ${b.summary ?? ''}`.toLowerCase();
+    const relevanceDelta = terms.filter((term) => bEvidence.includes(term)).length - terms.filter((term) => aEvidence.includes(term)).length;
+    return relevanceDelta || Date.parse(b.pubDate || '') - Date.parse(a.pubDate || '');
+  });
+  const selected: Trend[] = [];
+  const seenDimensions = new Set<string>();
+  for (const trend of ranked) {
+    const dimension = `${trend.discoveryIntent ?? 'unknown'}|${trend.originatingSource ?? trend.source}|${terms.find((term) => `${trend.title} ${trend.summary ?? ''}`.toLowerCase().includes(term)) ?? 'uncategorized'}`;
+    if (!seenDimensions.has(dimension)) {
+      selected.push(trend);
+      seenDimensions.add(dimension);
+    }
+    if (selected.length >= limit) break;
+  }
+  for (const trend of ranked) {
+    if (selected.length >= limit) break;
+    if (!selected.includes(trend)) selected.push(trend);
+  }
+  return { selected, eligibleCount: plausible.length };
+}
 
 export interface Trend {
   title: string;
@@ -45,6 +93,14 @@ export interface Trend {
   searchQuery?: string;
   summary?: string;
   keyPoints?: string[];
+  discoveryIntent?: DiscoveryIntent;
+  evidenceRole?: EvidenceRole;
+  supportingSources?: SourceReference[];
+  originNiche?: string;
+  profileFingerprint?: string;
+  originatingQuery?: string;
+  queryIntent?: DiscoveryIntent;
+  originatingSource?: string;
 }
 
 export type TrendFetchInput = {
@@ -63,31 +119,31 @@ export type TrendFetchMetrics = {
   sourceRequestCount: number;
   cacheHits: number;
   cacheMisses: number;
+  queriesGenerated: number;
+  queriesRejected: number;
+  queriesExecuted: number;
+  queriesRejectedLowConfidence: number;
+  queriesRejectedGeneric: number;
+  queriesRejectedAmbiguous: number;
 };
 
-export const DEFAULT_TREND_SOURCES = ['google'] as const;
+export const DEFAULT_TREND_SOURCES = ['automatic'] as const;
 
 /** Parse bot config `sources` JSON; empty/missing arrays fall back to Google News. */
 export function parseTrendSources(raw: string | null | undefined): string[] {
-  if (!raw) return [...DEFAULT_TREND_SOURCES];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [...DEFAULT_TREND_SOURCES];
-    const filtered = parsed.filter(
-      (value): value is string => typeof value === 'string' && value.trim().length > 0,
-    );
-    return filtered.length > 0 ? filtered : [...DEFAULT_TREND_SOURCES];
-  } catch {
-    return [...DEFAULT_TREND_SOURCES];
-  }
+  void raw;
+  return [...DEFAULT_TREND_SOURCES];
 }
 
 export class TrendsService {
   private parser: Parser;
+  private redditAccessToken: { value: string; expiresAt: number } | null = null;
   private lastFetchMetrics: TrendFetchMetrics = {
     sourceRequestCount: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    queriesGenerated: 0, queriesRejected: 0, queriesExecuted: 0,
+    queriesRejectedLowConfidence: 0, queriesRejectedGeneric: 0, queriesRejectedAmbiguous: 0,
   };
 
   constructor() {
@@ -127,7 +183,7 @@ export class TrendsService {
 
   private beginFetchMetrics(): void {
     resetTrendCacheStats();
-    this.lastFetchMetrics = { sourceRequestCount: 0, cacheHits: 0, cacheMisses: 0 };
+    this.lastFetchMetrics = { sourceRequestCount: 0, cacheHits: 0, cacheMisses: 0, queriesGenerated: 0, queriesRejected: 0, queriesExecuted: 0, queriesRejectedLowConfidence: 0, queriesRejectedGeneric: 0, queriesRejectedAmbiguous: 0 };
     resetRedditSkipLog();
   }
 
@@ -142,7 +198,10 @@ export class TrendsService {
   }
 
   private effectiveSources(sources: string[], mode: TrendPipelineMode): string[] {
-    const normalized = sources.length > 0 ? sources : [...DEFAULT_TREND_SOURCES];
+    const requested = sources.length > 0 ? sources : [...DEFAULT_TREND_SOURCES];
+    const normalized = requested.includes('automatic')
+      ? ['google', 'web', 'official', 'reddit', 'quora', 'medium', 'linkedin']
+      : requested;
     const hadReddit = normalized.some((s) => s.toLowerCase() === 'reddit');
     const filtered = filterRedditFromSources(normalized);
     if (hadReddit && filtered.length < normalized.length) {
@@ -224,7 +283,17 @@ export class TrendsService {
 
  
 
-    const deduped = this.dedupeTrends(results);
+    const groundedResults = results.map((item) => {
+      if (item.evidenceRole !== 'problem_discovery' && item.evidenceRole !== 'question_discovery') return item;
+      const itemTokens = new Set(`${item.title} ${item.searchQuery ?? ''}`.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 4));
+      const supporting = results.filter((candidate) =>
+        candidate !== item
+        && (candidate.evidenceRole === 'primary' || candidate.evidenceRole === 'strong_secondary')
+        && `${candidate.title} ${candidate.searchQuery ?? ''}`.toLowerCase().split(/[^a-z0-9]+/).some((token) => token.length >= 4 && itemTokens.has(token)),
+      ).slice(0, 3).map((candidate) => ({ url: candidate.link, publisher: candidate.publisher, source: candidate.discoverySource ?? candidate.source, evidenceRole: candidate.evidenceRole! }));
+      return { ...item, supportingSources: supporting };
+    });
+    const deduped = this.dedupeTrends(groundedResults);
     const sorted = deduped.sort((a, b) => this.safeTime(b.pubDate) - this.safeTime(a.pubDate));
     this.endFetchMetrics();
     return sorted.slice(0, Math.max(candidateTarget, cfg.maxCandidatesPerNiche));
@@ -240,46 +309,115 @@ export class TrendsService {
        expansionPlan,
     } = input;
 
-    const sources = this.effectiveSources(rawSources, 'generation');
+    void rawSources; // Deprecated user source choices never override automatic planning.
     const candidateTarget = Math.min(
       cfg.maxCandidatesPerNiche * 2,
       this.resolveCandidateTarget(input, 'generation'),
     );
 
-    const planQueries = expansionPlan ? flattenExpansionQueries(expansionPlan) : queries;
-    const activeQueries = [...new Set(planQueries.map((q) => q.trim()).filter(Boolean))]
-      .slice(0, cfg.maxQueriesPerNiche);
-
-    if (activeQueries.length === 0) activeQueries.push(niche);
+    const plan: NicheExpansionPlan = expansionPlan ?? {
+      niche, domain: niche, confidence: 0, subtopics: [niche], queries, exclusions: [], queryOrigin: 'legacy_fallback',
+    };
+    const planQueries = [...new Set(flattenExpansionQueries(plan).map((q) => q.trim()).filter(Boolean))];
+    const minQueryConfidence = Math.max(0.01, Number(process.env.TREND_MIN_QUERY_CONFIDENCE ?? 0.7) || 0.7);
+    this.lastFetchMetrics.queriesGenerated = planQueries.length;
+    const activeQueries: string[] = [];
+    const rejectedQueries: Array<{ query: string; reasons: string[]; confidence: number }> = [];
+    for (const query of planQueries) {
+      const validation = validateExpansionQuery(query, niche, plan.subtopics, [], plan);
+      if (!validation.valid || validation.confidence < minQueryConfidence) {
+        rejectedQueries.push({ query, reasons: validation.reasons, confidence: validation.confidence });
+        this.lastFetchMetrics.queriesRejected++;
+        if (validation.confidence < minQueryConfidence) this.lastFetchMetrics.queriesRejectedLowConfidence++;
+        if (validation.reasons.some((reason) => reason.includes('generic'))) this.lastFetchMetrics.queriesRejectedGeneric++;
+        if (validation.reasons.some((reason) => /ambiguous|niche_context/.test(reason))) this.lastFetchMetrics.queriesRejectedAmbiguous++;
+        continue;
+      }
+      activeQueries.push(query);
+      if (activeQueries.length >= cfg.maxQueriesPerNiche) break;
+      const intent = plan.searchIntents?.find((candidate) =>
+        candidate.terms.some((term) => query.toLowerCase().includes(term.toLowerCase())),
+      );
+      console.info('[trend-query] provider query', {
+        niche,
+        planVersion: plan.version ?? null,
+        profileFingerprint: plan.inputFingerprint ?? null,
+        queryOrigin: plan.queryOrigin ?? 'legacy_fallback',
+        searchIntent: intent?.id ?? 'profile_query',
+        query,
+        validationConfidence: validation.confidence,
+      });
+    }
+    this.lastFetchMetrics.queriesExecuted = activeQueries.length;
+    if (rejectedQueries.length) console.info('[trend-query] rejected queries', { niche, rejectedQueries, counters: this.lastFetchMetrics });
+    if (activeQueries.length < 4) {
+      throw new Error(`insufficient_valid_queries:${niche}:${activeQueries.length}`);
+    }
 
     const domain = expansionPlan?.domain ?? niche;
     const mediumTags = expansionPlan ? getMediumTagsForPlan(expansionPlan) : [];
     const layers = cfg.googleFreshnessLayers as GoogleFreshnessLayer[];
 
-    const fetchJobs: Array<() => Promise<Trend[]>> = [];
+    const batchDiscoveryPlan = buildBatchDiscoveryPlan(input.requestedCount ?? input.limit ?? 7);
+    const sourcePlan = buildNicheSourcePlan(plan);
+    const resolution = resolveAutomaticProviderJobs({ ...plan, sourcePlan }, batchDiscoveryPlan);
+    const validRequests = resolution.jobs.filter((request) => {
+      const validation = validateExpansionQuery(request.query, niche, plan.subtopics, [], plan);
+      if (validation.valid) return true;
+      console.info('[trend-query] planned provider query rejected', { niche, intent: request.intent, source: request.source, query: request.query, reasons: validation.reasons });
+      return false;
+    });
+    for (const intent of resolution.intentsWithoutJobs) {
+      console.warn('[trend-discovery] intent skipped', { niche, intent, reason: 'no_operational_compatible_source' });
+    }
+    const providerJobsBySource = validRequests.reduce<Record<string, number>>((counts, request) => {
+      counts[request.source] = (counts[request.source] ?? 0) + 1;
+      return counts;
+    }, {});
+    console.info('[trend-discovery] batch source plan', {
+      niche, requestedPosts: batchDiscoveryPlan.requestedPosts,
+      intentTargets: batchDiscoveryPlan.intentTargets,
+      automaticSourcePlan: true,
+      preferredSources: resolution.preferredSources,
+      operationalSources: resolution.operationalSources,
+      unavailableSources: resolution.unavailableSources,
+      providerJobsCreated: validRequests.length,
+      providerJobsBySource,
+      officialDomains: sourcePlan.officialDomains, researchSources: sourcePlan.researchSources,
+      communitySources: sourcePlan.communitySources,
+    });
+    const fetchJobs: Array<{ source: string; run: () => Promise<Trend[]> }> = [];
 
-    for (const query of activeQueries) {
-      for (const source of sources) {
-        fetchJobs.push(() => this.fetchFromSource({
+    for (const request of validRequests) {
+      const query = request.query;
+      const source = request.source;
+      console.info('[trend-query] provider request', { niche, intent: request.intent, source, query, queryConfidence: request.confidence, sourceRole: request.sourceRole });
+        fetchJobs.push({ source, run: () => this.fetchFromSource({
           source,
           query,
           niche,
-          limit: Math.max(2, Math.ceil(candidateTarget / (activeQueries.length * Math.max(1, sources.length)))),
+          limit: Math.max(2, Math.ceil(candidateTarget / Math.max(1, validRequests.length))),
           searchQuery: query,
           domain,
           mediumTags,
           googleLayers: layers,
           pipelineMode: 'generation',
-        }));
-      }
+          discoveryIntent: request.intent,
+          evidenceRole: request.sourceRole,
+          sourcePlan,
+          profileFingerprint: plan.inputFingerprint ?? '',
+        }) });
     }
 
   
 
     const results: Trend[] = [];
+    const rawResultsBySource: Record<string, number> = {};
     await mapWithConcurrency(fetchJobs, cfg.sourceConcurrency, async (job) => {
       try {
-        results.push(...await job());
+        const batch = await job.run();
+        rawResultsBySource[job.source] = (rawResultsBySource[job.source] ?? 0) + batch.length;
+        results.push(...batch);
       } catch (error) {
         console.warn('[trends] source fetch failed', {
           niche,
@@ -287,11 +425,34 @@ export class TrendsService {
         });
       }
     });
+    console.info('[trend-discovery] provider execution completed', {
+      niche, automaticSourcePlan: true, providerJobsCreated: fetchJobs.length,
+      providerJobsBySource, rawResultsBySource, totalRawFetched: results.length,
+    });
 
-    const deduped = this.dedupeTrends(results);
-    const sorted = deduped.sort((a, b) => this.safeTime(b.pubDate) - this.safeTime(a.pubDate));
+    const groundedResults = results.map((item) => {
+      if (item.evidenceRole !== 'problem_discovery' && item.evidenceRole !== 'question_discovery') return item;
+      const itemTokens = new Set(`${item.title} ${item.searchQuery ?? ''}`.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 4));
+      const supporting = results.filter((candidate) => candidate !== item
+        && (candidate.evidenceRole === 'primary' || candidate.evidenceRole === 'strong_secondary')
+        && `${candidate.title} ${candidate.searchQuery ?? ''}`.toLowerCase().split(/[^a-z0-9]+/).some((token) => token.length >= 4 && itemTokens.has(token)))
+        .slice(0, 3).map((candidate) => ({ url: candidate.link, publisher: candidate.publisher, source: candidate.discoverySource ?? candidate.source, evidenceRole: candidate.evidenceRole! }));
+      return { ...item, supportingSources: supporting };
+    });
+    const deduped = this.dedupeTrends(groundedResults);
+    const preQualificationTarget = candidateTarget * 2;
+    const plausible = preselectPlausibleTrends(deduped, plan, preQualificationTarget);
+    console.info('[trend-discovery] niche pool prepared', {
+      niche,
+      providerResults: results.length,
+      exactDuplicatesRemoved: results.length - deduped.length,
+      obviousLowValueRemoved: deduped.length - plausible.eligibleCount,
+      plausibleCandidatesBeforeCap: plausible.eligibleCount,
+      candidatesAfterCap: plausible.selected.length,
+      fullyQualified: null,
+    });
     this.endFetchMetrics();
-    return sorted.slice(0, candidateTarget);
+    return plausible.selected;
   }
 
   private async fetchFromSource(params: {
@@ -304,19 +465,29 @@ export class TrendsService {
     mediumTags: string[];
     googleLayers: GoogleFreshnessLayer[];
     pipelineMode: TrendPipelineMode;
+    discoveryIntent?: DiscoveryIntent;
+    evidenceRole?: EvidenceRole;
+    sourcePlan?: ReturnType<typeof buildNicheSourcePlan>;
+    profileFingerprint?: string;
   }): Promise<Trend[]> {
     const { source, query, niche, limit, searchQuery, domain, mediumTags, googleLayers } = params;
     let items: Trend[] = [];
     switch (source.toLowerCase()) {
       case 'reddit':
         if (!isRedditConfigured() || isRedditCircuitOpen()) return [];
-        items = await this.fetchRedditTrends(domain, niche, query, limit);
+        items = await this.fetchRedditTrends(domain, niche, query, limit, params.sourcePlan?.relevantSubreddits);
         break;
       case 'medium':
         items = await this.fetchMediumTrends(niche, limit, mediumTags);
         break;
       case 'google':
         items = await this.fetchGoogleWithLayers(query, limit, googleLayers);
+        break;
+      case 'web':
+        items = await this.fetchWebSearchTrends(query, limit);
+        break;
+      case 'official':
+        items = await this.fetchGoogleSearchTrends(query, undefined, limit);
         break;
       case 'linkedin':
         items = await this.fetchGoogleSearchTrends(query, 'linkedin.com', limit);
@@ -327,21 +498,37 @@ export class TrendsService {
       default:
         items = [];
     }
-    return items.map((t) => ({ ...t, niche, searchQuery }));
+    return items.map((t) => ({
+      ...t,
+      niche,
+      searchQuery,
+      discoveryIntent: params.discoveryIntent,
+      evidenceRole: params.evidenceRole,
+      originNiche: niche,
+      profileFingerprint: params.profileFingerprint,
+      originatingQuery: searchQuery,
+      queryIntent: params.discoveryIntent,
+      originatingSource: source,
+    }));
   }
 
-  async fetchRedditTrends(domain: string, niche: string, query: string, limit: number = 5): Promise<Trend[]> {
+  async fetchRedditTrends(domain: string, niche: string, query: string, limit: number = 5, profileSubreddits: string[] = []): Promise<Trend[]> {
     if (!isRedditConfigured() || isRedditCircuitOpen()) return [];
 
-    const subreddits = getSubredditsForNiche(domain, niche);
+    const subreddits = [...new Set([...getSubredditsForNiche(domain, niche), ...profileSubreddits])];
     const results: Trend[] = [];
 
     if (subreddits.length > 0) {
-      for (const sub of subreddits.slice(0, 3)) {
+      for (const sub of subreddits.slice(0, 6)) {
         if (isRedditCircuitOpen()) break;
-        const url = `https://www.reddit.com/r/${sub}/search.json?q=${encodeURIComponent(query)}&restrict_sr=1&sort=top&t=week&limit=${Math.min(25, limit)}`;
-        const batch = await this.fetchRedditJsonTrends(url, limit);
-        results.push(...batch);
+        for (const window of ['week', 'month', 'year'] as const) {
+          const url = `https://oauth.reddit.com/r/${sub}/search?q=${encodeURIComponent(query)}&restrict_sr=1&sort=relevance&t=${window}&limit=${Math.min(25, limit)}`;
+          const batch = await this.fetchRedditJsonTrends(url, limit);
+          const cutoff = window === 'year' ? Date.now() - 90 * 86400000 : 0;
+          results.push(...batch.filter((item) => !cutoff || Date.parse(item.pubDate) >= cutoff));
+          if (this.dedupeTrends(results).length >= limit) break;
+        }
+        if (this.dedupeTrends(results).length >= limit) break;
       }
     } else {
       console.debug('[trends] no subreddit mapping; skipping Reddit search', { domain, niche });
@@ -355,10 +542,11 @@ export class TrendsService {
 
     try {
       this.trackSourceRequest();
+      const token = await this.getRedditAccessToken();
       const { data } = await axios.get(url, {
         headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'User-Agent': process.env.REDDIT_USER_AGENT || 'VeyraisContentIntelligence/1.0',
+          Authorization: `Bearer ${token}`,
           Accept: 'application/json',
         },
         timeout: 8000,
@@ -366,13 +554,16 @@ export class TrendsService {
 
       if (!data?.data?.children) return [];
 
-      return data.data.children.slice(0, limit).map((child: { data: { title: string; permalink: string; created_utc: number; subreddit_name_prefixed: string } }) => ({
+      return data.data.children.slice(0, limit).map((child: { data: { title: string; permalink: string; created_utc: number; subreddit_name_prefixed: string; selftext?: string; score?: number; num_comments?: number } }) => ({
         title: child.data.title,
         link: `https://www.reddit.com${child.data.permalink}`,
         pubDate: new Date(child.data.created_utc * 1000).toISOString(),
         source: `Reddit (${child.data.subreddit_name_prefixed})`,
         publisher: child.data.subreddit_name_prefixed,
         discoverySource: 'Reddit',
+        summary: child.data.selftext?.slice(0, 1200),
+        keyPoints: [`score:${child.data.score ?? 0}`, `comments:${child.data.num_comments ?? 0}`],
+        evidenceRole: 'problem_discovery' as const,
       }));
     } catch (error: unknown) {
       const status = (error as { response?: { status?: number } })?.response?.status;
@@ -383,6 +574,49 @@ export class TrendsService {
           message: error instanceof Error ? error.message : String(error),
         });
       }
+      return [];
+    }
+  }
+
+  private async getRedditAccessToken(): Promise<string> {
+    if (this.redditAccessToken && this.redditAccessToken.expiresAt > Date.now() + 30000) return this.redditAccessToken.value;
+    const clientId = process.env.REDDIT_CLIENT_ID;
+    const clientSecret = process.env.REDDIT_CLIENT_SECRET;
+    if (!clientId || !clientSecret) throw new Error('reddit_not_configured');
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+    const { data } = await axios.post('https://www.reddit.com/api/v1/access_token', body.toString(), {
+      auth: { username: clientId, password: clientSecret },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': process.env.REDDIT_USER_AGENT || 'VeyraisContentIntelligence/1.0' },
+      timeout: 8000,
+    });
+    if (!data?.access_token) throw new Error('reddit_oauth_token_missing');
+    this.redditAccessToken = { value: data.access_token, expiresAt: Date.now() + Math.max(60, Number(data.expires_in ?? 3600)) * 1000 };
+    return data.access_token;
+  }
+
+  async fetchWebSearchTrends(query: string, limit: number = 5): Promise<Trend[]> {
+    const endpoint = process.env.WEB_SEARCH_ENDPOINT;
+    if (!endpoint) {
+      console.info('[trends] web search skipped', { reason: 'web_search_not_configured', query: query.slice(0, 100) });
+      return [];
+    }
+    try {
+      this.trackSourceRequest();
+      const { data } = await axios.get(endpoint, {
+        params: { q: query, limit },
+        headers: process.env.WEB_SEARCH_API_KEY ? { Authorization: `Bearer ${process.env.WEB_SEARCH_API_KEY}` } : undefined,
+        timeout: 10000,
+      });
+      const items = Array.isArray(data?.results) ? data.results : Array.isArray(data?.items) ? data.items : [];
+      return items.slice(0, limit).map((item: any) => ({
+        title: String(item.title ?? 'No Title'), link: String(item.url ?? item.link ?? ''),
+        pubDate: String(item.publishedAt ?? item.date ?? ''), source: String(item.publisher ?? item.source ?? 'Web Search'),
+        publisher: String(item.publisher ?? item.source ?? 'Web Search'), discoverySource: 'Web Search',
+        summary: typeof item.snippet === 'string' ? item.snippet : typeof item.description === 'string' ? item.description : undefined,
+        evidenceRole: 'strong_secondary' as const,
+      }));
+    } catch (error) {
+      console.warn('[trends] web search failed', { query: query.slice(0, 100), message: error instanceof Error ? error.message : String(error) });
       return [];
     }
   }

@@ -12,11 +12,11 @@ import {
   toPipelineMode,
   type TrendPipelineMode,
 } from '../config/trendPipelineConfig';
-import { NicheExpansionService } from './nicheExpansionService';
+import { flattenExpansionQueries, NicheExpansionService, validateExpansionQuery } from './nicheExpansionService';
 import { TopicFingerprintService } from './topicFingerprintService';
-import { processTrendCandidates } from './trendSelectionService';
+import { applyBatchEvidenceComposition, processTrendCandidates } from './trendSelectionService';
 import { rankedToTrendCandidates } from './trendDiversityService';
-import { selectDiverseRankedCandidates, selectPreviewRankedCandidates } from './trendRankingService';
+import { selectDiverseRankedCandidates, selectNicheBalancedCandidates, selectPreviewRankedCandidates } from './trendRankingService';
 import { TrendsService } from './trendsService';
 import type { Trend } from './trendsService';
 import { mapWithConcurrency } from './concurrencyUtils';
@@ -46,6 +46,57 @@ export type RankedTrendPoolParams = {
 };
 
 export type RankedTrendPoolResult = OrchestratedTrendPool;
+export const MIN_EXECUTABLE_QUERIES_PER_NICHE = 4;
+
+export class InsufficientValidQueriesError extends Error {
+  constructor(public readonly niche: string, public readonly diagnostics: Array<{ query: string; reasons: string[] }>) {
+    super(`insufficient_valid_queries:${niche}`);
+    this.name = 'InsufficientValidQueriesError';
+  }
+}
+
+export function validatePlanQueries(plan: NicheExpansionPlan): {
+  executable: string[];
+  rejected: Array<{ query: string; reasons: string[] }>;
+} {
+  const executable: string[] = [];
+  const rejected: Array<{ query: string; reasons: string[] }> = [];
+  for (const query of [...new Set(flattenExpansionQueries(plan))]) {
+    const result = validateExpansionQuery(query, plan.niche, plan.subtopics, executable, plan);
+    if (result.valid && result.confidence >= 0.7) executable.push(query);
+    else rejected.push({ query, reasons: result.reasons });
+  }
+  return { executable, rejected };
+}
+
+function normalizeQueryPart(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Build retry searches from the pillar's search keywords, not its example
+ * writing angles. Example angles often describe the shared audience (for
+ * example, "for indie game devs") and can pull every niche into that domain.
+ */
+export function buildFocusedRetryQueries(
+  niche: string,
+  plan: NicheExpansionPlan,
+  searchAttempt: number,
+): string[] {
+  if (searchAttempt <= 0) return [];
+  const nicheKey = normalizeQueryPart(niche);
+  const orderedQueries = plan.profileQueries?.length
+    ? [...plan.profileQueries]
+        .filter((item) => item.confidence >= 0.7)
+        .sort((a, b) => b.confidence - a.confidence)
+        .map((item) => item.query)
+    : plan.queries;
+  const uniqueQueries = [...new Map(orderedQueries
+    .map((query) => [normalizeQueryPart(query), query.trim()] as const)
+    .filter(([key]) => key && key !== nicheKey)).values()];
+  const offset = (searchAttempt - 1) * MIN_EXECUTABLE_QUERIES_PER_NICHE;
+  return uniqueQueries.slice(offset, offset + MIN_EXECUTABLE_QUERIES_PER_NICHE);
+}
 
 export class TrendOrchestrationService {
   private trendsService: TrendsService;
@@ -127,43 +178,68 @@ export class TrendOrchestrationService {
       cfg.nicheConcurrency,
       async (niche): Promise<NicheResult> => {
         const nicheTimer = performance.now();
-        const basePlan = params.strategy
-          ? buildStrategyExpansionPlan(params.strategy, niche)
-          : await this.resolveExpansionPlan(params.userId, niche);
-        const focusedSeeds = basePlan.subtopics
-          .filter((seed) => seed.trim().toLowerCase() !== niche.trim().toLowerCase())
-          .slice(0, 3);
-        while (focusedSeeds.length < 3) {
-          focusedSeeds.push(['product innovation', 'customer adoption', 'market competition'][focusedSeeds.length]);
+        let cachedPlan = await this.resolveExpansionPlan(params.userId, niche);
+        let basePlan = params.strategy
+          ? buildStrategyExpansionPlan(params.strategy, niche, cachedPlan)
+          : cachedPlan;
+        let queryValidation = validatePlanQueries(basePlan);
+        if (queryValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
+          console.warn('[trend-query] regenerating insufficient niche plan', {
+            userId: params.userId,
+            niche,
+            cachedProfileQueries: cachedPlan.queries.length,
+            strategyEnrichedQueries: basePlan.queries.length,
+            generatedCandidates: flattenExpansionQueries(basePlan).length,
+            validatedQueries: queryValidation.executable.length,
+            diagnostics: queryValidation.rejected,
+          });
+          cachedPlan = await this.nicheExpansion.getOrCreatePlan(
+            params.userId,
+            niche,
+            true,
+            queryValidation.rejected,
+          );
+          basePlan = params.strategy
+            ? buildStrategyExpansionPlan(params.strategy, niche, cachedPlan)
+            : cachedPlan;
+          queryValidation = validatePlanQueries(basePlan);
         }
-        const retryQueries = params.searchAttempt === 1
-          ? [
-              `${niche} ${focusedSeeds[0]} latest news 2026`,
-              `${niche} ${focusedSeeds[1]} recent developments 2026`,
-              `${niche} ${focusedSeeds[2]} industry analysis 2026`,
-            ]
-          : params.searchAttempt === 2
-            ? [
-                `${niche} ${focusedSeeds[0]} case study growth results`,
-                `${niche} ${focusedSeeds[1]} funding partnerships acquisitions`,
-                `${niche} ${focusedSeeds[2]} challenges opportunities research`,
-              ]
-            : params.searchAttempt === 3
-              ? [
-                  `${niche} ${focusedSeeds[0]} founders operators expert insights`,
-                  `${niche} ${focusedSeeds[1]} enterprise benchmarks adoption`,
-                  `${niche} ${focusedSeeds[2]} market outlook predictions`,
-                ]
-              : [];
+        if (queryValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
+          throw new InsufficientValidQueriesError(niche, queryValidation.rejected);
+        }
+        const retryQueries = buildFocusedRetryQueries(
+          niche,
+          basePlan,
+          params.searchAttempt ?? 0,
+        );
+        if ((params.searchAttempt ?? 0) > 0 && retryQueries.length === 0) {
+          throw new InsufficientValidQueriesError(niche, [{
+            query: '',
+            reasons: ['no_unused_valid_retry_queries'],
+          }]);
+        }
         const plan = retryQueries.length
           ? {
               ...basePlan,
-              queries: [...retryQueries, ...basePlan.queries],
-              // Retry queries must be authoritative. Otherwise flattenExpansionQueries
-              // prefers the cached query buckets and silently repeats pass one.
+              queries: retryQueries,
               queryBuckets: undefined,
+              queryOrigin: 'retry_regenerated' as const,
             }
           : basePlan;
+        const executionValidation = validatePlanQueries(plan);
+        if (executionValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
+          throw new InsufficientValidQueriesError(niche, executionValidation.rejected);
+        }
+        console.info('[trend-query] query pool ready', {
+          userId: params.userId,
+          niche,
+          cachedProfileQueries: cachedPlan.queries.length,
+          strategyEnrichedQueries: basePlan.queries.length,
+          generatedCandidates: flattenExpansionQueries(plan).length,
+          validatedQueries: executionValidation.executable.length,
+          executedQueries: Math.min(executionValidation.executable.length, cfg.maxQueriesPerNiche),
+          searchAttempt: (params.searchAttempt ?? 0) + 1,
+        });
 
         let rawTrends: Trend[] = [];
         try {
@@ -179,6 +255,7 @@ export class TrendOrchestrationService {
             requestedCount: limit,
           });
         } catch (error) {
+          if (error instanceof Error && error.message.startsWith('insufficient_valid_queries:')) throw error;
           console.error('[trend-orchestration] trend fetch failed', {
             userId: params.userId,
             niche,
@@ -192,7 +269,7 @@ export class TrendOrchestrationService {
             userId: params.userId,
             niche,
             queryCount: plan.queries.length,
-            sourceCount: params.sources.length,
+            sourceMode: 'automatic',
             rawFetched: rawTrends.length,
           });
         } else {
@@ -202,7 +279,7 @@ export class TrendOrchestrationService {
             searchAttempt: (params.searchAttempt ?? 0) + 1,
             queryCount: plan.queries.length,
             querySample: plan.queries.slice(0, 3),
-            sourceCount: params.sources.length,
+            sourceMode: 'automatic',
             rawFetched: rawTrends.length,
           });
         }
@@ -217,6 +294,15 @@ export class TrendOrchestrationService {
           fingerprintService: this.fingerprintService,
           pipelineMode,
           strategy: params.strategy,
+        });
+        console.info('[trend-orchestration] niche qualification completed', {
+          niche,
+          providerResults: rawTrends.length,
+          exactDuplicatesRemoved: stats.exactDuplicatesRemoved,
+          obviousLowValueRemoved: stats.rejectedLowValue,
+          plausibleCandidatesBeforeCap: rawTrends.length,
+          candidatesAfterCap: rawTrends.length,
+          fullyQualified: ranked.length,
         });
 
         return {
@@ -276,7 +362,22 @@ export class TrendOrchestrationService {
 
     let ranked = pipelineMode === 'preview'
       ? selectPreviewRankedCandidates(allRanked, limit)
-      : selectDiverseRankedCandidates(allRanked, limit);
+      : selectNicheBalancedCandidates(applyBatchEvidenceComposition(allRanked, limit), limit);
+
+    if (pipelineMode === 'generation') {
+      const countByNiche = (items: RankedTrendCandidate[]) => items.reduce<Record<string, number>>((counts, item) => {
+        const niche = item.trend.originNiche ?? item.trend.niche ?? 'unknown';
+        counts[niche] = (counts[niche] ?? 0) + 1;
+        return counts;
+      }, {});
+      const qualifiedByNiche = countByNiche(allRanked);
+      const selectedByNiche = countByNiche(ranked);
+      console.info('[trend-orchestration] final niche representation', {
+        selectedByNiche,
+        qualifiedByNiche,
+        nichesWithoutQualifiedCandidates: params.niches.filter((niche) => !qualifiedByNiche[niche]),
+      });
+    }
 
     aggregateStats.selected = ranked.length;
     timer.mark('previewPersistenceMs');
@@ -303,6 +404,13 @@ export class TrendOrchestrationService {
           title: item.trend.topic,
           publisher: item.trend.publisher,
           discoverySource: item.trend.discoverySource,
+          intent: item.trend.discoveryIntent ?? null,
+          dynamicCategory: item.trend.strategyReasons?.find((reason) => reason.startsWith('category_match:'))?.split(':')[1] ?? null,
+          supportingSourceCount: item.trend.supportingSources?.length ?? 0,
+          evidenceRole: item.trend.evidenceRole ?? 'idea_only',
+          angleType: item.trend.angleType ?? null,
+          relevanceScore: item.relevanceScore,
+          confidence: item.trend.strategyScore ?? 0,
           cluster: item.fingerprint.topicCluster,
           normalizedTopic: item.fingerprint.normalizedTopic,
           score: Math.round(item.totalScore),
@@ -352,8 +460,8 @@ export class TrendOrchestrationService {
         searchAttempt,
       });
       latest = pass;
-      accumulated = selectDiverseRankedCandidates(
-        [...accumulated, ...pass.ranked],
+      accumulated = selectNicheBalancedCandidates(
+        applyBatchEvidenceComposition([...accumulated, ...pass.ranked], requested),
         requested,
       );
       for (const key of Object.keys(totals) as Array<keyof typeof totals>) {

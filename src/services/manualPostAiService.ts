@@ -15,7 +15,6 @@ import { parseTrendSources } from './trendsService';
 import { extractBalancedJsonObject } from './ghostwriterJsonParser';
 import { canGenerate } from './entitlementService';
 import { getBotVoice } from './userContentContext';
-import { prisma } from '../prismaClient';
 import { ManualPostError } from './manualPostService';
 import {
   fetchReadableArticleFromUrl,
@@ -27,12 +26,24 @@ import {
   improveWeakTopicSuggestions,
   STRONG_TOPIC_SCORE,
 } from './manualPost/topicImprovementService';
-import { areNearDuplicateTitles } from './manualPost/manualPostTopicSuggestionService';
 
 export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
 export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = DEFAULT_TOPIC_SUGGESTION_COUNT;
+const TOPIC_SUGGESTION_CACHE_TTL_MS = 5 * 60 * 1000;
+
+const topicSuggestionCache = new Map<string, {
+  expiresAt: number;
+  result: Awaited<ReturnType<typeof buildTopicSuggestionResult>>;
+}>();
 
 export type { ManualTopicSuggestion };
+
+function buildTopicSuggestionResult(
+  topics: ManualTopicSuggestion[],
+  metadata: { requested: number; accepted: number; discarded: number; additionalDiscoveryRuns: number; minimumScore: number },
+) {
+  return { topics, metadata };
+}
 
 export const MAX_MANUAL_TOPIC_LENGTH = 500;
 export const MAX_ADDITIONAL_INSTRUCTIONS_LENGTH = 1000;
@@ -228,9 +239,12 @@ export function parseManualTopicSuggestionsResponse(raw: string): ManualTopicSug
 
 export async function suggestManualPostTopics(
   userId: string,
-  options?: { count?: unknown; provider?: unknown },
+  options?: { count?: unknown; provider?: unknown; refresh?: boolean },
 ): Promise<{ topics: ManualTopicSuggestion[]; metadata?: { requested: number; accepted: number; discarded: number; additionalDiscoveryRuns: number; minimumScore: number } }> {
-  const gate = await canGenerate(userId);
+  const [gate, voice] = await Promise.all([
+    canGenerate(userId),
+    getBotVoice(userId),
+  ]);
   if (!gate.allowed) {
     throw new ManualPostError(
       403,
@@ -239,23 +253,28 @@ export async function suggestManualPostTopics(
     );
   }
 
-  const voice = await getBotVoice(userId);
   const count = clampTopicSuggestionCount(options?.count ?? DEFAULT_TOPIC_SUGGESTION_COUNT);
   const provider = parseContentProvider(options?.provider);
-  const [voiceContext, botConfig] = await Promise.all([
-    getManualVoiceContext(userId),
-    prisma.botConfig.findUnique({
-      where: { userId },
-    }),
-  ]);
-  const strategy = buildEffectiveBotStrategy(botConfig);
+  const voiceContext = await getManualVoiceContext(userId, undefined, voice);
+  const strategy = voice.strategy ?? buildEffectiveBotStrategy(null);
   if (!voice.description.trim() && !hasStrategyGenerationContext(strategy)) {
     throw new ManualPostError(400, 'Complete your ghostwriter profile before suggesting topics.');
   }
-  const trendSources = parseTrendSources(botConfig?.sources);
+  const trendSources = parseTrendSources(voice.sources);
+  const cacheKey = JSON.stringify({
+    userId,
+    count,
+    provider,
+    voice,
+    sampleIds: voiceContext.selectedWritingSamples.map((sample) => sample.id),
+  });
+  const cached = topicSuggestionCache.get(cacheKey);
+  if (!options?.refresh && cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
   const currentYear = new Date().getFullYear();
   const contentService = await resolveManualContentService(userId, provider);
-  const discoveryCount = Math.min(MAX_MANUAL_TOPIC_SUGGESTIONS, Math.max(count * 2, count));
+  const discoveryCount = Math.min(MAX_MANUAL_TOPIC_SUGGESTIONS, count + 2);
   const prompt = buildManualTopicSuggestionPrompt({
     voice: {
       tone: strategy.writingStyle.tone[0] || voice.tone,
@@ -274,7 +293,7 @@ export async function suggestManualPostTopics(
     let raw: string;
     try {
       // Use rewrite raw transport so OpenAI is not forced into manual-post JSON schema.
-      raw = await contentService.fetchComposerRewriteRaw(prompt, provider);
+      raw = await contentService.fetchComposerRewriteRaw(prompt, provider, 1800);
     } catch (err) {
       console.error('[manual-posts] suggest-topics provider error:', err instanceof Error ? err.message : err);
       throw new ManualPostError(502, 'Could not generate topic suggestions right now. Try again.');
@@ -298,25 +317,21 @@ export async function suggestManualPostTopics(
   };
 
   const improveBatch = (improvementPrompt: string) =>
-    contentService.fetchComposerRewriteRaw(improvementPrompt, provider);
+    contentService.fetchComposerRewriteRaw(improvementPrompt, provider, 1600);
   let discarded = 0;
-  let additionalDiscoveryRuns = 0;
-  const first = await improveWeakTopicSuggestions({ topics: await discover(), strategy, improveBatch });
+  const additionalDiscoveryRuns = 0;
+  const first = await improveWeakTopicSuggestions({
+    topics: await discover(),
+    strategy,
+    improveBatch,
+    maxAttempts: 1,
+    targetAcceptedCount: count,
+  });
   let accepted = first.accepted;
   discarded += first.discarded.length;
-
   if (accepted.length < count) {
-    additionalDiscoveryRuns = 1;
-    const second = await improveWeakTopicSuggestions({ topics: await discover(), strategy, improveBatch });
-    discarded += second.discarded.length;
-    for (const topic of second.accepted) {
-      if (!accepted.some((existing) =>
-        areNearDuplicateTitles(existing.title, topic.title)
-        || (existing.sourceUrl && topic.sourceUrl && existing.sourceUrl === topic.sourceUrl)
-        || (existing.suggestedAngle && topic.suggestedAngle && areNearDuplicateTitles(existing.suggestedAngle, topic.suggestedAngle)))) {
-        accepted.push(topic);
-      }
-    }
+    accepted = [...accepted, ...first.discarded]
+      .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0));
   }
 
   const topics = accepted
@@ -331,10 +346,26 @@ export async function suggestManualPostTopics(
     discarded,
     additionalDiscoveryRuns,
   });
-  return {
-    topics,
-    metadata: { requested: count, accepted: topics.length, discarded, additionalDiscoveryRuns, minimumScore: STRONG_TOPIC_SCORE },
-  };
+  const result = buildTopicSuggestionResult(topics, {
+    requested: count,
+    accepted: topics.length,
+    discarded,
+    additionalDiscoveryRuns,
+    minimumScore: STRONG_TOPIC_SCORE,
+  });
+  topicSuggestionCache.set(cacheKey, {
+    expiresAt: Date.now() + TOPIC_SUGGESTION_CACHE_TTL_MS,
+    result,
+  });
+  if (topicSuggestionCache.size > 500) {
+    const now = Date.now();
+    for (const [key, entry] of topicSuggestionCache) {
+      if (entry.expiresAt <= now || topicSuggestionCache.size > 450) {
+        topicSuggestionCache.delete(key);
+      }
+    }
+  }
+  return result;
 }
 
 function pickOptionalString(

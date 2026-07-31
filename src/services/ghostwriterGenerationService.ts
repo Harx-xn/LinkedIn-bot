@@ -256,7 +256,9 @@ async function tryAcceptPost(
     return { accepted: false, acceptance };
   }
 
-  const { imageContent, issues: imageIssues } = await resolveImageContent(contentService, finalized, plan, provider);
+  const { imageContent, issues: imageIssues } = config.imageMode === 'providedBackground'
+    ? await resolveImageContent(contentService, finalized, plan, provider)
+    : { imageContent: null, issues: [] };
   logSlotDecision(sourceTitle, plan, counters, acceptance, { imageValidationIssues: imageIssues.map((i) => i.code) });
 
   return {

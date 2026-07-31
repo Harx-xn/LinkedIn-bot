@@ -49,6 +49,9 @@ const GEMINI_CONTENT_MODEL = process.env.GEMINI_CONTENT_MODEL || 'gemini-flash-l
 const OPENAI_PLAN_TEMPERATURE = Number(process.env.OPENAI_PLAN_TEMPERATURE ?? 0.3);
 const OPENAI_WRITE_TEMPERATURE = Number(process.env.OPENAI_WRITE_TEMPERATURE ?? 0.65);
 const OPENAI_REPAIR_TEMPERATURE = Number(process.env.OPENAI_REPAIR_TEMPERATURE ?? 0.25);
+const POST_MAX_OUTPUT_TOKENS = Number(process.env.POST_MAX_OUTPUT_TOKENS ?? 2200);
+const REVIEW_MAX_OUTPUT_TOKENS = Number(process.env.REVIEW_MAX_OUTPUT_TOKENS ?? 700);
+const IMAGE_COPY_MAX_OUTPUT_TOKENS = Number(process.env.IMAGE_COPY_MAX_OUTPUT_TOKENS ?? 500);
 const MAX_JSON_REPAIRS = 2;
 
 export class ContentService {
@@ -83,17 +86,18 @@ export class ContentService {
     prompt: string,
     provider: 'GEMINI' | 'OPENAI',
     temperature: number,
+    maxOutputTokens?: number,
   ): Promise<string> {
     try {
-      if (provider === 'GEMINI') return await this.generateGeminiPost(prompt, temperature);
-      return await this.generateOpensAiPost(prompt, temperature);
+      if (provider === 'GEMINI') return await this.generateGeminiPost(prompt, temperature, 0, maxOutputTokens);
+      return await this.generateOpensAiPost(prompt, temperature, maxOutputTokens);
     } catch (error) {
       console.warn(`[ghostwriter] Primary provider ${provider} failed, attempting fallback`);
       if (provider === 'GEMINI' && this.openai) {
-        return await this.generateOpensAiPost(prompt, temperature);
+        return await this.generateOpensAiPost(prompt, temperature, maxOutputTokens);
       }
       if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
-        return await this.generateGeminiPost(prompt, temperature);
+        return await this.generateGeminiPost(prompt, temperature, 0, maxOutputTokens);
       }
       throw error;
     }
@@ -208,7 +212,7 @@ Output JSON array only:
 ]`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE);
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, 1400);
       const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const json = JSON.parse(cleaned);
       const validated = batchPlanSchema.safeParse(json);
@@ -278,7 +282,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
         });
       }
     }
-    return this.generateWithFallback(prompt, provider, temperature);
+    return this.generateWithFallback(prompt, provider, temperature, POST_MAX_OUTPUT_TOKENS);
   }
 
   hasProvider(provider: 'GEMINI' | 'OPENAI'): boolean {
@@ -428,7 +432,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<TechnicalReviewResult> {
     const prompt = buildTechnicalReviewPrompt(post, author, plan);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, REVIEW_MAX_OUTPUT_TOKENS);
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
       const parsed = technicalReviewSchema.safeParse(JSON.parse(cleaned));
@@ -453,7 +457,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<ImageContent | null> {
     const prompt = buildImageCopyPrompt(approvedBody, plan);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS);
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
       const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
@@ -471,7 +475,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<ImageContent | null> {
     const prompt = buildImageRepairPrompt(approvedBody, image, issues);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS);
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
       const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
@@ -507,8 +511,9 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
   async fetchComposerRewriteRaw(
     prompt: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+    maxOutputTokens?: number,
   ): Promise<string> {
-    return this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    return this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE, maxOutputTokens);
   }
 
   /**
@@ -590,6 +595,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     const response = await this.openai.chat.completions.create({
       model: OPENAI_CONTENT_MODEL,
       temperature,
+      max_completion_tokens: POST_MAX_OUTPUT_TOKENS,
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -614,6 +620,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     const response = await this.openai.chat.completions.create({
       model: OPENAI_CONTENT_MODEL,
       temperature,
+      max_completion_tokens: POST_MAX_OUTPUT_TOKENS,
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -630,7 +637,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     return response.choices[0].message.content || '';
   }
 
-  private async generateGeminiPost(prompt: string, temperature: number, retryCount = 0): Promise<string> {
+  private async generateGeminiPost(prompt: string, temperature: number, retryCount = 0, maxOutputTokens?: number): Promise<string> {
     if (this.geminiKeys.length === 0) {
       return `[MOCK] Gemini Post. (Set GEMINI_API_KEY)`;
     }
@@ -642,6 +649,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
         generationConfig: {
           temperature,
           responseMimeType: 'application/json',
+          ...(maxOutputTokens ? { maxOutputTokens } : {}),
         },
       });
       const response = await result.response;
@@ -650,22 +658,23 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
       if (error?.status === 429) {
         if (this.geminiKeys.length > 1 && retryCount < this.geminiKeys.length) {
           this.currentKeyIndex = (this.currentKeyIndex + 1) % this.geminiKeys.length;
-          return this.generateGeminiPost(prompt, temperature, retryCount + 1);
+          return this.generateGeminiPost(prompt, temperature, retryCount + 1, maxOutputTokens);
         }
         if (retryCount < 3) {
           await new Promise((r) => setTimeout(r, 30000));
-          return this.generateGeminiPost(prompt, temperature, retryCount + 1);
+          return this.generateGeminiPost(prompt, temperature, retryCount + 1, maxOutputTokens);
         }
       }
       throw error;
     }
   }
 
-  private async generateOpensAiPost(prompt: string, temperature: number): Promise<string> {
+  private async generateOpensAiPost(prompt: string, temperature: number, maxOutputTokens?: number): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
     const response = await this.openai.chat.completions.create({
       model: OPENAI_CONTENT_MODEL,
       temperature,
+      ...(maxOutputTokens ? { max_completion_tokens: maxOutputTokens } : {}),
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: GHOSTWRITER_SYSTEM },

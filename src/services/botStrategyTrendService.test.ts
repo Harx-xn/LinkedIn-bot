@@ -6,6 +6,7 @@ import { buildEffectiveBotStrategy } from './botStrategyService';
 import {
   buildStrategyExpansionPlan,
   buildStrategyTrendSeeds,
+  isUsefulTrendKeyword,
   scoreTrendForStrategy,
 } from './botStrategyTrendService';
 
@@ -84,6 +85,129 @@ describe('botStrategyTrendService', () => {
     assert.ok(plan.queries.includes('user onboarding'));
     assert.ok(plan.queries.includes('activation analytics'));
     assert.ok(plan.exclusions.includes('crypto'));
+  });
+
+  it('produces the same strategy fingerprint for unchanged normalized inputs', () => {
+    const first = buildStrategyExpansionPlan(strategy, 'Activation systems');
+    const second = buildStrategyExpansionPlan(strategy, 'Activation systems');
+    assert.equal(first.inputFingerprint, second.inputFingerprint);
+  });
+
+  it('removes generic and audience-only terms from strategy search queries', () => {
+    const contaminated = buildEffectiveBotStrategy({
+      description: 'I write about software engineering for indie game developers.',
+      tone: 'Practical',
+      niches: JSON.stringify(['Web Development']),
+      contentPillars: {
+        primaryPillars: [{
+          name: 'Web Development',
+          description: 'Browser engineering and web application architecture',
+          audienceRelevance: 'For indie game developers',
+          exampleAngles: ['for Indie Game Devs'],
+          trendKeywords: [
+            'trends',
+            'best practices',
+            'for Indie Game Devs',
+            'Web Development trends',
+            'Web Development best practices',
+            'Web Development for Indie Game Devs',
+            'browser performance',
+          ],
+        }],
+        secondaryPillars: [],
+        experimentalPillars: [],
+        excludedTopics: [],
+      },
+    });
+
+    const plan = buildStrategyExpansionPlan(contaminated, 'Web Development');
+    assert.deepEqual(plan.queries, ['browser performance']);
+    assert.equal(plan.subtopics.includes('for Indie Game Devs'), true);
+    assert.equal(isUsefulTrendKeyword('best practices', 'Web Development'), false);
+    assert.equal(isUsefulTrendKeyword('Web Development trends', 'Web Development'), false);
+    assert.equal(isUsefulTrendKeyword('Web Development for Indie Game Devs', 'Web Development'), false);
+  });
+
+  it('does not let injected niche or search-query labels satisfy strategy relevance', () => {
+    const unrelated = scoreTrendForStrategy(
+      {
+        topic: 'A woodcut-inspired 3D game launches this year',
+        niche: 'Activation systems',
+        searchQuery: 'Activation systems user onboarding latest news',
+      },
+      strategy,
+    );
+
+    assert.equal(unrelated.accepted, false);
+    assert.equal(unrelated.breakdown.pillarMatch, 0);
+  });
+
+  it('matches a source headline by the distinctive part of a pillar name', () => {
+    const unityStrategy = buildEffectiveBotStrategy({
+      description: 'I write about game-engine engineering.',
+      tone: 'Technical',
+      niches: JSON.stringify(['Unity Game Development']),
+      contentPillars: {
+        primaryPillars: [{
+          name: 'Unity Game Development',
+          description: 'Unity engine architecture',
+          audienceRelevance: '',
+          exampleAngles: [],
+          trendKeywords: ['Unity rendering'],
+        }],
+        secondaryPillars: [],
+        experimentalPillars: [],
+        excludedTopics: [],
+      },
+      topicRules: {
+        minimumRelevanceScore: 60,
+        requirePillarMatch: true,
+        requireAudiencePainMatch: false,
+        avoidDuplicateAngles: true,
+        avoidRecentTopicsDays: 30,
+      },
+    });
+    const result = scoreTrendForStrategy(
+      { topic: 'Unity changes its rendering pipeline for mobile games', publishedAt: new Date() },
+      unityStrategy,
+    );
+
+    assert.equal(result.accepted, true);
+    assert.equal(result.matchedPillar, 'Unity Game Development');
+  });
+
+  it('applies the same token-overlap rule to arbitrary non-technology pillars', () => {
+    const culinaryStrategy = buildEffectiveBotStrategy({
+      description: 'I write about culinary operations.',
+      tone: 'Practical',
+      niches: JSON.stringify(['Sustainable Restaurant Operations']),
+      contentPillars: {
+        primaryPillars: [{
+          name: 'Sustainable Restaurant Operations',
+          description: 'Reducing waste in commercial kitchens',
+          audienceRelevance: '',
+          exampleAngles: [],
+          trendKeywords: ['commercial kitchen waste'],
+        }],
+        secondaryPillars: [],
+        experimentalPillars: [],
+        excludedTopics: [],
+      },
+      topicRules: {
+        minimumRelevanceScore: 60,
+        requirePillarMatch: true,
+        requireAudiencePainMatch: false,
+        avoidDuplicateAngles: true,
+        avoidRecentTopicsDays: 30,
+      },
+    });
+    const result = scoreTrendForStrategy(
+      { topic: 'Restaurants adopt sustainable kitchen operations', publishedAt: new Date() },
+      culinaryStrategy,
+    );
+
+    assert.equal(result.accepted, true);
+    assert.equal(result.matchedPillar, 'Sustainable Restaurant Operations');
   });
 
   it('rejects excluded and low-relevance topics', () => {

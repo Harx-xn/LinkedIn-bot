@@ -1,4 +1,4 @@
-export const NICHE_EXPANSION_PLAN_VERSION = 2;
+export const NICHE_EXPANSION_PLAN_VERSION = 4;
 
 export const TOPIC_DIVERSITY_CONFIG = {
   maxExpansionQueries: 8,

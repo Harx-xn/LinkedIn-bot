@@ -17,11 +17,13 @@ import {
 } from './trendTitleUtils';
 import {
   buildFallbackFingerprint,
+  classifyAgainstNicheProfile,
   classifyTopicCluster,
   fingerprintFromBody,
 } from './topicFingerprintService';
 import { evaluateTopicNovelty, evaluateBatchTopicSimilarity } from './topicNoveltyService';
-import type { TopicFingerprint } from './generationTypes';
+import type { CandidateNicheMatch, TopicFingerprint } from './generationTypes';
+import { decideCandidateEligibility } from './trendSelectionService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
 import { buildTopicDiverseBatchPlan } from './ghostwriterBatchPlanner';
 import { validatePostTopicFingerprints } from './ghostwriterValidationService';
@@ -83,6 +85,51 @@ describe('niche expansion', () => {
   });
 });
 
+describe('dynamic niche classification', () => {
+  const profile = (niche: string, categories: Array<{ id: string; label: string; terms: string[] }>) => ({
+    niche, domain: niche, confidence: 0.9, subtopics: categories.map((c) => c.label),
+    queries: [], exclusions: [], contentCategories: categories,
+  });
+
+  it('uses profile categories for unrelated industries and returns unclassified safely', () => {
+    const pet = profile('Pet Care', [{ id: 'pet_nutrition', label: 'Pet nutrition', terms: ['veterinary nutrition', 'pet diet'] }]);
+    const realEstate = profile('Real Estate', [{ id: 'property_financing', label: 'Property financing', terms: ['mortgage rates', 'home loans'] }]);
+    const accounting = profile('Accounting', [{ id: 'tax_reporting', label: 'Tax reporting', terms: ['tax filing', 'reporting requirements'] }]);
+
+    assert.equal(classifyAgainstNicheProfile({ topic: 'Veterinary nutrition study updates pet diet guidance' }, pet).category, 'pet_nutrition');
+    assert.equal(classifyAgainstNicheProfile({ topic: 'Mortgage rates reshape home loans' }, realEstate).category, 'property_financing');
+    assert.equal(classifyAgainstNicheProfile({ topic: 'New tax filing and reporting requirements' }, accounting).category, 'tax_reporting');
+    assert.equal(classifyAgainstNicheProfile({ topic: 'React framework compiler release' }, pet).category, 'unclassified');
+  });
+
+  it('does not force ambiguous Unity results into a game category', () => {
+    const unity = profile('Unity Game Development', [{ id: 'engine_updates', label: 'Engine updates', terms: ['unity engine', 'game engine release'] }]);
+    assert.equal(classifyAgainstNicheProfile({ topic: 'Unity Software share price rises on NYSE' }, unity).category, 'unclassified');
+    assert.equal(classifyAgainstNicheProfile({ topic: 'Unity engine release updates game rendering' }, unity).category, 'engine_updates');
+  });
+});
+
+describe('generation candidate eligibility', () => {
+  const match = (overrides: Partial<CandidateNicheMatch>): CandidateNicheMatch => ({
+    relevant: true, relevanceScore: 70, confidence: 0.8,
+    matchedCategory: 'category', categoryConfidence: 0.8,
+    matchedPillar: 'Pillar', pillarConfidence: 0.8,
+    matchedMonitorTopic: null, avoidTopicMatch: null, reasons: [], rejectionCodes: [],
+    ...overrides,
+  });
+
+  it('hard-rejects near-zero relevance regardless of novelty or recency', () => {
+    for (const relevanceScore of [0, 1, 2]) {
+      assert.equal(decideCandidateEligibility(match({ relevanceScore }), true).eligible, false);
+    }
+  });
+
+  it('treats weak classification as soft when a concrete strategy path succeeds', () => {
+    assert.equal(decideCandidateEligibility(match({ rejectionCodes: ['niche_classification_failed'] }), true).eligible, true);
+    assert.equal(decideCandidateEligibility(match({ relevant: false, matchedPillar: null, matchedMonitorTopic: null, matchedCategory: null }), true).eligible, false);
+  });
+});
+
 describe('trend filtering', () => {
   it('rejects LinkedIn hiring post', () => {
     const r = rejectLowValueTrend({ topic: 'Senior React Developer hiring now' });
@@ -117,6 +164,20 @@ describe('trend filtering', () => {
 
   it('AI exclusions are matched as literal phrases', () => {
     assert.ok(matchesExclusion('Top agency services for SEO', ['agency services']));
+  });
+
+  it('rejects LinkedIn profile biography headlines', () => {
+    const r = rejectLowValueTrend({
+      topic: 'Kris Kowalski – Venture Builder | AI Expert | CEO | CMO | CRO | Speaker | Mentor',
+      link: 'https://www.linkedin.com/in/kris-kowalski',
+    });
+    assert.equal(r.rejected, true);
+    assert.equal(r.code, 'profile_biography');
+    const second = rejectLowValueTrend({
+      topic: 'Kalpesh Chavan - Solutions Architect | Cybersecurity Enthusiast | Web Development | Software Development | Studied at Example University',
+    });
+    assert.equal(second.rejected, true);
+    assert.equal(second.code, 'profile_biography');
   });
 });
 
@@ -168,10 +229,11 @@ describe('fingerprints', () => {
     assert.equal(classifyTopicCluster('Queue retry backoff and idempotency'), 'queues_jobs');
   });
 
-  it('unrelated topics remain different', () => {
+  it('does not force unrelated topics into legacy global clusters without a profile', () => {
     const a = buildFallbackFingerprint({ topic: 'Rare disease diagnosis study' });
     const b = buildFallbackFingerprint({ topic: 'Kubernetes deployment health checks' });
-    assert.notEqual(a.topicCluster, b.topicCluster);
+    assert.equal(a.topicCluster, 'unclassified');
+    assert.equal(b.topicCluster, 'unclassified');
   });
 
   it('fallback fingerprint stays conservative', () => {
