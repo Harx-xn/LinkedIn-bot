@@ -145,6 +145,7 @@ model User {
   manualAiRewriteUsages   ManualAiRewriteUsage[]
   nicheSearchPlans        UserNicheSearchPlan[]
   topicHistory            GeneratedTopicHistory[]
+  topicInventory          TopicInventory[]
   voiceProfile            UserVoiceProfile?
   postContentFingerprints PostContentFingerprint[]
   authProviderAccounts    AuthProviderAccount[]
@@ -207,6 +208,13 @@ enum TopicHistoryStatus {
   REJECTED
 }
 
+enum TopicInventoryStatus {
+  AVAILABLE
+  RESERVED
+  CONSUMED
+  EXPIRED
+}
+
 enum SupportRequestStatus {
   OPEN
   IN_PROGRESS
@@ -224,6 +232,10 @@ model UserNicheSearchPlan {
   queries     Json
   exclusions  Json
   version     Int      @default(1)
+  schemaVersion Int    @default(1)
+  queryGenerationVersion Int @default(1)
+  aliasGenerationVersion Int @default(1)
+  inputFingerprint String?
   generatedAt DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -254,6 +266,49 @@ model GeneratedTopicHistory {
   @@index([userId, topicCluster])
   @@index([userId, normalizedTopic])
   @@index([postId])
+}
+
+model TopicInventory {
+  id String @id @default(cuid())
+  userId String
+  niche String
+  title String
+  normalizedTopic String
+  coreClaim String?
+  semanticCluster String?
+  mechanism String?
+  intent String?
+  relevanceScore Float
+  strategyScore Float
+  confidenceScore Float
+  sourceQualityScore Float
+  noveltyScore Float
+  recencyScore Float
+  finalScore Float
+  sourceUrl String?
+  sourceName String?
+  discoverySource String?
+  evidenceRole String?
+  evidenceSummary String?
+  supportingSources Json?
+  fingerprint String
+  profileFingerprint String?
+  sourcePublishedAt DateTime?
+  discoveredAt DateTime @default(now())
+  expiresAt DateTime?
+  status TopicInventoryStatus @default(AVAILABLE)
+  reservedByJobId String?
+  reservedAt DateTime?
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fingerprint])
+  @@index([userId, status])
+  @@index([userId, niche, status])
+  @@index([expiresAt])
 }
 
 model BotConfig {

@@ -1,5 +1,5 @@
 import type { ContentPillar, EffectiveBotStrategy } from './botStrategyService';
-import type { CandidateNicheMatch, NicheExpansionPlan, TopicFingerprint, TrendCandidate } from './generationTypes';
+import type { ActiveNicheEvidence, CandidateNicheMatch, NicheExpansionPlan, TopicFingerprint, TrendCandidate } from './generationTypes';
 import type { TopicHistoryRow } from './topicHistoryService';
 import { buildFallbackExpansionPlan, buildQueryBucketsFromQueries } from './nicheExpansionService';
 import { createHash } from 'node:crypto';
@@ -100,6 +100,73 @@ function firstMatchingAlias(text: string, profile?: NicheExpansionPlan): string 
     return Boolean(firstMatchingTerm(text, context));
   });
 }
+
+export function buildActiveNicheEvidence(
+  candidate: TrendCandidate,
+  strategy: EffectiveBotStrategy,
+  profile: NicheExpansionPlan,
+  active?: ActiveNicheStrategyContext,
+): ActiveNicheEvidence {
+  const text = candidateText(candidate);
+  const evidenceText = [text, candidate.publisher, candidate.link].filter(Boolean).join(' ');
+  const queryText = queryContext(candidate);
+  const activePillars = allPillars(strategy).filter((item) => !active || active.pillarNames.includes(item.name));
+  const literalPillar = activePillars.find((item) => matchesProfileTerm(evidenceText, item.name));
+  const keywordPillar = activePillars.find((item) => firstMatchingTerm(evidenceText, item.trendKeywords));
+  const matchedEntities = unique(profile.importantEntities ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
+  const rawAliasMatches = unique(profile.entityAliases ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
+  const matchedAliases = rawAliasMatches.filter((term) => firstMatchingAlias(evidenceText, { ...profile, entityAliases: [term] }));
+  const matchedPlatforms = unique(profile.productsAndPlatforms ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
+  const matchedCategories = unique(profile.contentCategories?.filter((category) => firstMatchingTerm(evidenceText, [category.label, ...category.terms])).map((category) => category.label) ?? []);
+  const profileTerms = unique([
+    ...(profile.normalizedPillars?.flatMap((item) => [item.originalPillar, item.normalizedPillar, ...item.searchTerms, ...item.relatedEntities, ...item.subtopics]) ?? []),
+    ...(profile.commonProblems ?? []), ...(profile.terminology ?? []), ...(profile.preferredTerms ?? []),
+  ]);
+  const matchedProfileTerms = profileTerms.filter((term) => matchesProfileTerm(evidenceText, term));
+  const queryTerms = unique([...(profile.importantEntities ?? []), ...(profile.productsAndPlatforms ?? []), ...(profile.contentCategories?.flatMap((item) => [item.label, ...item.terms]) ?? []), ...profileTerms]);
+  const matchedQueryContext = queryTerms.filter((term) => matchesProfileTerm(queryText, term));
+  const foreignConflict = allPillars(strategy).some((item) => !activePillars.includes(item)
+    && Boolean(firstMatchingTerm(evidenceText, [item.name, ...item.trendKeywords])));
+  const ambiguousAlias = rawAliasMatches.some((alias) => normalizedTokens(alias).length === 1);
+  const supportingContext = Boolean(matchedEntities.length || matchedPlatforms.length || matchedCategories.length || matchedProfileTerms.length
+    || /\b(engine|release|roadmap|version|workflow|automation|rendering|game)\b/i.test(text)
+    || rawAliasMatches.some((alias) => new RegExp(`\\b${normalizeText(alias)}\\s+\\d+\\b`, 'i').test(normalizeText(text))));
+  const origin = candidate.originNiche ?? candidate.niche;
+  const ambiguityResolved = !ambiguousAlias || (supportingContext && !foreignConflict && (!origin || origin === profile.niche));
+  let pillarSatisfiedBy: ActiveNicheEvidence['pillarSatisfiedBy'] = literalPillar ? 'literal_pillar'
+    : keywordPillar ? 'pillar_keyword'
+      : matchedEntities.length ? 'entity'
+        : matchedAliases.length && ambiguityResolved ? 'alias'
+          : matchedPlatforms.length ? 'platform'
+            : matchedCategories.length && matchedQueryContext.length ? 'category_plus_context' : null;
+  if (foreignConflict && !literalPillar && !keywordPillar) pillarSatisfiedBy = null;
+  const matchedPillar = literalPillar?.name ?? keywordPillar?.name ?? (pillarSatisfiedBy ? activePillars[0]?.name ?? profile.niche : null);
+  const directEvidence = unique([
+    ...(literalPillar ? [`pillar:${literalPillar.name}`] : []),
+    ...(keywordPillar ? [`pillar_keyword:${firstMatchingTerm(evidenceText, keywordPillar.trendKeywords)!}`] : []),
+    ...matchedEntities.map((value) => `entity:${value}`),
+    ...matchedAliases.filter(() => ambiguityResolved).map((value) => `alias:${value}`),
+    ...matchedPlatforms.map((value) => `platform:${value}`),
+    ...matchedCategories.map((value) => `category:${value}`),
+    ...matchedProfileTerms.map((value) => `profile_term:${value}`),
+    ...(directEvidenceContextAllowed(matchedQueryContext, directEvidenceBaseCount(literalPillar, keywordPillar, matchedEntities, matchedAliases, matchedPlatforms, matchedCategories, matchedProfileTerms)) ? matchedQueryContext.map((value) => `query_context:${value}`) : []),
+  ]);
+  const strongEvidence = directEvidence.some((item) => /^(pillar|pillar_keyword|entity|alias|platform):/.test(item));
+  const strength = directEvidence.length === 0 ? 0 : Math.min(40, (strongEvidence ? 30 : 25) + Math.min(10, (directEvidence.length - 1) * 5));
+  return {
+    activeNiche: profile.niche, matchedPillar, matchedEntities, matchedAliases: ambiguityResolved ? matchedAliases : [], matchedPlatforms,
+    matchedCategories, matchedProfileTerms, matchedQueryContext, directEvidence, pillarSatisfied: pillarSatisfiedBy !== null,
+    pillarSatisfiedBy, ambiguityResolved, ambiguityResolutionReason: ambiguousAlias
+      ? ambiguityResolved ? 'active_profile_alias_with_supporting_context_and_provenance' : 'ambiguous_alias_missing_scoped_context'
+      : null, strength,
+  };
+}
+
+function directEvidenceBaseCount(...values: Array<unknown[] | object | undefined>): number {
+  return values.reduce<number>((count, value) => count + (Array.isArray(value) ? value.length : value ? 1 : 0), 0);
+}
+
+function directEvidenceContextAllowed(matches: string[], baseCount: number): boolean { return matches.length > 0 && baseCount > 0; }
 
 function unique(values: string[]): string[] {
   const seen = new Set<string>();
@@ -461,14 +528,12 @@ export function scoreTrendForStrategy(
     : pillar?.name.split(/\s+/).filter((term) => term.length >= 2) ?? [];
   const requiredHits = requiredTerms.filter((term) => matchesProfileTerm(evidenceText, term)).length;
   const normalizedNiche = normalizeText(options.profile?.normalizedNiche ?? options.profile?.niche ?? pillar?.name);
-  const directEvidence = unique([
+  const activeEvidence = options.profile
+    ? buildActiveNicheEvidence(candidate, strategy, options.profile, active)
+    : undefined;
+  const directEvidence = activeEvidence?.directEvidence ?? unique([
     ...(normalizedNiche && normalizedEvidence.includes(normalizedNiche) ? [`niche:${normalizedNiche}`] : []),
     ...(pillar ? [`pillar:${pillar.name}`] : []),
-    ...(category ? [`category:${category.label}`] : []),
-    ...(entity ? [`entity:${entity}`] : []),
-    ...(platform ? [`platform:${platform}`] : []),
-    ...(problem ? [`problem:${problem}`] : []),
-    ...(normalizedPillarTerm ? [`profile_pillar_term:${normalizedPillarTerm}`] : []),
   ]);
   const queryEvidence = firstMatchingTerm(queryContext(candidate), [
     ...(options.profile?.importantEntities ?? []),
@@ -476,13 +541,10 @@ export function scoreTrendForStrategy(
     ...(options.profile?.contentCategories?.flatMap((item) => [item.label, ...item.terms]) ?? []),
     ...(options.profile?.commonProblems ?? []),
   ]);
-  let directNicheEvidence = 0;
-  if (normalizedNiche && normalizedEvidence.includes(normalizedNiche)) directNicheEvidence = 35;
-  if (pillar) directNicheEvidence = Math.max(directNicheEvidence, 30);
-  if (entity || alias || platform) directNicheEvidence = Math.max(directNicheEvidence, 30);
-  if (category || problem || normalizedPillarTerm) directNicheEvidence = Math.max(directNicheEvidence, 25);
-  if (directEvidence.length >= 2) directNicheEvidence = Math.min(40, directNicheEvidence + 10);
-  if (directNicheEvidence > 0 && queryEvidence) {
+  let directNicheEvidence = activeEvidence?.strength ?? 0;
+  if (!activeEvidence && normalizedNiche && normalizedEvidence.includes(normalizedNiche)) directNicheEvidence = 35;
+  if (!activeEvidence && pillar) directNicheEvidence = Math.max(directNicheEvidence, 30);
+  if (!activeEvidence && directNicheEvidence > 0 && queryEvidence) {
     directNicheEvidence = Math.min(40, directNicheEvidence + 5);
     directEvidence.push(`query_context:${queryEvidence}`);
   }
@@ -490,10 +552,10 @@ export function scoreTrendForStrategy(
   const monitoredTopic = textMatchesAny(text, monitoredTopics);
   let score = directNicheEvidence;
   breakdown.directNicheEvidence = directNicheEvidence;
-  if (pillar) {
+  if (activeEvidence?.pillarSatisfied || pillar) {
     score += 40;
     breakdown.pillarMatch = 40;
-    reasons.push(`pillar_match:${pillar.name}`);
+    reasons.push(`pillar_match:${activeEvidence?.matchedPillar ?? pillar?.name}`);
   } else if (strategy.legacy.niches.some((niche) => normalizeText(text).includes(normalizeText(niche)))) {
     score += 15;
     breakdown.pillarMatch = 15;
@@ -577,8 +639,8 @@ export function scoreTrendForStrategy(
   const ambiguousAnchorPresent = normalizedNiche
     ? normalizedTokens(normalizedNiche).some((token) => normalizedTokens(text).includes(token))
     : false;
-  const ambiguityResolved = !ambiguityConfigured || !ambiguousAnchorPresent
-    || directEvidence.length >= 2 || Boolean(pillar || entity || platform || problem || normalizedPillarTerm || monitoredTopic);
+  const ambiguityResolved = activeEvidence?.ambiguityResolved ?? (!ambiguityConfigured || !ambiguousAnchorPresent
+    || directEvidence.length >= 2 || Boolean(pillar || entity || platform || problem || normalizedPillarTerm || monitoredTopic));
   if (ambiguityConfigured && ambiguousAnchorPresent && !ambiguityResolved && requiredHits === 0) {
     score -= 40;
     breakdown.ambiguityPenalty = -40;
@@ -593,13 +655,13 @@ export function scoreTrendForStrategy(
     score >= minimumScore
     && !excluded
     && !profileExcluded
-    && !(strategy.topicRules.requirePillarMatch && !pillar && strategy.contentPillars.primaryPillars.length > 0)
+    && !(strategy.topicRules.requirePillarMatch && !(activeEvidence?.pillarSatisfied ?? Boolean(pillar)) && strategy.contentPillars.primaryPillars.length > 0)
     && !(strategy.topicRules.requireAudiencePainMatch && !audienceMatch)
     && !duplicate;
 
   if (!accepted) {
     if (score < minimumScore) riskFlags.push('low_relevance');
-    if (strategy.topicRules.requirePillarMatch && !pillar) riskFlags.push('missing_pillar_match');
+    if (strategy.topicRules.requirePillarMatch && !(activeEvidence?.pillarSatisfied ?? Boolean(pillar))) riskFlags.push('missing_pillar_match');
     if (strategy.topicRules.requireAudiencePainMatch && !audienceMatch) riskFlags.push('missing_audience_match');
   }
 
@@ -611,11 +673,11 @@ export function scoreTrendForStrategy(
   const nicheMatch: CandidateNicheMatch = {
     relevant: !excluded && !profileExcluded && directNicheEvidence >= 25,
     relevanceScore: score,
-    confidence: Math.min(1, (directNicheEvidence + (category ? 20 : 0) + (pillar ? 35 : 0) + (entity || alias || platform ? 20 : 0) + (monitoredTopic ? 15 : 0)) / 100),
+    confidence: Math.min(1, (directNicheEvidence + ((activeEvidence?.pillarSatisfied || pillar) ? 35 : 0) + (directEvidence.some((item) => item.startsWith('category:')) ? 20 : 0) + (directEvidence.length > 1 ? 10 : 0) + (monitoredTopic ? 15 : 0)) / 100),
     matchedCategory: category?.id ?? null,
     categoryConfidence: category ? 0.8 : 0,
-    matchedPillar: pillar?.name ?? null,
-    pillarConfidence: pillar ? 0.8 : 0,
+    matchedPillar: activeEvidence?.matchedPillar ?? pillar?.name ?? null,
+    pillarConfidence: (activeEvidence?.pillarSatisfied || pillar) ? 0.8 : 0,
     matchedMonitorTopic: monitoredTopic ?? null,
     avoidTopicMatch: excluded ?? profileExcluded ?? null,
     reasons,
@@ -628,13 +690,14 @@ export function scoreTrendForStrategy(
     matchedForeignPillars: foreignPillars.map((item) => item.name),
     queryIntent: options.profile?.searchIntents?.find((intent) => intent.terms.some((term) => normalizeText(candidate.searchQuery).includes(normalizeText(term))))?.id ?? null,
     ambiguityResolved,
+    activeNicheEvidence: activeEvidence,
   };
 
   return {
     score,
     accepted,
     reasons,
-    matchedPillar: pillar?.name,
+    matchedPillar: activeEvidence?.matchedPillar ?? pillar?.name,
     suggestedAngle: (pillar?.exampleAngles[0] ?? strategy.profilePositioning.uniquePointOfView) || undefined,
     audienceRelevance: pillar?.audienceRelevance || audienceMatch,
     riskFlags,

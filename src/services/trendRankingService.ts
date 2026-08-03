@@ -87,6 +87,105 @@ function isSemanticallySimilarToSelected(
   });
 }
 
+function mechanismOverlap(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const left = new Set(a.map((value) => normalizeTrendTitle(value)));
+  const right = new Set(b.map((value) => normalizeTrendTitle(value)));
+  const intersection = [...left].filter((value) => right.has(value)).length;
+  return intersection / new Set([...left, ...right]).size;
+}
+
+export function areHardBatchDuplicates(a: RankedTrendCandidate, b: RankedTrendCandidate): boolean {
+  if (a === b) return true;
+  const normalizedA = normalizeTrendTitle(a.fingerprint.normalizedTopic);
+  const normalizedB = normalizeTrendTitle(b.fingerprint.normalizedTopic);
+  if (normalizedA && normalizedA === normalizedB) return true;
+  const titleSimilarity = jaccardSimilarity(normalizeTrendTitle(a.trend.topic), normalizeTrendTitle(b.trend.topic));
+  const claimSimilarity = jaccardSimilarity(normalizeTrendTitle(a.fingerprint.coreClaim), normalizeTrendTitle(b.fingerprint.coreClaim));
+  const mechanisms = mechanismOverlap(a.fingerprint.mechanisms, b.fingerprint.mechanisms);
+  return titleSimilarity >= TOPIC_DIVERSITY_CONFIG.titleDuplicateThreshold
+    || claimSimilarity >= TOPIC_DIVERSITY_CONFIG.currentBatchSemanticThreshold
+    || (claimSimilarity >= 0.55 && mechanisms >= 0.7);
+}
+
+export type FinalBatchSelectionResult = {
+  selected: RankedTrendCandidate[];
+  hardRejected: RankedTrendCandidate[];
+  diagnostics: Record<string, unknown>;
+};
+
+export function selectFinalBatchCandidates(
+  candidates: RankedTrendCandidate[],
+  requestedPosts: number,
+): FinalBatchSelectionResult {
+  const qualified = candidates.filter((item) => item.novelty.allowed).sort((a, b) => b.totalScore - a.totalScore);
+  const niches = [...new Set(qualified.map((item) => item.trend.originNiche ?? item.trend.niche ?? 'unknown'))];
+  const intents = [...new Set(qualified.map((item) => item.trend.discoveryIntent ?? 'unclassified'))];
+  const base = niches.length ? Math.floor(requestedPosts / niches.length) : 0;
+  const remainder = niches.length ? requestedPosts % niches.length : 0;
+  const allocation = Object.fromEntries(niches.map((niche, index) => [niche, base + (index < remainder ? 1 : 0)]));
+  const softIntentLimit = Math.max(2, Math.ceil(requestedPosts / Math.max(1, intents.length)));
+  const softClusterLimit = Math.max(2, Math.ceil(requestedPosts / Math.max(1, niches.length)));
+  const softPublisherLimit = Math.max(2, Math.ceil(requestedPosts / Math.max(1, niches.length)));
+  const selected: RankedTrendCandidate[] = [];
+  const hardRejected: RankedTrendCandidate[] = [];
+  const hardRejectedSet = new Set<RankedTrendCandidate>();
+  const deferred = { niche: 0, intent: 0, cluster: 0, category: 0, publisher: 0 };
+  const counts = { niche: new Map<string, number>(), intent: new Map<string, number>(), cluster: new Map<string, number>(), category: new Map<string, number>(), publisher: new Map<string, number>() };
+  const key = (item: RankedTrendCandidate, kind: keyof typeof counts): string => {
+    if (kind === 'niche') return item.trend.originNiche ?? item.trend.niche ?? 'unknown';
+    if (kind === 'intent') return item.trend.discoveryIntent ?? 'unclassified';
+    if (kind === 'cluster') return item.fingerprint.topicCluster;
+    if (kind === 'publisher') return (item.trend.publisher ?? item.trend.source ?? 'unknown').toLowerCase();
+    return item.trend.strategyReasons?.find((reason) => reason.startsWith('category_match:'))?.split(':')[1] ?? 'unclassified';
+  };
+  const selectedByNiche = () => Object.fromEntries([...counts.niche.entries()]);
+  const add = (item: RankedTrendCandidate): boolean => {
+    if (selected.some((chosen) => areHardBatchDuplicates(item, chosen))) {
+      if (!hardRejectedSet.has(item)) { hardRejectedSet.add(item); hardRejected.push(item); }
+      return false;
+    }
+    selected.push(item);
+    for (const kind of Object.keys(counts) as Array<keyof typeof counts>) {
+      const value = key(item, kind); counts[kind].set(value, (counts[kind].get(value) ?? 0) + 1);
+    }
+    return true;
+  };
+  const run = (rules: { niche?: boolean; intent?: boolean; cluster?: boolean; category?: boolean; publisher?: boolean }): number => {
+    const before = selected.length;
+    for (const item of qualified) {
+      if (selected.length >= requestedPosts) break;
+      if (selected.includes(item) || hardRejectedSet.has(item)) continue;
+      const niche = key(item, 'niche');
+      if (rules.niche && (counts.niche.get(niche) ?? 0) >= (allocation[niche] ?? 0)) { deferred.niche++; continue; }
+      if (rules.intent && (counts.intent.get(key(item, 'intent')) ?? 0) >= softIntentLimit) { deferred.intent++; continue; }
+      if (rules.cluster && (counts.cluster.get(key(item, 'cluster')) ?? 0) >= softClusterLimit) { deferred.cluster++; continue; }
+      if (rules.category && (counts.category.get(key(item, 'category')) ?? 0) >= softIntentLimit) { deferred.category++; continue; }
+      if (rules.publisher && (counts.publisher.get(key(item, 'publisher')) ?? 0) >= softPublisherLimit) { deferred.publisher++; continue; }
+      add(item);
+    }
+    return selected.length - before;
+  };
+  const stage1Added = run({ niche: true, intent: true, cluster: true, category: true, publisher: true });
+  const stage1 = { selectedCount: selected.length, selectedByNiche: selectedByNiche(), rejectedByHardDuplicate: hardRejected.length, deferredBySoftNicheLimit: deferred.niche, deferredByIntentLimit: deferred.intent, deferredByClusterLimit: deferred.cluster, deferredByCategoryLimit: deferred.category };
+  const stage2Added = run({ intent: true, cluster: true, category: true, publisher: true });
+  const stage2 = { redistributedSlots: stage2Added, selectedCount: selected.length, selectedByNiche: selectedByNiche() };
+  run({ cluster: true });
+  const stage3 = { relaxedRules: ['per_niche', 'intent', 'category', 'publisher'], selectedCount: selected.length, selectedByNiche: selectedByNiche() };
+  run({});
+  const stage4 = { relaxedRules: ['broad_cluster', 'mechanism_preference'], selectedCount: selected.length, selectedByNiche: selectedByNiche() };
+  const beforeStage5 = selected.length;
+  run({});
+  const stage5 = { scoreFillCount: selected.length - beforeStage5, selectedCount: selected.length, selectedByNiche: selectedByNiche() };
+  const unselectedReasons = qualified.filter((item) => !selected.includes(item)).map((item) => ({
+    normalizedTopic: item.fingerprint.normalizedTopic,
+    reason: hardRejectedSet.has(item) ? 'hard_duplicate' : selected.length >= requestedPosts ? 'stored_as_excess' : 'hard_duplicate',
+  }));
+  const diagnostics = { requestedPosts, freshQualifiedCount: qualified.length, activeNiches: niches, initialAllocationByNiche: allocation, stage1: { ...stage1, added: stage1Added }, stage2, stage3, stage4, stage5, final: { freshSelected: selected.length, remainingDeficit: Math.max(0, requestedPosts - selected.length), excessFresh: qualified.length - selected.length - hardRejected.length, hardRejectedRemaining: hardRejected.length, stopReason: selected.length >= requestedPosts ? 'requested_count_filled' : 'hard_unique_pool_exhausted' }, unselectedReasons };
+  console.info('[trend-selection] staged final selection', diagnostics);
+  return { selected, hardRejected, diagnostics };
+}
+
 export function selectDiverseRankedCandidates(
   ranked: RankedTrendCandidate[],
   limit: number,

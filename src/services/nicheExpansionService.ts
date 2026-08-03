@@ -2,7 +2,52 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import { prisma } from '../prismaClient';
 import { createHash } from 'node:crypto';
-import { NICHE_EXPANSION_PLAN_VERSION } from '../config/topicDiversityConfig';
+import { NICHE_ALIAS_GENERATION_VERSION, NICHE_EXPANSION_PLAN_VERSION, NICHE_PROFILE_SCHEMA_VERSION, NICHE_QUERY_GENERATION_VERSION } from '../config/topicDiversityConfig';
+import type { EffectiveBotStrategy } from './botStrategyService';
+
+export interface NicheProfileFingerprintInput {
+  normalizedNiche: string;
+  activePillarName: string;
+  activePillarDescription: string;
+  activePillarKeywords: string[];
+  activePillarTrendKeywords: string[];
+  scopedMonitoredTopics: string[];
+  scopedAvoidedTopics: string[];
+  relevantAudienceSignals: string[];
+  relevantOutcomeSignals: string[];
+  profilePlanVersion: number;
+  profileSchemaVersion: number;
+  queryGenerationVersion: number;
+  aliasGenerationVersion: number;
+}
+
+function stableStrings(values: string[]): string[] { return [...new Set(values.map((value) => value.toLowerCase().trim()).filter(Boolean))].sort(); }
+
+export function buildNicheProfileFingerprintInput(niche: string, strategy?: EffectiveBotStrategy): NicheProfileFingerprintInput {
+  const normalizedNiche = normalizeNicheKey(niche);
+  const pillars = strategy ? [...strategy.contentPillars.primaryPillars, ...strategy.contentPillars.secondaryPillars, ...(strategy.contentPillars.experimentalPillars ?? [])] : [];
+  const pillar = pillars.find((item) => normalizeNicheKey(item.name) === normalizedNiche);
+  return {
+    normalizedNiche,
+    activePillarName: pillar?.name ?? niche,
+    activePillarDescription: pillar?.description ?? '',
+    activePillarKeywords: stableStrings(pillar?.exampleAngles ?? []),
+    activePillarTrendKeywords: stableStrings(pillar?.trendKeywords ?? []),
+    scopedMonitoredTopics: stableStrings(strategy?.profilePositioning.topicsToBeKnownFor ?? []),
+    scopedAvoidedTopics: stableStrings([...(strategy?.contentPillars.excludedTopics ?? []), ...(strategy?.topicRules.rejectedPatterns ?? [])]),
+    relevantAudienceSignals: stableStrings(strategy ? [strategy.targetAudience.primaryAudience, ...strategy.targetAudience.roles, ...strategy.targetAudience.industries, ...strategy.targetAudience.painPoints] : []),
+    relevantOutcomeSignals: stableStrings(strategy?.targetAudience.desiredOutcomes ?? []),
+    profilePlanVersion: NICHE_EXPANSION_PLAN_VERSION,
+    profileSchemaVersion: NICHE_PROFILE_SCHEMA_VERSION,
+    queryGenerationVersion: NICHE_QUERY_GENERATION_VERSION,
+    aliasGenerationVersion: NICHE_ALIAS_GENERATION_VERSION,
+  };
+}
+
+export function fingerprintNicheProfileInput(input: NicheProfileFingerprintInput): string {
+  const stable = Object.fromEntries(Object.entries(input).map(([key, value]) => [key, Array.isArray(value) ? stableStrings(value) : typeof value === 'string' ? value.toLowerCase().trim() : value]));
+  return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 20);
+}
 import type { NicheExpansionPlan, NicheQueryBuckets } from './generationTypes';
 import { buildNicheSourcePlan } from './trendSourcePlanningService';
 
@@ -214,6 +259,7 @@ export function buildProfileGroundedQueries(profile: Partial<NicheExpansionPlan>
   const niche = profile.normalizedNiche?.trim() || profile.niche?.trim() || '';
   const subjects = uniqueText([
     ...(profile.importantEntities ?? []),
+    ...(profile.entityAliases ?? []),
     ...(profile.productsAndPlatforms ?? []),
     ...(profile.contentCategories?.flatMap((category) => [category.label, ...category.terms]) ?? []),
     ...(profile.normalizedPillars?.flatMap((pillar) => [pillar.normalizedPillar, ...pillar.searchTerms, ...pillar.relatedEntities]) ?? []),
@@ -241,10 +287,27 @@ export function repairExpansionQuery(
   reasons: string[],
   profile: Partial<NicheExpansionPlan>,
   attempt: number,
+  previousQueries: string[] = [],
 ): string | null {
   if (attempt < 1 || attempt > 2) return null;
-  const candidates = buildProfileGroundedQueries(profile);
+  const lower = query.toLowerCase();
+  const intent = DISCOVERY_INTENTS.find((candidate) => lower.includes(candidate));
+  const subjects = uniqueText([
+    ...(profile.importantEntities ?? []), ...(profile.entityAliases ?? []), ...(profile.productsAndPlatforms ?? []),
+    ...(profile.commonProblems ?? []), ...(profile.subtopics ?? []), profile.normalizedNiche ?? '', profile.niche ?? '',
+  ]).filter(Boolean);
+  const originalSubject = subjects.find((subject) => lower.includes(subject.toLowerCase()));
+  const niche = profile.normalizedNiche?.trim() || profile.niche?.trim() || '';
+  const preserved = originalSubject && intent
+    ? `${originalSubject} ${intent}${normalizeNicheKey(originalSubject).includes(normalizeNicheKey(niche)) ? '' : ` ${niche}`}`.trim()
+    : null;
+  const candidates = uniqueText([
+    ...(preserved ? [preserved] : []),
+    ...(intent ? subjects.map((subject) => `${subject} ${intent}${normalizeNicheKey(subject).includes(normalizeNicheKey(niche)) ? '' : ` ${niche}`}`.trim()) : []),
+    ...buildProfileGroundedQueries(profile),
+  ]).filter((candidate) => !previousQueries.some((previous) => normalizeNicheKey(previous) === normalizeNicheKey(candidate)));
   if (!candidates.length) return null;
+  if (preserved && candidates.some((candidate) => normalizeNicheKey(candidate) === normalizeNicheKey(preserved))) return preserved;
   const reasonOffset = reasons.join('|').length % candidates.length;
   return normalizeNicheKey(candidates[(reasonOffset + attempt - 1) % candidates.length]) === normalizeNicheKey(query)
     ? candidates[(reasonOffset + attempt) % candidates.length]
@@ -390,13 +453,20 @@ export function validateExpansionQuery(
   const lower = trimmed.toLowerCase();
   const nicheLower = niche.toLowerCase();
   const nicheTokens = normalizeNicheKey(niche).split(' ').filter((term) => term.length >= 3);
+  const scopedProfileTerms = [
+    ...(profile?.importantEntities ?? []), ...(profile?.entityAliases ?? []), ...(profile?.productsAndPlatforms ?? []),
+    ...(profile?.contentCategories?.flatMap((item) => [item.label, ...item.terms]) ?? []),
+    ...(profile?.normalizedPillars?.flatMap((item) => [item.originalPillar, item.normalizedPillar, ...item.searchTerms, ...item.relatedEntities]) ?? []),
+  ].filter((term) => term.trim().length >= 2);
+  const hasScopedProfileContext = scopedProfileTerms.some((term) => lower.includes(term.toLowerCase()));
   const referencesNiche = lower.includes(nicheLower)
     || subtopics.some((s) => lower.includes(s.toLowerCase()))
-    || nicheTokens.some((term) => lower.includes(term));
+    || nicheTokens.some((term) => lower.includes(term))
+    || hasScopedProfileContext;
   const contextTerms = profile?.requiredContextTerms ?? [];
   const hasRequiredContext = contextTerms.length === 0
     || contextTerms.some((term) => lower.includes(term.toLowerCase()));
-  if (!referencesNiche || !hasRequiredContext) return reject('insufficient_niche_context', 0.2);
+  if (!referencesNiche || (!hasRequiredContext && !hasScopedProfileContext)) return reject('insufficient_niche_context', 0.2);
 
   const excluded = [...(profile?.excludedTerms ?? []), ...(profile?.excludedInterpretations ?? [])]
     .find((term) => term.trim() && lower.includes(term.toLowerCase()));
@@ -408,7 +478,7 @@ export function validateExpansionQuery(
   if (alwaysGenericPattern.test(trimmed)) return reject('generic_query', 0.2);
   const vaguePattern = /\b(expert analysis|sector reports?|success stories|trends in (?:the )?industry|market position|practitioner perspectives|research and evidence)\b/i;
   const specificTerms = [
-    ...(profile?.importantEntities ?? []), ...(profile?.productsAndPlatforms ?? []),
+    ...(profile?.importantEntities ?? []), ...(profile?.entityAliases ?? []), ...(profile?.productsAndPlatforms ?? []),
     ...(profile?.contentCategories?.flatMap((item) => [item.label, ...item.terms]) ?? []),
     ...(profile?.normalizedPillars?.flatMap((item) => item.searchTerms) ?? []),
     ...(profile?.commonProblems ?? []), ...(profile?.audienceTypes ?? []),
@@ -435,6 +505,7 @@ export function validateExpansionQuery(
 }
 
 export function sanitizeExpansionPlan(raw: NicheExpansionPlan): NicheExpansionPlan {
+  const repairMetrics = { attempted: 0, accepted: 0, rejected: 0 };
   const subtopics = [...new Set(raw.subtopics.map((s) => s.trim()).filter(Boolean))].slice(0, 10);
   const exclusions = [...new Set(raw.exclusions.map((s) => s.trim()).filter(Boolean))].slice(0, 20);
   const validQueries: string[] = [];
@@ -448,8 +519,9 @@ export function sanitizeExpansionPlan(raw: NicheExpansionPlan): NicheExpansionPl
         validQueries.push(current);
         break;
       }
-      const repaired = repairExpansionQuery(current, check.reasons, raw, attempt + 1);
-      if (!repaired) break;
+      const repaired = repairExpansionQuery(current, check.reasons, raw, attempt + 1, validQueries);
+      repairMetrics.attempted++;
+      if (!repaired) { repairMetrics.rejected++; break; }
       console.info('[niche-query] repairing generated query', {
         niche: raw.niche,
         originalQuery: q,
@@ -459,6 +531,8 @@ export function sanitizeExpansionPlan(raw: NicheExpansionPlan): NicheExpansionPl
         repairedQuery: repaired,
       });
       current = repaired;
+      const repairedCheck = validateExpansionQuery(current, raw.niche, subtopics.length ? subtopics : [raw.niche], validQueries, raw);
+      if (repairedCheck.valid) repairMetrics.accepted++; else if (attempt === 1) repairMetrics.rejected++;
     }
     if (validQueries.length >= 20) break;
   }
@@ -478,6 +552,7 @@ export function sanitizeExpansionPlan(raw: NicheExpansionPlan): NicheExpansionPl
     exclusions: exclusions.length ? exclusions : buildFallbackExpansionPlan(raw.niche).exclusions,
     version: NICHE_EXPANSION_PLAN_VERSION,
     generatedAt: new Date(),
+    repairMetrics,
   });
 }
 
@@ -572,26 +647,54 @@ ${failedQueryDiagnostics.length ? `Previous queries failed validation. Correct t
     niche: string,
     forceRefresh = false,
     failedQueryDiagnostics: Array<{ query: string; reasons: string[] }> = [],
+    fingerprintInput: NicheProfileFingerprintInput = buildNicheProfileFingerprintInput(niche),
   ): Promise<NicheExpansionPlan> {
     const key = normalizeNicheKey(niche);
     let storedPlanVersion: number | null = null;
+    let storedSchemaVersion: number | null = null;
+    let storedInputFingerprint: string | null = null;
+    let storedStructureValid = false;
+    const currentInputFingerprint = fingerprintNicheProfileInput(fingerprintInput);
+    let regenerationReason = forceRefresh ? 'fingerprint_changed' : 'missing_profile';
 
     if (!forceRefresh) {
       const existing = await prisma.userNicheSearchPlan.findUnique({
         where: { userId_niche: { userId, niche: key } },
       });
       storedPlanVersion = existing?.version ?? null;
-      if (existing && existing.version === NICHE_EXPANSION_PLAN_VERSION) {
+      storedSchemaVersion = (existing as any)?.schemaVersion ?? null;
+      storedInputFingerprint = (existing as any)?.inputFingerprint ?? null;
+      if (existing) {
+        const stored = existing as any;
+        const rawProfile = stored.queries && typeof stored.queries === 'object' && !Array.isArray(stored.queries) ? stored.queries.profile : null;
+        const structurallyValid = Array.isArray(stored.subtopics) && Array.isArray(stored.exclusions)
+          && (Array.isArray(stored.queries) || Array.isArray(stored.queries?.items))
+          && rawProfile && Array.isArray(rawProfile.queries) && Array.isArray(rawProfile.subtopics);
+        storedStructureValid = Boolean(structurallyValid);
+        regenerationReason = !storedInputFingerprint ? 'missing_fingerprint'
+          : existing.version !== NICHE_EXPANSION_PLAN_VERSION ? 'plan_version_changed'
+            : storedSchemaVersion !== NICHE_PROFILE_SCHEMA_VERSION ? 'schema_version_changed'
+              : stored.queryGenerationVersion !== NICHE_QUERY_GENERATION_VERSION ? 'query_version_changed'
+                : stored.aliasGenerationVersion !== NICHE_ALIAS_GENERATION_VERSION ? 'fingerprint_changed'
+                  : storedInputFingerprint !== currentInputFingerprint ? 'fingerprint_changed'
+                    : !structurallyValid ? 'invalid_structure' : 'insufficient_queries';
+      }
+      if (existing && existing.version === NICHE_EXPANSION_PLAN_VERSION
+        && storedSchemaVersion === NICHE_PROFILE_SCHEMA_VERSION
+        && (existing as any).queryGenerationVersion === NICHE_QUERY_GENERATION_VERSION
+        && (existing as any).aliasGenerationVersion === NICHE_ALIAS_GENERATION_VERSION
+        && storedInputFingerprint === currentInputFingerprint
+        && storedStructureValid) {
         const loaded = rowToPlan(existing);
-        if (loaded.queries.length >= 4 || loaded.confidence < 0.7) {
-          console.info('[niche-profile] cache resolution', { userId, niche, storedPlanVersion, loadedPlanVersion: loaded.version, cacheHit: true, regenerated: false, inputFingerprint: loaded.inputFingerprint, queryCount: loaded.queries.length });
+        if (loaded.queries.length >= 4) {
+          console.info('[niche-profile] cache resolution', { userId, niche, storedPlanVersion, currentPlanVersion: NICHE_EXPANSION_PLAN_VERSION, storedSchemaVersion, currentSchemaVersion: NICHE_PROFILE_SCHEMA_VERSION, storedInputFingerprint, currentInputFingerprint, cacheHit: true, regenerationReason: null });
           return loaded;
         }
       }
     }
 
     const plan = await this.generatePlanWithAI(niche, failedQueryDiagnostics);
-    const sanitized = sanitizeExpansionPlan(plan);
+    const sanitized = { ...sanitizeExpansionPlan(plan), inputFingerprint: currentInputFingerprint };
 
     await prisma.userNicheSearchPlan.upsert({
       where: { userId_niche: { userId, niche: key } },
@@ -604,6 +707,10 @@ ${failedQueryDiagnostics.length ? `Previous queries failed validation. Correct t
         queries: { items: sanitized.queries, profile: sanitized },
         exclusions: sanitized.exclusions,
         version: NICHE_EXPANSION_PLAN_VERSION,
+        schemaVersion: NICHE_PROFILE_SCHEMA_VERSION,
+        queryGenerationVersion: NICHE_QUERY_GENERATION_VERSION,
+        aliasGenerationVersion: NICHE_ALIAS_GENERATION_VERSION,
+        inputFingerprint: currentInputFingerprint,
       },
       update: {
         domain: sanitized.domain,
@@ -612,11 +719,15 @@ ${failedQueryDiagnostics.length ? `Previous queries failed validation. Correct t
         queries: { items: sanitized.queries, profile: sanitized },
         exclusions: sanitized.exclusions,
         version: NICHE_EXPANSION_PLAN_VERSION,
+        schemaVersion: NICHE_PROFILE_SCHEMA_VERSION,
+        queryGenerationVersion: NICHE_QUERY_GENERATION_VERSION,
+        aliasGenerationVersion: NICHE_ALIAS_GENERATION_VERSION,
+        inputFingerprint: currentInputFingerprint,
         generatedAt: new Date(),
       },
     });
 
-    console.info('[niche-profile] cache resolution', { userId, niche, storedPlanVersion, loadedPlanVersion: sanitized.version, cacheHit: false, regenerated: true, inputFingerprint: sanitized.inputFingerprint, queryCount: sanitized.queries.length });
+    console.info('[niche-profile] cache resolution', { userId, niche, storedPlanVersion, currentPlanVersion: NICHE_EXPANSION_PLAN_VERSION, storedSchemaVersion, currentSchemaVersion: NICHE_PROFILE_SCHEMA_VERSION, storedInputFingerprint, currentInputFingerprint, cacheHit: false, regenerationReason });
 
     return sanitized;
   }

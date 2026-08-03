@@ -38,6 +38,7 @@ import {
   getStrategyNiches,
   hasStrategyGenerationContext,
 } from "./botStrategyTrendService";
+import { consumeInventoryTopic, releaseInventoryTopic, availableInventoryByNiche, INVENTORY_LOW_WATERMARK, enqueueLowInventoryReplenishment } from './topicInventoryService';
 
 function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undefined {
   if (!websiteUrl?.trim()) return undefined;
@@ -415,6 +416,7 @@ export class TrendingBotService {
       sources,
      });
 
+    const inventoryJobId = jobId ?? `batch-${userId}-${Date.now()}`;
     const { author, eligible, ranked } = await prepareBatchContextV2({
       userId,
       niches,
@@ -424,6 +426,7 @@ export class TrendingBotService {
       openaiApiKey: openaiKey,
       previewId: options?.previewId,
       configHash,
+      generationJobId: inventoryJobId,
     });
 
     const provider: "OPENAI" = "OPENAI";
@@ -461,17 +464,16 @@ export class TrendingBotService {
       const waveResults = await Promise.all(waveIndexes.map(async (slotIndex) => {
         const plan = batchPlan[slotIndex];
         const trend: TrendCandidate | null = eligible[slotIndex] ?? null;
-        const result = await generateSlotPostUntilSuccess(
-          contentService,
-          plan,
-          trend,
-          author,
-          botConfig,
-          contextBodies,
-          provider,
-          { batchFingerprints: contextFingerprints, recentTopicHistory: history },
-        );
-        return { slotIndex, plan, trend, result };
+        try {
+          const result = await generateSlotPostUntilSuccess(
+            contentService, plan, trend, author, botConfig, contextBodies, provider,
+            { batchFingerprints: contextFingerprints, recentTopicHistory: history },
+          );
+          return { slotIndex, plan, trend, result };
+        } catch (error) {
+          if (trend?.inventoryId) await releaseInventoryTopic(trend.inventoryId, inventoryJobId);
+          throw error;
+        }
       }));
 
       for (const item of waveResults) {
@@ -517,7 +519,8 @@ export class TrendingBotService {
       }
 
       const persistResult = async ({ slotIndex, plan, trend, result }: (typeof waveResults)[number]) => {
-        await this.saveReviewPost(
+        try {
+          await this.saveReviewPost(
           userId,
           result.finalized,
           result.imageContent,
@@ -530,7 +533,12 @@ export class TrendingBotService {
             fingerprint: fingerprintFromBody(result.finalized.body, trend?.topic ?? plan.sourceTopic ?? undefined, plan.angle),
             angle: plan.angle,
           },
-        );
+          );
+          if (trend?.inventoryId) await consumeInventoryTopic(trend.inventoryId, inventoryJobId);
+        } catch (error) {
+          if (trend?.inventoryId) await releaseInventoryTopic(trend.inventoryId, inventoryJobId);
+          throw error;
+        }
         if (jobId) {
           await prisma.botGenerationJob.update({
             where: { id: jobId },
@@ -549,6 +557,15 @@ export class TrendingBotService {
     }
 
     console.log(`Batch complete. Created ${postsCreated} posts.`);
+    const inventoryAvailableAfterBatch = await availableInventoryByNiche(userId, niches);
+    console.info('[topic-inventory] post-batch levels', {
+      userId, inventoryAvailableAfterBatch,
+      lowNiches: niches.filter((niche) => (inventoryAvailableAfterBatch[niche] ?? 0) < INVENTORY_LOW_WATERMARK),
+    });
+    enqueueLowInventoryReplenishment({
+      userId, niches: niches.filter((niche) => (inventoryAvailableAfterBatch[niche] ?? 0) < INVENTORY_LOW_WATERMARK),
+      author, strategy, sources, openaiApiKey: openaiKey,
+    });
   }
 
   private async saveReviewPost(

@@ -3,7 +3,30 @@ import { getSubredditsForNiche } from '../config/redditDomainFeeds';
 
 export type SourceMode = 'automatic' | 'manual';
 export type TrendSourceConfig = { mode: SourceMode; enabled: string[] };
-export type SourceQueryRequest = { source: string; query: string; intent: DiscoveryIntent; sourceRole: EvidenceRole; confidence: number; domain?: string };
+export interface ValidatedExpansionQuery {
+  text: string;
+  niche: string;
+  queryOrigin: string;
+  searchIntent: DiscoveryIntent;
+  validationConfidence: number;
+  profileFingerprint: string;
+}
+
+export type SourceQueryRequest = {
+  source: string;
+  query: string;
+  originalQuery: string;
+  providerQuery: string;
+  niche: string;
+  queryOrigin: string;
+  intent: DiscoveryIntent;
+  searchIntent: DiscoveryIntent;
+  sourceRole: EvidenceRole;
+  confidence: number;
+  validationConfidence: number;
+  profileFingerprint: string;
+  domain?: string;
+};
 
 export const INTENT_SOURCES: Record<DiscoveryIntent, string[]> = {
   recent_development: ['google', 'official'], official_update: ['official', 'google'], industry_change: ['google', 'web', 'official'],
@@ -51,19 +74,20 @@ export function resolveSourceAvailability(
 export function resolveAutomaticProviderJobs(
   profile: NicheExpansionPlan,
   batch: BatchDiscoveryPlan,
+  activeQueries: ValidatedExpansionQuery[],
   env: Record<string, string | undefined> = process.env,
 ): { preferredSources: string[]; operationalSources: string[]; unavailableSources: Array<{ source: string; reason: string }>; jobs: SourceQueryRequest[]; intentsWithoutJobs: DiscoveryIntent[] } {
   const availability = resolveSourceAvailability(profile, env);
-  const allRequests = buildSourceQueryRequests(profile, batch, { mode: 'automatic', enabled: [] });
+  const allRequests = buildSourceQueryRequests(profile, batch, { mode: 'automatic', enabled: [] }, activeQueries);
   const jobs: SourceQueryRequest[] = [];
   const intentsWithoutJobs: DiscoveryIntent[] = [];
-  for (const target of batch.intentTargets) {
-    const compatible = INTENT_SOURCES[target.intent];
+  for (const activeQuery of activeQueries) {
+    const compatible = INTENT_SOURCES[activeQuery.searchIntent] ?? ['google', 'web'];
     const operational = compatible.filter((source) => availability.operationalSources.includes(source));
     const selectedSources = operational.slice(0, 2);
-    const candidates = allRequests.filter((request) => request.intent === target.intent && selectedSources.includes(request.source));
+    const candidates = allRequests.filter((request) => request.originalQuery === activeQuery.text && selectedSources.includes(request.source));
     jobs.push(...candidates);
-    if (!candidates.length) intentsWithoutJobs.push(target.intent);
+    if (!candidates.length) intentsWithoutJobs.push(activeQuery.searchIntent);
   }
   return {
     preferredSources: [...new Set(batch.intentTargets.flatMap((target) => INTENT_SOURCES[target.intent]))],
@@ -147,18 +171,29 @@ function intentQuery(intent: DiscoveryIntent, subject: string, profile: NicheExp
   return query.toLowerCase().includes(profile.niche.toLowerCase()) ? query : `${query} ${profile.niche}`;
 }
 
-export function buildSourceQueryRequests(profile: NicheExpansionPlan, batch: BatchDiscoveryPlan, config: TrendSourceConfig): SourceQueryRequest[] {
+export function buildSourceQueryRequests(
+  profile: NicheExpansionPlan,
+  batch: BatchDiscoveryPlan,
+  config: TrendSourceConfig,
+  activeQueries: ValidatedExpansionQuery[],
+): SourceQueryRequest[] {
   const sourcePlan = buildNicheSourcePlan(profile);
   const requests: SourceQueryRequest[] = [];
-  batch.intentTargets.forEach((target, index) => {
-    const subject = subjectFor(profile, index);
-    const baseQuery = intentQuery(target.intent, subject, profile);
-    const sources = config.mode === 'manual' ? target.allowedSources.filter((source) => config.enabled.includes(source)) : target.allowedSources;
+  void batch;
+  activeQueries.forEach((activeQuery) => {
+    const allowedSources = INTENT_SOURCES[activeQuery.searchIntent] ?? ['google', 'web'];
+    const sources = config.mode === 'manual' ? allowedSources.filter((source) => config.enabled.includes(source)) : allowedSources;
     for (const source of sources) {
       if (source === 'official') {
-        for (const domain of sourcePlan.officialDomains.slice(0, 2)) requests.push({ source, query: `${baseQuery} site:${domain}`, domain, intent: target.intent, sourceRole: 'primary', confidence: sourcePlan.confidence });
+        for (const domain of sourcePlan.officialDomains.slice(0, 2)) {
+          const providerQuery = `${activeQuery.text} site:${domain}`;
+          requests.push({ source, query: providerQuery, providerQuery, originalQuery: activeQuery.text, niche: activeQuery.niche, queryOrigin: activeQuery.queryOrigin, intent: activeQuery.searchIntent, searchIntent: activeQuery.searchIntent, sourceRole: 'primary', confidence: sourcePlan.confidence, validationConfidence: activeQuery.validationConfidence, profileFingerprint: activeQuery.profileFingerprint, domain });
+        }
       } else {
-        requests.push({ source, query: baseQuery, intent: target.intent, sourceRole: SOURCE_ROLES[source] ?? 'idea_only', confidence: profile.confidence });
+        const providerQuery = source === 'quora' ? `${activeQuery.text} site:quora.com`
+          : source === 'linkedin' ? `${activeQuery.text} site:linkedin.com`
+            : activeQuery.text;
+        requests.push({ source, query: providerQuery, providerQuery, originalQuery: activeQuery.text, niche: activeQuery.niche, queryOrigin: activeQuery.queryOrigin, intent: activeQuery.searchIntent, searchIntent: activeQuery.searchIntent, sourceRole: SOURCE_ROLES[source] ?? 'idea_only', confidence: profile.confidence, validationConfidence: activeQuery.validationConfidence, profileFingerprint: activeQuery.profileFingerprint });
       }
     }
   });

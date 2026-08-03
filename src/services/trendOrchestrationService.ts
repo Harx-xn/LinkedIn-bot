@@ -12,14 +12,14 @@ import {
   toPipelineMode,
   type TrendPipelineMode,
 } from '../config/trendPipelineConfig';
-import { flattenExpansionQueries, NicheExpansionService, validateExpansionQuery } from './nicheExpansionService';
+import { buildNicheProfileFingerprintInput, flattenExpansionQueries, NicheExpansionService, validateExpansionQuery } from './nicheExpansionService';
 import { TopicFingerprintService } from './topicFingerprintService';
 import { applyBatchEvidenceComposition, processTrendCandidates } from './trendSelectionService';
 import { rankedToTrendCandidates } from './trendDiversityService';
-import { selectDiverseRankedCandidates, selectNicheBalancedCandidates, selectPreviewRankedCandidates } from './trendRankingService';
-import { TrendsService } from './trendsService';
+import { areHardBatchDuplicates, selectFinalBatchCandidates, selectNicheBalancedCandidates, selectPreviewRankedCandidates } from './trendRankingService';
+import { TrendsService, type GenerationSearchRun, type TrendFetchMetrics } from './trendsService';
 import type { Trend } from './trendsService';
-import { mapWithConcurrency } from './concurrencyUtils';
+import { mapWithConcurrencySettled } from './concurrencyUtils';
 import { PipelineTimer } from './trendPipelineTiming';
 import type { EffectiveBotStrategy } from './botStrategyService';
 import { buildStrategyExpansionPlan } from './botStrategyTrendService';
@@ -30,6 +30,7 @@ export type OrchestratedTrendPool = {
   expansionPlans: NicheExpansionPlan[];
   stats: TrendPoolStats & { openAiCalls?: number; sourceRequestCount?: number; cacheHits?: number; cacheMisses?: number };
   timingMs?: ReturnType<PipelineTimer['finish']>;
+  qualifiedRanked?: RankedTrendCandidate[];
 };
 
 export type RankedTrendPoolParams = {
@@ -43,10 +44,36 @@ export type RankedTrendPoolParams = {
   reuseRanked?: RankedTrendCandidate[];
   strategy?: EffectiveBotStrategy;
   searchAttempt?: number;
+  generationSearchRun?: GenerationSearchRun;
+  exhaustedNiches?: Set<string>;
 };
 
 export type RankedTrendPoolResult = OrchestratedTrendPool;
-export const MIN_EXECUTABLE_QUERIES_PER_NICHE = 4;
+export interface NicheDiscoveryState {
+  niche: string;
+  rawCandidates: TrendCandidate[];
+  hardEligibleCandidates: TrendCandidate[];
+  strategyAcceptedCandidates: RankedTrendCandidate[];
+  noveltyApprovedCandidates: RankedTrendCandidate[];
+  executedRequestKeys: Set<string>;
+  exhaustedRequestKeys: Set<string>;
+  searchSpaceExhausted: boolean;
+  stopReason: string | null;
+}
+export const MIN_INITIAL_EXECUTABLE_QUERIES = 4;
+export const MAX_QUERIES_PER_ATTEMPT = 8;
+export const MIN_RETRY_EXECUTABLE_QUERIES = 1;
+/** Backwards-compatible name for initial profile health checks. */
+export const MIN_EXECUTABLE_QUERIES_PER_NICHE = MIN_INITIAL_EXECUTABLE_QUERIES;
+
+export function dedupeCrossNicheQualifiedTopics(topics: RankedTrendCandidate[]): RankedTrendCandidate[] {
+  const kept: RankedTrendCandidate[] = [];
+  for (const topic of [...topics].filter((item) => item.novelty.allowed).sort((a, b) => b.totalScore - a.totalScore)) {
+    if (kept.some((item) => areHardBatchDuplicates(topic, item))) continue;
+    kept.push(topic);
+  }
+  return kept;
+}
 
 export class InsufficientValidQueriesError extends Error {
   constructor(public readonly niche: string, public readonly diagnostics: Array<{ query: string; reasons: string[] }>) {
@@ -57,14 +84,14 @@ export class InsufficientValidQueriesError extends Error {
 
 export function validatePlanQueries(plan: NicheExpansionPlan): {
   executable: string[];
-  rejected: Array<{ query: string; reasons: string[] }>;
+  rejected: Array<{ query: string; reasons: string[]; confidence: number }>;
 } {
   const executable: string[] = [];
-  const rejected: Array<{ query: string; reasons: string[] }> = [];
+  const rejected: Array<{ query: string; reasons: string[]; confidence: number }> = [];
   for (const query of [...new Set(flattenExpansionQueries(plan))]) {
     const result = validateExpansionQuery(query, plan.niche, plan.subtopics, executable, plan);
     if (result.valid && result.confidence >= 0.7) executable.push(query);
-    else rejected.push({ query, reasons: result.reasons });
+    else rejected.push({ query, reasons: result.reasons, confidence: result.confidence });
   }
   return { executable, rejected };
 }
@@ -82,6 +109,7 @@ export function buildFocusedRetryQueries(
   niche: string,
   plan: NicheExpansionPlan,
   searchAttempt: number,
+  executedRequestKeys: Set<string> = new Set(),
 ): string[] {
   if (searchAttempt <= 0) return [];
   const nicheKey = normalizeQueryPart(niche);
@@ -91,27 +119,26 @@ export function buildFocusedRetryQueries(
         .sort((a, b) => b.confidence - a.confidence)
         .map((item) => item.query)
     : plan.queries;
+  void executedRequestKeys;
   const uniqueQueries = [...new Map(orderedQueries
     .map((query) => [normalizeQueryPart(query), query.trim()] as const)
     .filter(([key]) => key && key !== nicheKey)).values()];
-  const offset = (searchAttempt - 1) * MIN_EXECUTABLE_QUERIES_PER_NICHE;
-  return uniqueQueries.slice(offset, offset + MIN_EXECUTABLE_QUERIES_PER_NICHE);
+  const offset = searchAttempt * MAX_QUERIES_PER_ATTEMPT;
+  return uniqueQueries.slice(offset, offset + MAX_QUERIES_PER_ATTEMPT);
 }
 
 export class TrendOrchestrationService {
-  private trendsService: TrendsService;
   private nicheExpansion: NicheExpansionService;
   private fingerprintService: TopicFingerprintService;
 
   constructor(openaiApiKey?: string | null) {
-    this.trendsService = new TrendsService();
     this.nicheExpansion = new NicheExpansionService(openaiApiKey);
     this.fingerprintService = new TopicFingerprintService(openaiApiKey);
   }
 
-  async resolveExpansionPlan(userId: string, niche: string): Promise<NicheExpansionPlan> {
+  async resolveExpansionPlan(userId: string, niche: string, strategy?: EffectiveBotStrategy): Promise<NicheExpansionPlan> {
     try {
-      return await this.nicheExpansion.getOrCreatePlan(userId, niche);
+      return await this.nicheExpansion.getOrCreatePlan(userId, niche, false, [], buildNicheProfileFingerprintInput(niche, strategy));
     } catch (error) {
       console.error('[trend-orchestration] niche expansion failed; using niche fallback', {
         userId,
@@ -152,7 +179,7 @@ export class TrendOrchestrationService {
       };
     }
 
-    const candidateTarget = targetCandidateCount(pipelineMode, limit);
+    const candidateTarget = pipelineMode === 'generation' ? 20 * Math.max(1, params.niches.length) : targetCandidateCount(pipelineMode, limit);
     const perNicheLimit = Math.min(
       cfg.maxCandidatesPerNiche,
       Math.max(
@@ -170,20 +197,23 @@ export class TrendOrchestrationService {
       rawFetched: number;
       queryCount: number;
       durationMs: number;
+      fetchMetrics: TrendFetchMetrics;
     };
 
     const nicheStarted = performance.now();
-    const nicheResults = await mapWithConcurrency(
-      params.niches,
+    const activeNiches = params.niches.filter((niche) => !params.exhaustedNiches?.has(niche));
+    const settledNicheResults = await mapWithConcurrencySettled(
+      activeNiches,
       cfg.nicheConcurrency,
       async (niche): Promise<NicheResult> => {
+        const trendsService = new TrendsService();
         const nicheTimer = performance.now();
-        let cachedPlan = await this.resolveExpansionPlan(params.userId, niche);
+        let cachedPlan = await this.resolveExpansionPlan(params.userId, niche, params.strategy);
         let basePlan = params.strategy
           ? buildStrategyExpansionPlan(params.strategy, niche, cachedPlan)
           : cachedPlan;
         let queryValidation = validatePlanQueries(basePlan);
-        if (queryValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
+        if (queryValidation.executable.length < MIN_INITIAL_EXECUTABLE_QUERIES) {
           console.warn('[trend-query] regenerating insufficient niche plan', {
             userId: params.userId,
             niche,
@@ -198,52 +228,64 @@ export class TrendOrchestrationService {
             niche,
             true,
             queryValidation.rejected,
+            buildNicheProfileFingerprintInput(niche, params.strategy),
           );
           basePlan = params.strategy
             ? buildStrategyExpansionPlan(params.strategy, niche, cachedPlan)
             : cachedPlan;
           queryValidation = validatePlanQueries(basePlan);
         }
-        if (queryValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
-          throw new InsufficientValidQueriesError(niche, queryValidation.rejected);
-        }
         const retryQueries = buildFocusedRetryQueries(
           niche,
           basePlan,
           params.searchAttempt ?? 0,
+          params.generationSearchRun?.executedRequestKeys,
         );
-        if ((params.searchAttempt ?? 0) > 0 && retryQueries.length === 0) {
-          throw new InsufficientValidQueriesError(niche, [{
-            query: '',
-            reasons: ['no_unused_valid_retry_queries'],
-          }]);
-        }
-        const plan = retryQueries.length
+        const attempt = params.searchAttempt ?? 0;
+        const freshnessLayers = attempt === 0 ? ['7d'] as const
+          : attempt === 1 ? ['30d'] as const
+            : attempt === 2 ? ['fallback'] as const : [] as const;
+        const expansionQueries = retryQueries.length
+          ? retryQueries
+          : (attempt > 0 && freshnessLayers.length ? queryValidation.executable.slice(0, MAX_QUERIES_PER_ATTEMPT) : []);
+        const plan = attempt > 0
           ? {
               ...basePlan,
-              queries: retryQueries,
+              queries: expansionQueries,
+              profileQueries: undefined,
               queryBuckets: undefined,
               queryOrigin: 'retry_regenerated' as const,
             }
           : basePlan;
         const executionValidation = validatePlanQueries(plan);
-        if (executionValidation.executable.length < MIN_EXECUTABLE_QUERIES_PER_NICHE) {
-          throw new InsufficientValidQueriesError(niche, executionValidation.rejected);
-        }
-        console.info('[trend-query] query pool ready', {
+        const rejectionCount = (pattern: RegExp) => executionValidation.rejected.filter((item) => item.reasons.some((reason) => pattern.test(reason))).length;
+        const nicheRequestPrefix = `${niche.toLowerCase()}|`;
+        const providerRequestKeysExecuted = [...(params.generationSearchRun?.executedRequestKeys ?? [])].filter((key) => key.startsWith(nicheRequestPrefix)).length;
+        const providerRequestKeysExhausted = [...(params.generationSearchRun?.exhaustedQueries ?? [])].filter((key) => key.startsWith(nicheRequestPrefix)).length;
+        const nicheExhausted = executionValidation.executable.length < MIN_RETRY_EXECUTABLE_QUERIES || freshnessLayers.length === 0;
+        console.info('[trend-query] executable query funnel', {
           userId: params.userId,
+          generationSearchRunId: params.generationSearchRun?.runId ?? null,
           niche,
-          cachedProfileQueries: cachedPlan.queries.length,
-          strategyEnrichedQueries: basePlan.queries.length,
-          generatedCandidates: flattenExpansionQueries(plan).length,
-          validatedQueries: executionValidation.executable.length,
-          executedQueries: Math.min(executionValidation.executable.length, cfg.maxQueriesPerNiche),
-          searchAttempt: (params.searchAttempt ?? 0) + 1,
+          attempt: attempt + 1,
+          storedProfileQueries: cachedPlan.queries.length, validatedQueryTexts: executionValidation.executable.length, newlyGeneratedQueries: Math.max(0, basePlan.queries.length - cachedPlan.queries.length), queriesRepaired: plan.repairMetrics?.attempted ?? 0, repairsAccepted: plan.repairMetrics?.accepted ?? 0, repairsRejected: plan.repairMetrics?.rejected ?? 0,
+          rejectedBelowConfidence: executionValidation.rejected.filter((item) => item.confidence < 0.7).length,
+          rejectedInsufficientContext: rejectionCount(/niche_context|specificity/), rejectedGeneric: rejectionCount(/generic/),
+          rejectedPromotional: rejectionCount(/promotional/), rejectedDomainMismatch: rejectionCount(/domain_mismatch/), rejectedNearDuplicate: rejectionCount(/near_duplicate/),
+          uniqueQueryTextsExecuted: executionValidation.executable.length, providerRequestKeysExecuted, providerRequestKeysExhausted,
+          incompatibleProviderQueries: 0, unusedValidQueries: retryQueries.length,
+          executableQueriesThisAttempt: Math.min(executionValidation.executable.length, MAX_QUERIES_PER_ATTEMPT),
+          providersRemaining: params.sources, freshnessWindowsRemaining: freshnessLayers,
+          nicheExhausted,
         });
+        if (nicheExhausted) {
+          params.exhaustedNiches?.add(niche);
+          return { plan, ranked: [], stats: { rawCount: 0, rejectedLowValue: 0, rejectedByExclusions: 0, exactDuplicatesRemoved: 0, nearDuplicatesRemoved: 0, historyMatchesRemoved: 0, fingerprinted: 0, selected: 0, evergreenFilled: 0 }, rawFetched: 0, queryCount: 0, durationMs: Math.round(performance.now() - nicheTimer), fetchMetrics: trendsService.getLastFetchMetrics() };
+        }
 
         let rawTrends: Trend[] = [];
         try {
-          rawTrends = await this.trendsService.fetchTrendsWithInput({
+          rawTrends = await trendsService.fetchTrendsWithInput({
             niche,
             queries: plan.queries,
             exclusions: plan.exclusions,
@@ -253,6 +295,9 @@ export class TrendOrchestrationService {
             pipelineMode,
             candidateTarget: Math.ceil(candidateTarget / params.niches.length),
             requestedCount: limit,
+            cachePolicy: pipelineMode === 'preview' ? 'use_cache' : 'refresh',
+            generationSearchRun: params.generationSearchRun,
+            freshnessLayers: [...freshnessLayers],
           });
         } catch (error) {
           if (error instanceof Error && error.message.startsWith('insufficient_valid_queries:')) throw error;
@@ -295,6 +340,19 @@ export class TrendOrchestrationService {
           pipelineMode,
           strategy: params.strategy,
         });
+        const hardEligibleCount = Math.max(0, rawTrends.length - stats.rejectedLowValue - stats.rejectedByExclusions - stats.exactDuplicatesRemoved - stats.nearDuplicatesRemoved);
+        params.generationSearchRun?.hardEligibleCountsByNiche.set(niche, hardEligibleCount);
+        if (pipelineMode === 'generation' && hardEligibleCount >= 20) params.exhaustedNiches?.add(niche);
+        if (pipelineMode === 'generation') console.info('[trend-discovery] niche cumulative target', {
+          niche,
+          attempt: attempt + 1,
+          cumulativeRaw: rawTrends.length,
+          cumulativeHardEligible: hardEligibleCount,
+          targetHardEligible: 20,
+          remainingNeeded: Math.max(0, 20 - hardEligibleCount),
+          searchSpaceExhausted: params.exhaustedNiches?.has(niche) ?? false,
+          stopReason: hardEligibleCount >= 20 ? 'target_hard_eligible_reached' : null,
+        });
         console.info('[trend-orchestration] niche qualification completed', {
           niche,
           providerResults: rawTrends.length,
@@ -303,6 +361,9 @@ export class TrendOrchestrationService {
           plausibleCandidatesBeforeCap: rawTrends.length,
           candidatesAfterCap: rawTrends.length,
           fullyQualified: ranked.length,
+          eligibleCandidates: hardEligibleCount,
+          generationSearchRunId: params.generationSearchRun?.runId ?? null,
+          exhaustedQueries: params.generationSearchRun?.exhaustedQueries.size ?? 0,
         });
 
         return {
@@ -312,9 +373,17 @@ export class TrendOrchestrationService {
           rawFetched: rawTrends.length,
           queryCount: plan.queries.length,
           durationMs: Math.round(performance.now() - nicheTimer),
+          fetchMetrics: trendsService.getLastFetchMetrics(),
         };
       },
     );
+
+    settledNicheResults.forEach((result, index) => {
+      if (result.status === 'rejected') console.error('[trend-orchestration] niche discovery isolated failure', {
+        userId: params.userId, niche: activeNiches[index], message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    });
+    const nicheResults = settledNicheResults.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
 
     timer.mark('sourceFetchMs');
     timer.mark('filteringMs');
@@ -353,10 +422,9 @@ export class TrendOrchestrationService {
       aggregateStats.openAiCalls = (aggregateStats.openAiCalls ?? 0) + (result.stats.openAiCalls ?? 0);
     }
 
-    const fetchMetrics = this.trendsService.getLastFetchMetrics();
-    aggregateStats.sourceRequestCount = fetchMetrics.sourceRequestCount;
-    aggregateStats.cacheHits = fetchMetrics.cacheHits;
-    aggregateStats.cacheMisses = fetchMetrics.cacheMisses;
+    aggregateStats.sourceRequestCount = nicheResults.reduce((sum, result) => sum + result.fetchMetrics.sourceRequestCount, 0);
+    aggregateStats.cacheHits = nicheResults.reduce((sum, result) => sum + result.fetchMetrics.cacheHits, 0);
+    aggregateStats.cacheMisses = nicheResults.reduce((sum, result) => sum + result.fetchMetrics.cacheMisses, 0);
 
     allRanked.sort((a, b) => b.totalScore - a.totalScore);
 
@@ -377,6 +445,17 @@ export class TrendOrchestrationService {
         qualifiedByNiche,
         nichesWithoutQualifiedCandidates: params.niches.filter((niche) => !qualifiedByNiche[niche]),
       });
+      for (const result of nicheResults) {
+        const niche = result.plan.niche;
+        const selected = selectedByNiche[niche] ?? 0;
+        console.info('[trend-discovery] final niche funnel', {
+          niche,
+          queries: { stored: result.plan.queries.length, validated: result.queryCount, executed: result.fetchMetrics.queriesExecuted },
+          providers: { planned: result.fetchMetrics.providerRequestsPlanned, executed: result.fetchMetrics.freshProviderRequests, exhausted: result.fetchMetrics.skippedExhaustedRequests, unavailable: result.fetchMetrics.providerRequestsUnavailable },
+          candidates: { raw: result.fetchMetrics.rawProviderResults, plausible: result.fetchMetrics.plausibleCandidates, hardEligible: Math.max(0, result.rawFetched - result.stats.rejectedLowValue - result.stats.rejectedByExclusions - result.stats.exactDuplicatesRemoved - result.stats.nearDuplicatesRemoved), strategyAccepted: result.stats.strategyAccepted ?? 0, historyApproved: result.stats.historyApproved ?? 0, noveltyApproved: result.stats.noveltyApproved ?? 0 },
+          output: { selected, storedInInventory: null },
+        });
+      }
     }
 
     aggregateStats.selected = ranked.length;
@@ -425,6 +504,7 @@ export class TrendOrchestrationService {
       expansionPlans,
       stats: aggregateStats,
       timingMs,
+      qualifiedRanked: dedupeCrossNicheQualifiedTopics(allRanked),
     };
   }
 
@@ -435,6 +515,13 @@ export class TrendOrchestrationService {
     },
   ): Promise<OrchestratedTrendPool> {
     const requested = params.slotCount ?? params.limit ?? 7;
+    const generationSearchRun: GenerationSearchRun = {
+      runId: `generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      executedRequestKeys: new Set(), exhaustedQueries: new Set(), currentRunFetches: new Map(),
+      hardEligibleByNiche: new Map(),
+      hardEligibleCountsByNiche: new Map(),
+    };
+    const exhaustedNiches = new Set<string>();
     let accumulated: RankedTrendCandidate[] = [];
     let latest: OrchestratedTrendPool | null = null;
     const totals = {
@@ -458,33 +545,37 @@ export class TrendOrchestrationService {
         ...params,
         mode: params.mode ?? 'generation',
         searchAttempt,
+        generationSearchRun,
+        exhaustedNiches,
       });
       latest = pass;
-      accumulated = selectNicheBalancedCandidates(
-        applyBatchEvidenceComposition([...accumulated, ...pass.ranked], requested),
-        requested,
-      );
+      accumulated = dedupeCrossNicheQualifiedTopics([...accumulated, ...(pass.qualifiedRanked ?? pass.ranked)]);
       for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
         if (key === 'selected' || key === 'evergreenFilled') continue;
         totals[key] += Number(pass.stats[key] ?? 0);
       }
-      totals.selected = accumulated.length;
+      totals.selected = Math.min(requested, accumulated.length);
 
       console.info('[trend-orchestration] generation search pass completed', {
         userId: params.userId,
+        generationSearchRunId: generationSearchRun.runId,
         attempt: searchAttempt + 1,
         requested,
         qualifiedThisPass: pass.ranked.length,
         qualifiedAccumulated: accumulated.length,
       });
-      if (accumulated.length >= requested) break;
+      const everyNicheAtTarget = params.niches.every((niche) => (generationSearchRun.hardEligibleCountsByNiche.get(niche) ?? 0) >= 20);
+      if (everyNicheAtTarget) break;
+      if (exhaustedNiches.size >= params.niches.length) break;
     }
 
     if (!latest) return this.getRankedTrendPool({ ...params, mode: params.mode ?? 'generation' });
+    const finalSelection = selectFinalBatchCandidates(accumulated, requested);
     return {
       ...latest,
-      ranked: accumulated,
-      eligible: rankedToTrendCandidates(accumulated),
+      ranked: finalSelection.selected,
+      eligible: rankedToTrendCandidates(finalSelection.selected),
+      qualifiedRanked: accumulated,
       stats: totals,
     };
   }

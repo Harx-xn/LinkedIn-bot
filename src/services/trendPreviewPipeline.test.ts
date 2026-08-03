@@ -108,6 +108,50 @@ describe('trend preview pipeline', () => {
     assert.equal(calls, 1);
   });
 
+  it('refresh ignores cached provider results and replaces them', async () => {
+    let calls = 0;
+    const key = buildTrendCacheKey({ source: 'google', query: 'fresh generation', freshness: '7d' });
+    const fetcher = async () => [{ title: `Trend ${++calls}`, link: 'https://example.com', pubDate: '', source: 'Test' }];
+    const cached = await fetchTrendsWithCache(key, 'google', fetcher, 'use_cache');
+    const refreshed = await fetchTrendsWithCache(key, 'google', fetcher, 'refresh');
+    const preview = await fetchTrendsWithCache(key, 'google', fetcher, 'use_cache');
+    assert.equal(cached[0].title, 'Trend 1');
+    assert.equal(refreshed[0].title, 'Trend 2');
+    assert.equal(preview[0].title, 'Trend 2');
+    assert.equal(calls, 2);
+  });
+
+  it('each refresh performs a new request and never falls back to stale cache on failure', async () => {
+    const key = buildTrendCacheKey({ source: 'google', query: 'generation failure', freshness: '7d' });
+    await fetchTrendsWithCache(key, 'google', async () => [
+      { title: 'Stale trend', link: 'https://example.com/stale', pubDate: '', source: 'Test' },
+    ]);
+    let refreshCalls = 0;
+    await assert.rejects(() => fetchTrendsWithCache(key, 'google', async () => {
+      refreshCalls += 1;
+      throw new Error('provider unavailable');
+    }, 'refresh'), /provider unavailable/);
+    const fresh = await fetchTrendsWithCache(key, 'google', async () => {
+      refreshCalls += 1;
+      return [{ title: 'Fresh trend', link: 'https://example.com/fresh', pubDate: '', source: 'Test' }];
+    }, 'refresh');
+    assert.equal(refreshCalls, 2);
+    assert.equal(fresh[0].title, 'Fresh trend');
+  });
+
+  it('bypass neither reads nor replaces provider cache', async () => {
+    const key = buildTrendCacheKey({ source: 'google', query: 'cache bypass', freshness: '7d' });
+    await fetchTrendsWithCache(key, 'google', async () => [
+      { title: 'Cached trend', link: 'https://example.com/cached', pubDate: '', source: 'Test' },
+    ]);
+    const bypassed = await fetchTrendsWithCache(key, 'google', async () => [
+      { title: 'Bypassed trend', link: 'https://example.com/bypass', pubDate: '', source: 'Test' },
+    ], 'bypass');
+    const cached = await fetchTrendsWithCache(key, 'google', async () => [], 'use_cache');
+    assert.equal(bypassed[0].title, 'Bypassed trend');
+    assert.equal(cached[0].title, 'Cached trend');
+  });
+
   it('preview processing reports zero OpenAI calls', async () => {
     const fpService = new TopicFingerprintService(null);
     const plan = buildFallbackExpansionPlan('AI Automation');

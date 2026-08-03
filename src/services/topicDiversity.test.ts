@@ -304,6 +304,28 @@ describe('topic novelty', () => {
     const result = evaluateTopicNovelty(fp({}), [], now);
     assert.equal(result.allowed, true);
   });
+
+  it('does not penalize an unrelated generated draft or a broad cluster alone', () => {
+    const result = evaluateTopicNovelty(fp({ normalizedTopic: 'agent invoice reconciliation', topicCluster: 'ai_automation', coreClaim: 'agents reconcile invoice exceptions', entities: ['UiPath'], mechanisms: ['reconciliation'] }), [{
+      id: 'unrelated', userId: 'u1', postId: null, batchId: null, sourceTitle: null,
+      normalizedTopic: 'AI Automation', topicCluster: 'ai_automation', coreClaim: 'chatbots write social captions',
+      angle: null, status: 'GENERATED', generatedAt: new Date('2026-06-08'), publishedAt: null,
+    }], now);
+    assert.equal(result.allowed, true);
+    assert.equal(result.score, 100);
+    assert.ok(!result.reasons.includes('recent_generated_draft'));
+    assert.ok(!result.reasons.some((reason) => reason.startsWith('cluster_cooldown:')));
+  });
+
+  it('applies a cooldown for a related specific cluster without stacking repeated history copies', () => {
+    const candidate = fp({ normalizedTopic: 'queue retry backoff design', topicCluster: 'queues_jobs', coreClaim: 'retry backoff protects APIs', mechanisms: ['retry backoff'] });
+    const row = { id: 'one', userId: 'u1', postId: null, batchId: null, sourceTitle: null, normalizedTopic: 'queue backoff patterns', topicCluster: 'queues_jobs', coreClaim: 'retry backoff protects APIs', angle: null, status: 'GENERATED' as const, generatedAt: new Date('2026-06-08'), publishedAt: null };
+    const once = evaluateTopicNovelty(candidate, [row], now);
+    const repeated = evaluateTopicNovelty(candidate, [row, { ...row, id: 'two' }], now);
+    assert.ok(once.reasons.some((reason) => reason.startsWith('cluster_cooldown:')) || once.reasons.includes('semantic_duplicate_recent'));
+    assert.equal(repeated.score, once.score);
+    assert.deepEqual(repeated.reasons, once.reasons);
+  });
 });
 
 describe('batch diversity', () => {

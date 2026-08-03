@@ -92,6 +92,7 @@ export type NicheQueryBuckets = {
 };
 
 export type TrendCandidate = {
+  inventoryId?: string;
   topic: string;
   link?: string;
   source?: string;
@@ -114,6 +115,7 @@ export type TrendCandidate = {
   strategyScore?: number;
   strategyReasons?: string[];
   strategyRiskFlags?: string[];
+  qualificationConfidence?: number;
   sourceType?: 'searched' | 'strategy_derived' | 'source_derived_angle';
   selectionMode?: 'normal' | 'zero_result_fallback';
   discoveryIntent?: DiscoveryIntent;
@@ -196,6 +198,7 @@ export type NicheExpansionPlan = {
   profileQueries?: NicheProfileQuery[];
   sourcePlan?: NicheSourcePlan;
   selectedDiscoveryIntents?: DiscoveryIntent[];
+  repairMetrics?: { attempted: number; accepted: number; rejected: number };
 };
 
 export type CandidateNicheMatch = {
@@ -218,7 +221,25 @@ export type CandidateNicheMatch = {
   matchedForeignPillars?: string[];
   queryIntent?: string | null;
   ambiguityResolved?: boolean;
+  activeNicheEvidence?: ActiveNicheEvidence;
 };
+
+export interface ActiveNicheEvidence {
+  activeNiche: string;
+  matchedPillar: string | null;
+  matchedEntities: string[];
+  matchedAliases: string[];
+  matchedPlatforms: string[];
+  matchedCategories: string[];
+  matchedProfileTerms: string[];
+  matchedQueryContext: string[];
+  directEvidence: string[];
+  pillarSatisfied: boolean;
+  pillarSatisfiedBy: 'literal_pillar' | 'pillar_keyword' | 'entity' | 'alias' | 'platform' | 'category_plus_context' | null;
+  ambiguityResolved: boolean;
+  ambiguityResolutionReason: string | null;
+  strength: number;
+}
 
 export type CandidateEligibility = {
   eligible: boolean;
@@ -272,6 +293,9 @@ export type TrendPoolStats = {
   sourceRequestCount?: number;
   cacheHits?: number;
   cacheMisses?: number;
+  strategyAccepted?: number;
+  historyApproved?: number;
+  noveltyApproved?: number;
 };
 
 export type PreviewTrendItem = {

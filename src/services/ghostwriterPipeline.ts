@@ -10,6 +10,7 @@ import {
 import { TrendOrchestrationService } from './trendOrchestrationService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
 import { BatchScheduleError } from './batchScheduleService';
+import { combineFreshAndInventoryTopics, inventoryFingerprint, reserveValidInventoryTopics, storeQualifiedTopics, unselectedQualifiedTopics } from './topicInventoryService';
 
 export type { GeneratedSlotResult };
 
@@ -87,6 +88,7 @@ export async function prepareBatchContextV2(params: {
   previewId?: string;
   configHash?: string;
   allowPartial?: boolean;
+  generationJobId?: string;
 }) {
   const requireCompleteTrendPool = <T extends { ranked: RankedTrendCandidate[]; eligible: TrendCandidate[] }>(pool: T): T => {
     if (!params.allowPartial && (pool.ranked.length < params.slotCount || pool.eligible.length < params.slotCount)) {
@@ -116,49 +118,10 @@ export async function prepareBatchContextV2(params: {
 
   const orchestrator = new TrendOrchestrationService(params.openaiApiKey);
 
-  if (params.previewId && params.configHash) {
-    const { getTrendPreviewPool } = await import('./trendPreviewPoolStore');
-    const stored = getTrendPreviewPool(params.previewId, params.userId, params.configHash);
-    if (stored.ok && stored.pool.candidates.length >= params.slotCount) {
-      const upgraded = await orchestrator.upgradeStoredPreviewPool({
-        userId: params.userId,
-        previewCandidates: stored.pool.candidates,
-        author,
-        strategy: params.config.strategy,
-        plans: [],
-        slotCount: params.slotCount,
-      });
-      console.info({
-        event: 'trend_generation_reused_preview_pool',
-        userId: params.userId,
-        previewId: params.previewId,
-        candidateCount: stored.pool.candidates.length,
-        openAiCalls: upgraded.openAiCalls,
-      });
-      return requireCompleteTrendPool({
-        author,
-        eligible: upgraded.eligible,
-        ranked: upgraded.ranked,
-        stats: {
-          rawCount: stored.pool.candidates.length,
-          rejectedLowValue: 0,
-          rejectedByExclusions: 0,
-          exactDuplicatesRemoved: 0,
-          nearDuplicatesRemoved: 0,
-          historyMatchesRemoved: 0,
-          fingerprinted: upgraded.openAiCalls,
-          selected: upgraded.ranked.length,
-          evergreenFilled: 0,
-          openAiCalls: upgraded.openAiCalls,
-        },
-      });
-    }
-    console.warn('[prepareBatchContextV2] preview pool unavailable; using full generation fetch', {
-      userId: params.userId,
-      previewId: params.previewId,
-      reason: stored.ok ? 'insufficient_candidates' : stored.reason,
-    });
-  }
+  // Preview pools remain cached for preview UX, but generation always performs
+  // a new provider search before history and novelty filtering.
+  void params.previewId;
+  void params.configHash;
 
   const pool = await orchestrator.buildTrendPoolForBatch({
     userId: params.userId,
@@ -170,10 +133,45 @@ export async function prepareBatchContextV2(params: {
     mode: 'generation',
   });
 
+  const freshSelected = pool.ranked;
+  const inventorySelected = freshSelected.length < params.slotCount
+    ? await reserveValidInventoryTopics({
+        userId: params.userId,
+        generationJobId: params.generationJobId ?? `batch-${params.userId}-${Date.now()}`,
+        count: params.slotCount - freshSelected.length,
+        activeNiches: params.niches,
+        selectedFreshTopics: freshSelected,
+        activeProfileFingerprints: new Map(pool.expansionPlans.map((plan) => [plan.niche, plan.inputFingerprint ?? ''])),
+      })
+    : [];
+  const combinedSelection = combineFreshAndInventoryTopics(freshSelected, inventorySelected, params.slotCount);
+  const selected = combinedSelection.selected;
+  const freshQualified = pool.qualifiedRanked ?? [];
+  const selectedFreshFingerprints = new Set(freshSelected.map((item) => inventoryFingerprint(item.fingerprint)));
+  const excessFresh = unselectedQualifiedTopics(freshQualified, freshSelected);
+  if (freshSelected.length > freshQualified.length) throw new Error('final_selection_invariant:fresh_selected_exceeds_qualified');
+  if (selected.length > params.slotCount) throw new Error('final_selection_invariant:total_exceeds_requested');
+  if (selected.length !== freshSelected.length + inventorySelected.length) throw new Error('final_selection_invariant:selection_sum_mismatch');
+  if (excessFresh.some((item) => selectedFreshFingerprints.has(inventoryFingerprint(item.fingerprint)))) throw new Error('final_selection_invariant:selected_stored_as_excess');
+  const excessStored = await storeQualifiedTopics(params.userId, excessFresh);
+  const attemptedByNiche = excessFresh.reduce<Record<string, number>>((counts, item) => {
+    const niche = item.trend.originNiche ?? item.trend.niche ?? 'unknown'; counts[niche] = (counts[niche] ?? 0) + 1; return counts;
+  }, {});
+  console.info('[topic-inventory] batch selection completed', {
+    userId: params.userId, requestedPosts: params.slotCount,
+    freshQualified: freshQualified.length,
+    freshSelected: freshSelected.length, inventorySelected: inventorySelected.length,
+    totalSelected: selected.length, excessFreshAttempted: excessFresh.length, excessFreshCommitted: excessStored,
+    attemptedByNiche,
+    selectedByNiche: selected.reduce<Record<string, number>>((counts, item) => {
+      const niche = item.trend.originNiche ?? item.trend.niche ?? 'unknown'; counts[niche] = (counts[niche] ?? 0) + 1; return counts;
+    }, {}),
+  });
+
   return requireCompleteTrendPool({
     author,
-    eligible: pool.eligible,
-    ranked: pool.ranked,
+    eligible: selected.map((item) => item.trend),
+    ranked: selected,
     stats: pool.stats,
   });
 }

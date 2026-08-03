@@ -21,3 +21,12 @@ export async function mapWithConcurrency<T, R>(
   await Promise.all(workers);
   return results;
 }
+
+export async function mapWithConcurrencySettled<T, R>(
+  items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return mapWithConcurrency(items, concurrency, async (item, index) => {
+    try { return { status: 'fulfilled', value: await mapper(item, index) } as const; }
+    catch (reason) { return { status: 'rejected', reason } as const; }
+  });
+}

@@ -7,12 +7,12 @@ import type { NicheExpansionPlan } from './generationTypes';
 import { preselectPlausibleTrends } from './trendsService';
 import { selectNicheBalancedCandidates } from './trendRankingService';
 
-function strategyFor(pillar: string, keywords: string[] = []) {
+function strategyFor(pillar: string, keywords: string[] = [], requirePillarMatch = false) {
   return buildEffectiveBotStrategy({
     description: `Writes about ${pillar}`,
     tone: 'Practical', niches: JSON.stringify([pillar]),
     contentPillars: { primaryPillars: [{ name: pillar, description: pillar, audienceRelevance: '', exampleAngles: [], trendKeywords: keywords }], secondaryPillars: [], experimentalPillars: [], excludedTopics: [] },
-    topicRules: { minimumRelevanceScore: 65, requirePillarMatch: false, requireAudiencePainMatch: false, avoidDuplicateAngles: true, avoidRecentTopicsDays: 30 },
+    topicRules: { minimumRelevanceScore: 65, requirePillarMatch, requireAudiencePainMatch: false, avoidDuplicateAngles: true, avoidRecentTopicsDays: 30 },
   });
 }
 
@@ -27,6 +27,34 @@ function profile(niche: string, terms: string[], extras: Partial<NicheExpansionP
 }
 
 describe('candidate qualification acceptance paths', () => {
+  it('lets scoped entities, platforms, and contextual aliases satisfy a required pillar', () => {
+    const strategy = strategyFor('AI Automation', ['workflow automation'], true);
+    const plan = profile('AI Automation', ['workflow automation'], { importantEntities: ['Automation Guild'], productsAndPlatforms: ['UiPath'], entityAliases: ['AgentFlow'], requiredContextTerms: ['workflow', 'automation'] });
+    for (const topic of ['Automation Guild publishes its annual controls report', 'UiPath expands orchestration controls', 'AgentFlow workflow automation release roadmap']) {
+      const score = scoreTrendForStrategy({ topic, originNiche: 'AI Automation' }, strategy, { profile: plan });
+      assert.equal(score.nicheMatch?.activeNicheEvidence?.pillarSatisfied, true, topic);
+      assert.ok(!score.nicheMatch?.rejectionCodes.includes('missing_pillar_match'), topic);
+      assert.ok(score.nicheMatch?.directEvidence?.length, topic);
+      assert.ok(score.breakdown.directNicheEvidence! > 0, topic);
+    }
+  });
+
+  it('keeps an unsupported generic alias ambiguous', () => {
+    const strategy = strategyFor('Unity Game Development', ['Unity engine'], true);
+    const plan = profile('Unity Game Development', ['Unity engine'], { entityAliases: ['Unity'], requiredContextTerms: ['engine', 'game'], excludedInterpretations: ['community unity'] });
+    const score = scoreTrendForStrategy({ topic: 'Community unity brings neighbors together', originNiche: 'Unity Game Development' }, strategy, { profile: plan });
+    assert.equal(score.nicheMatch?.activeNicheEvidence?.pillarSatisfied, false);
+    assert.equal(score.nicheMatch?.activeNicheEvidence?.ambiguityResolved, false);
+    assert.equal(score.nicheMatch?.directEvidence?.some((item) => item.startsWith('alias:')), false);
+  });
+
+  it('scopes UiPath to AI Automation and not Web Development', () => {
+    const topic = { topic: 'UiPath expands automation controls', originNiche: 'AI Automation' };
+    const ai = scoreTrendForStrategy(topic, strategyFor('AI Automation', ['workflow automation'], true), { profile: profile('AI Automation', ['workflow automation'], { productsAndPlatforms: ['UiPath'] }) });
+    const web = scoreTrendForStrategy(topic, strategyFor('Web Development', ['web standards'], true), { profile: profile('Web Development', ['web standards']) });
+    assert.equal(ai.nicheMatch?.activeNicheEvidence?.pillarSatisfiedBy, 'platform');
+    assert.equal(web.nicheMatch?.activeNicheEvidence?.pillarSatisfied, false);
+  });
   it('allows the relevant web candidate through despite an unclassified cluster', () => {
     const strategy = strategyFor('Web Development', ['web standards', 'full-stack framework', 'React']);
     const plan = profile('Web Development', ['web standards', 'full-stack framework', 'React', 'Remix']);

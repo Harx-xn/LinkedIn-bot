@@ -1,9 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NicheExpansionPlan } from './generationTypes';
-import { buildFocusedRetryQueries, MIN_EXECUTABLE_QUERIES_PER_NICHE, validatePlanQueries } from './trendOrchestrationService';
-import { buildFallbackExpansionPlan, buildProfileGroundedQueries, NicheExpansionService, sanitizeExpansionPlan, validateExpansionQuery } from './nicheExpansionService';
+import { buildFocusedRetryQueries, MAX_QUERIES_PER_ATTEMPT, MIN_EXECUTABLE_QUERIES_PER_NICHE, MIN_RETRY_EXECUTABLE_QUERIES, validatePlanQueries } from './trendOrchestrationService';
+import { buildFallbackExpansionPlan, buildNicheProfileFingerprintInput, buildProfileGroundedQueries, fingerprintNicheProfileInput, NicheExpansionService, repairExpansionQuery, sanitizeExpansionPlan, validateExpansionQuery } from './nicheExpansionService';
 import { prisma } from '../prismaClient';
+import { NICHE_ALIAS_GENERATION_VERSION, NICHE_PROFILE_SCHEMA_VERSION, NICHE_QUERY_GENERATION_VERSION } from '../config/topicDiversityConfig';
 
 function plan(overrides: Partial<NicheExpansionPlan> = {}): NicheExpansionPlan {
   return {
@@ -54,11 +55,14 @@ describe('generation retry query targeting', () => {
     const delegate = prisma.userNicheSearchPlan as any;
     const originalFind = delegate.findUnique;
     const originalUpsert = delegate.upsert;
+    const inputFingerprint = fingerprintNicheProfileInput(buildNicheProfileFingerprintInput('Accounting'));
     let generated = 0;
     delegate.findUnique = async () => ({
       niche: 'accounting', domain: cached.domain, confidence: cached.confidence,
       subtopics: cached.subtopics, queries: { items: cached.queries, profile: cached },
       exclusions: cached.exclusions, version: cached.version, generatedAt: new Date(),
+      schemaVersion: NICHE_PROFILE_SCHEMA_VERSION, queryGenerationVersion: NICHE_QUERY_GENERATION_VERSION,
+      aliasGenerationVersion: NICHE_ALIAS_GENERATION_VERSION, inputFingerprint,
     });
     delegate.upsert = async () => { throw new Error('cache should not be rewritten'); };
     try {
@@ -74,18 +78,63 @@ describe('generation retry query targeting', () => {
     }
   });
 
-  it('rotates profile queries without synthesizing generic suffixes', () => {
-    const queries = buildFocusedRetryQueries('Web Development', plan(), 2);
+  it('fingerprints every material niche input deterministically', () => {
+    const base = buildNicheProfileFingerprintInput('AI Automation');
+    const fingerprint = fingerprintNicheProfileInput(base);
+    assert.equal(fingerprint, fingerprintNicheProfileInput({ ...base, scopedMonitoredTopics: [...base.scopedMonitoredTopics].reverse() }));
+    for (const changed of [
+      { ...base, activePillarName: 'Agentic Automation' },
+      { ...base, activePillarTrendKeywords: ['workflow agents'] },
+      { ...base, scopedMonitoredTopics: ['UiPath'] },
+      { ...base, scopedAvoidedTopics: ['spam'] },
+      { ...base, aliasGenerationVersion: base.aliasGenerationVersion + 1 },
+      { ...base, queryGenerationVersion: base.queryGenerationVersion + 1 },
+    ]) assert.notEqual(fingerprintNicheProfileInput(changed), fingerprint);
+    assert.notEqual(fingerprintNicheProfileInput(buildNicheProfileFingerprintInput('Web Development')), fingerprint);
+  });
+
+  it('regenerates a legacy row without a fingerprint and persists the replacement', async () => {
+    const cached = { ...buildFallbackExpansionPlan('Accounting'), confidence: 0.9 };
+    const delegate = prisma.userNicheSearchPlan as any;
+    const originalFind = delegate.findUnique;
+    const originalUpsert = delegate.upsert;
+    let saved: any;
+    delegate.findUnique = async () => ({ niche: 'accounting', domain: cached.domain, confidence: cached.confidence, subtopics: cached.subtopics, queries: { items: cached.queries, profile: cached }, exclusions: cached.exclusions, version: cached.version, schemaVersion: 1, queryGenerationVersion: 1, aliasGenerationVersion: 1, inputFingerprint: null, generatedAt: new Date() });
+    delegate.upsert = async (args: any) => { saved = args; return args.create; };
+    try {
+      const service = new NicheExpansionService(null);
+      (service as any).generatePlanWithAI = async () => cached;
+      const result = await service.getOrCreatePlan('legacy-user', 'Accounting');
+      assert.ok(result.inputFingerprint);
+      assert.equal(saved.update.inputFingerprint, result.inputFingerprint);
+    } finally {
+      delegate.findUnique = originalFind;
+      delegate.upsert = originalUpsert;
+    }
+  });
+
+  it('executes all three remaining retry queries without requiring four', () => {
+    const initial = [...plan().queries, 'Web standards compliance study'];
+    const queries = buildFocusedRetryQueries('Web Development', plan({ queries: [...initial, 'Web standards policy report', 'Browser adoption survey', 'Frontend tooling benchmark'] }), 1);
 
     assert.equal(queries.length, 3);
-    assert.deepEqual(queries, plan().queries.slice(4, 7));
+    assert.deepEqual(queries, ['Web standards policy report', 'Browser adoption survey', 'Frontend tooling benchmark']);
     assert.ok(queries.every((query) => !/audience growth|practitioner perspectives|research and evidence/i.test(query)));
+  });
+
+  it('allows retry batches of one, two, or three executable queries', () => {
+    for (const remaining of [1, 2, 3]) {
+      const initial = [...plan().queries, 'Web standards compliance study'];
+      const queries = [...initial.slice(0, MAX_QUERIES_PER_ATTEMPT), ...Array.from({ length: remaining }, (_, i) => `Web platform unique report ${i}`)];
+      assert.equal(buildFocusedRetryQueries('Web Development', plan({ queries }), 1).length, remaining);
+    }
+    assert.equal(MIN_RETRY_EXECUTABLE_QUERIES, 1);
   });
 
   it('uses only sanitized pillar queries supplied by strategy expansion', () => {
     const queries = buildFocusedRetryQueries(
       'Web Development',
-      plan({ queries: ['Web Development', 'browser performance'] }),
+      plan({ queries: [...plan().queries, 'Web standards compliance study', 'browser performance release report'] }),
       1,
     );
 
@@ -130,6 +179,33 @@ describe('generation retry query targeting', () => {
     });
     assert.equal(validateExpansionQuery('Python developer packaging update', profile.niche, profile.subtopics, [], profile).valid, true);
     assert.equal(validateExpansionQuery('Python snake habitat news', profile.niche, profile.subtopics, [], profile).valid, false);
+  });
+
+  it('recognizes scoped AI Automation entities without leaking them into other niches', () => {
+    const aiProfile = {
+      ...buildFallbackExpansionPlan('AI Automation'), version: 4,
+      importantEntities: ['UiPath', 'Blue Prism', 'Automation Anywhere', 'Azure AI'],
+      entityAliases: ['RPA', 'robotic process automation'],
+      productsAndPlatforms: ['Microsoft Power Automate'], requiredContextTerms: ['AI Automation'],
+    };
+    for (const query of ['UiPath release update', 'Blue Prism implementation case study', 'Automation Anywhere benchmark study', 'RPA implementation challenges report', 'Azure AI workflow automation adoption report']) {
+      assert.equal(validateExpansionQuery(query, aiProfile.niche, aiProfile.subtopics, [], aiProfile).valid, true, query);
+      const web = buildFallbackExpansionPlan('Web Development');
+      assert.equal(validateExpansionQuery(query, web.niche, web.subtopics, [], web).valid, false, `leaked: ${query}`);
+    }
+  });
+
+  it('repairs queries while preserving the entity and discovery intent and avoiding used repairs', () => {
+    const profile = {
+      ...buildFallbackExpansionPlan('AI Automation'),
+      importantEntities: ['UiPath', 'Blue Prism'], requiredContextTerms: ['AI Automation'],
+    };
+    const repaired = repairExpansionQuery('UiPath release update business process', ['insufficient_niche_context'], profile, 1);
+    assert.ok(repaired?.includes('UiPath'));
+    assert.ok(repaired?.includes('release update'));
+    assert.equal(validateExpansionQuery(repaired!, profile.niche, profile.subtopics, [], profile).valid, true);
+    const rotated = repairExpansionQuery('UiPath release update business process', ['insufficient_niche_context'], profile, 1, [repaired!]);
+    assert.notEqual(rotated, repaired);
   });
 
   it('rejects near-duplicate queries across any niche', () => {

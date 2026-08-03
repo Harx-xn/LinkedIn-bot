@@ -16,6 +16,7 @@ import {
   fetchTrendsWithCache,
   getTrendCacheStats,
   resetTrendCacheStats,
+  type TrendFetchCachePolicy,
 } from './trendFetchCache';
 import {
   filterRedditFromSources,
@@ -32,7 +33,21 @@ import {
 } from './trendPreviewQuerySelection';
 import { mapWithConcurrency } from './concurrencyUtils';
 import { countUsableTrends } from './trendSelectionService';
-import { buildBatchDiscoveryPlan, buildNicheSourcePlan, resolveAutomaticProviderJobs } from './trendSourcePlanningService';
+import { buildBatchDiscoveryPlan, buildNicheSourcePlan, resolveAutomaticProviderJobs, type ValidatedExpansionQuery } from './trendSourcePlanningService';
+
+export function buildProviderRequestKey(params: { niche: string; source: string; providerQuery: string; freshness: string; intent: DiscoveryIntent }): string {
+  const normalize = (value: string) => value.toLowerCase().trim().replace(/\s+/g, ' ');
+  return [normalize(params.niche), normalize(params.source), normalize(params.providerQuery), normalize(params.freshness), params.intent].join('|');
+}
+
+export function calculateProviderResultLimit(remainingNeeded: number, executableJobs: number): number {
+  return Math.max(5, Math.min(10, Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, executableJobs))));
+}
+
+function batchIntentForQuery(index: number): DiscoveryIntent {
+  const intents: DiscoveryIntent[] = ['recent_development', 'industry_change', 'recurring_problem', 'audience_question', 'verified_solution', 'beginner_guidance', 'practical_implication'];
+  return intents[index % intents.length];
+}
 
 const OBVIOUS_LOW_VALUE = /\b(log[ -]?in|sign[ -]?in|privacy policy|terms of (use|service)|careers?|jobs?|vacanc(?:y|ies)|home page|homepage|contact us|about us)\b/i;
 
@@ -113,7 +128,19 @@ export type TrendFetchInput = {
   pipelineMode?: TrendPipelineMode;
   candidateTarget?: number;
   requestedCount?: number;
+  cachePolicy?: TrendFetchCachePolicy;
+  generationSearchRun?: GenerationSearchRun;
+  freshnessLayers?: GoogleFreshnessLayer[];
 };
+
+export interface GenerationSearchRun {
+  runId: string;
+  executedRequestKeys: Set<string>;
+  exhaustedQueries: Set<string>;
+  currentRunFetches: Map<string, Promise<Trend[]>>;
+  hardEligibleByNiche: Map<string, Trend[]>;
+  hardEligibleCountsByNiche: Map<string, number>;
+}
 
 export type TrendFetchMetrics = {
   sourceRequestCount: number;
@@ -125,6 +152,15 @@ export type TrendFetchMetrics = {
   queriesRejectedLowConfidence: number;
   queriesRejectedGeneric: number;
   queriesRejectedAmbiguous: number;
+  freshProviderRequests: number;
+  sameRunRequestsReused: number;
+  skippedExhaustedRequests: number;
+  freshResultsFetched: number;
+  cachedResultsUsed: number;
+  providerRequestsPlanned: number;
+  providerRequestsUnavailable: number;
+  rawProviderResults: number;
+  plausibleCandidates: number;
 };
 
 export const DEFAULT_TREND_SOURCES = ['automatic'] as const;
@@ -144,6 +180,7 @@ export class TrendsService {
     cacheMisses: 0,
     queriesGenerated: 0, queriesRejected: 0, queriesExecuted: 0,
     queriesRejectedLowConfidence: 0, queriesRejectedGeneric: 0, queriesRejectedAmbiguous: 0,
+    freshProviderRequests: 0, sameRunRequestsReused: 0, skippedExhaustedRequests: 0, freshResultsFetched: 0, cachedResultsUsed: 0, providerRequestsPlanned: 0, providerRequestsUnavailable: 0, rawProviderResults: 0, plausibleCandidates: 0,
   };
 
   constructor() {
@@ -183,7 +220,7 @@ export class TrendsService {
 
   private beginFetchMetrics(): void {
     resetTrendCacheStats();
-    this.lastFetchMetrics = { sourceRequestCount: 0, cacheHits: 0, cacheMisses: 0, queriesGenerated: 0, queriesRejected: 0, queriesExecuted: 0, queriesRejectedLowConfidence: 0, queriesRejectedGeneric: 0, queriesRejectedAmbiguous: 0 };
+    this.lastFetchMetrics = { sourceRequestCount: 0, cacheHits: 0, cacheMisses: 0, queriesGenerated: 0, queriesRejected: 0, queriesExecuted: 0, queriesRejectedLowConfidence: 0, queriesRejectedGeneric: 0, queriesRejectedAmbiguous: 0, freshProviderRequests: 0, sameRunRequestsReused: 0, skippedExhaustedRequests: 0, freshResultsFetched: 0, cachedResultsUsed: 0, providerRequestsPlanned: 0, providerRequestsUnavailable: 0, rawProviderResults: 0, plausibleCandidates: 0 };
     resetRedditSkipLog();
   }
 
@@ -248,21 +285,21 @@ export class TrendsService {
       if (!sources.some((s) => s.toLowerCase() === 'google')) return;
       if (!sourcesForPreviewQuery(entry.category).includes('google')) return;
       const perQueryLimit = Math.max(3, Math.ceil(candidateTarget / previewQueries.length));
-      const batch = await this.fetchGoogleWithLayers(entry.query, perQueryLimit, ['7d']);
+      const batch = await this.fetchGoogleWithLayers(entry.query, perQueryLimit, ['7d'], input.cachePolicy ?? 'use_cache');
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: entry.query })));
     });
 
     // Phase 2: Medium (tags only, one logical fetch)
     if (!hasEnough() && sources.some((s) => s.toLowerCase() === 'medium')) {
       const mediumLimit = Math.min(6, candidateTarget);
-      const batch = await this.fetchMediumTrends(niche, mediumLimit, mediumTags);
+      const batch = await this.fetchMediumTrends(niche, mediumLimit, mediumTags, input.cachePolicy ?? 'use_cache');
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: selectPreviewMediumQuery(previewQueries) ?? niche })));
     }
 
     // Phase 3: LinkedIn at most one query
     if (!hasEnough() && sources.some((s) => s.toLowerCase() === 'linkedin')) {
       const linkedInQuery = selectPreviewLinkedInQuery(previewQueries) ?? plan.niche;
-      const batch = await this.fetchGoogleSearchTrends(linkedInQuery, 'linkedin.com', 4);
+      const batch = await this.fetchGoogleSearchTrends(linkedInQuery, 'linkedin.com', 4, input.cachePolicy ?? 'use_cache');
       results.push(...batch.map((t) => ({ ...t, niche, searchQuery: linkedInQuery })));
     }
 
@@ -275,7 +312,7 @@ export class TrendsService {
         const batch = await this.fetchGoogleWithLayers(
           entry.query,
           Math.max(2, Math.ceil(shortfall / topQueries.length)),
-          ['30d'],
+          ['30d'], input.cachePolicy ?? 'use_cache',
         );
         results.push(...batch.map((t) => ({ ...t, niche, searchQuery: entry.query })));
       }
@@ -302,6 +339,13 @@ export class TrendsService {
   async fetchGenerationTrends(input: TrendFetchInput): Promise<Trend[]> {
     this.beginFetchMetrics();
     const cfg = getPipelineConfig('generation');
+    const cachePolicy = input.cachePolicy ?? 'refresh';
+    const generationSearchRun = input.generationSearchRun ?? {
+      runId: `generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      executedRequestKeys: new Set<string>(), exhaustedQueries: new Set<string>(), currentRunFetches: new Map<string, Promise<Trend[]>>(),
+      hardEligibleByNiche: new Map<string, Trend[]>(),
+      hardEligibleCountsByNiche: new Map<string, number>(),
+    };
     const {
       niche,
       queries = [niche],
@@ -310,10 +354,9 @@ export class TrendsService {
     } = input;
 
     void rawSources; // Deprecated user source choices never override automatic planning.
-    const candidateTarget = Math.min(
-      cfg.maxCandidatesPerNiche * 2,
-      this.resolveCandidateTarget(input, 'generation'),
-    );
+    const candidateTarget = input.candidateTarget ?? 20;
+    const previouslyEligible = generationSearchRun.hardEligibleByNiche.get(niche) ?? [];
+    const remainingNeeded = Math.max(0, candidateTarget - previouslyEligible.length);
 
     const plan: NicheExpansionPlan = expansionPlan ?? {
       niche, domain: niche, confidence: 0, subtopics: [niche], queries, exclusions: [], queryOrigin: 'legacy_fallback',
@@ -321,7 +364,7 @@ export class TrendsService {
     const planQueries = [...new Set(flattenExpansionQueries(plan).map((q) => q.trim()).filter(Boolean))];
     const minQueryConfidence = Math.max(0.01, Number(process.env.TREND_MIN_QUERY_CONFIDENCE ?? 0.7) || 0.7);
     this.lastFetchMetrics.queriesGenerated = planQueries.length;
-    const activeQueries: string[] = [];
+    const activeQueries: ValidatedExpansionQuery[] = [];
     const rejectedQueries: Array<{ query: string; reasons: string[]; confidence: number }> = [];
     for (const query of planQueries) {
       const validation = validateExpansionQuery(query, niche, plan.subtopics, [], plan);
@@ -333,40 +376,51 @@ export class TrendsService {
         if (validation.reasons.some((reason) => /ambiguous|niche_context/.test(reason))) this.lastFetchMetrics.queriesRejectedAmbiguous++;
         continue;
       }
-      activeQueries.push(query);
-      if (activeQueries.length >= cfg.maxQueriesPerNiche) break;
-      const intent = plan.searchIntents?.find((candidate) =>
+      const matchedIntent = plan.searchIntents?.find((candidate) =>
         candidate.terms.some((term) => query.toLowerCase().includes(term.toLowerCase())),
       );
+      const fallbackIntent = batchIntentForQuery(activeQueries.length);
+      activeQueries.push({
+        text: query,
+        niche,
+        queryOrigin: plan.queryOrigin ?? 'legacy_fallback',
+        searchIntent: (matchedIntent?.id as DiscoveryIntent | undefined) ?? fallbackIntent,
+        validationConfidence: validation.confidence,
+        profileFingerprint: plan.inputFingerprint ?? '',
+      });
+      if (activeQueries.length >= cfg.maxQueriesPerNiche) break;
       console.info('[trend-query] provider query', {
         niche,
         planVersion: plan.version ?? null,
         profileFingerprint: plan.inputFingerprint ?? null,
         queryOrigin: plan.queryOrigin ?? 'legacy_fallback',
-        searchIntent: intent?.id ?? 'profile_query',
+        searchIntent: matchedIntent?.id ?? fallbackIntent,
         query,
         validationConfidence: validation.confidence,
       });
     }
     this.lastFetchMetrics.queriesExecuted = activeQueries.length;
     if (rejectedQueries.length) console.info('[trend-query] rejected queries', { niche, rejectedQueries, counters: this.lastFetchMetrics });
-    if (activeQueries.length < 4) {
-      throw new Error(`insufficient_valid_queries:${niche}:${activeQueries.length}`);
+    if (activeQueries.length === 0) {
+      this.endFetchMetrics();
+      return [];
     }
 
     const domain = expansionPlan?.domain ?? niche;
     const mediumTags = expansionPlan ? getMediumTagsForPlan(expansionPlan) : [];
-    const layers = cfg.googleFreshnessLayers as GoogleFreshnessLayer[];
+    const layers = input.freshnessLayers ?? cfg.googleFreshnessLayers as GoogleFreshnessLayer[];
 
     const batchDiscoveryPlan = buildBatchDiscoveryPlan(input.requestedCount ?? input.limit ?? 7);
     const sourcePlan = buildNicheSourcePlan(plan);
-    const resolution = resolveAutomaticProviderJobs({ ...plan, sourcePlan }, batchDiscoveryPlan);
+    const resolution = resolveAutomaticProviderJobs({ ...plan, sourcePlan }, batchDiscoveryPlan, activeQueries);
     const validRequests = resolution.jobs.filter((request) => {
-      const validation = validateExpansionQuery(request.query, niche, plan.subtopics, [], plan);
+      const validation = validateExpansionQuery(request.originalQuery, niche, plan.subtopics, [], plan);
       if (validation.valid) return true;
       console.info('[trend-query] planned provider query rejected', { niche, intent: request.intent, source: request.source, query: request.query, reasons: validation.reasons });
       return false;
     });
+    this.lastFetchMetrics.providerRequestsPlanned = validRequests.length;
+    this.lastFetchMetrics.providerRequestsUnavailable = resolution.unavailableSources.length;
     for (const intent of resolution.intentsWithoutJobs) {
       console.warn('[trend-discovery] intent skipped', { niche, intent, reason: 'no_operational_compatible_source' });
     }
@@ -386,18 +440,34 @@ export class TrendsService {
       officialDomains: sourcePlan.officialDomains, researchSources: sourcePlan.researchSources,
       communitySources: sourcePlan.communitySources,
     });
-    const fetchJobs: Array<{ source: string; run: () => Promise<Trend[]> }> = [];
+    const fetchJobs: Array<{ source: string; requestKey: string; run: () => Promise<Trend[]> }> = [];
 
     for (const request of validRequests) {
-      const query = request.query;
+      const freshness = request.source.toLowerCase() === 'google' ? (layers[0] ?? 'fallback') : 'default';
+      const freshnessSuffix = freshness === '7d' ? ' when:7d' : freshness === '30d' ? ' when:30d' : '';
+      const query = request.source.toLowerCase() === 'google' ? `${request.providerQuery}${freshnessSuffix}`.trim() : request.providerQuery;
       const source = request.source;
-      console.info('[trend-query] provider request', { niche, intent: request.intent, source, query, queryConfidence: request.confidence, sourceRole: request.sourceRole });
-        fetchJobs.push({ source, run: () => this.fetchFromSource({
+      const requestKey = buildProviderRequestKey({ niche, source, providerQuery: query, freshness, intent: request.intent });
+      if (generationSearchRun.exhaustedQueries.has(requestKey)) {
+        this.lastFetchMetrics.skippedExhaustedRequests += 1;
+        console.info('[trend-query] provider job', { niche, attempt: input.freshnessLayers?.[0] ?? 'default', originalValidatedQuery: request.originalQuery, providerQuery: query, queryOrigin: request.queryOrigin, searchIntent: request.searchIntent, source, freshness, requestKey, executionDecision: 'exhausted' });
+        continue;
+      }
+      console.info('[trend-query] provider job', { niche, attempt: input.freshnessLayers?.[0] ?? 'default', originalValidatedQuery: request.originalQuery, providerQuery: query, queryOrigin: request.queryOrigin, searchIntent: request.searchIntent, source, freshness, requestKey, executionDecision: generationSearchRun.currentRunFetches.has(requestKey) ? 'inflight_reused' : 'executed' });
+        fetchJobs.push({ source, requestKey, run: () => {
+          const existing = generationSearchRun.currentRunFetches.get(requestKey);
+          if (existing) {
+            this.lastFetchMetrics.sameRunRequestsReused += 1;
+            return existing;
+          }
+          this.lastFetchMetrics.freshProviderRequests += 1;
+          generationSearchRun.executedRequestKeys.add(requestKey);
+          const pending = this.fetchFromSource({
           source,
           query,
           niche,
-          limit: Math.max(2, Math.ceil(candidateTarget / Math.max(1, validRequests.length))),
-          searchQuery: query,
+          limit: calculateProviderResultLimit(remainingNeeded, validRequests.length),
+          searchQuery: request.originalQuery,
           domain,
           mediumTags,
           googleLayers: layers,
@@ -405,8 +475,15 @@ export class TrendsService {
           discoveryIntent: request.intent,
           evidenceRole: request.sourceRole,
           sourcePlan,
-          profileFingerprint: plan.inputFingerprint ?? '',
-        }) });
+          profileFingerprint: request.profileFingerprint,
+          cachePolicy,
+        }).then((trends) => {
+          this.lastFetchMetrics.freshResultsFetched += trends.length;
+          return trends;
+        }).finally(() => generationSearchRun.exhaustedQueries.add(requestKey));
+          generationSearchRun.currentRunFetches.set(requestKey, pending);
+          return pending;
+        } });
     }
 
   
@@ -429,6 +506,14 @@ export class TrendsService {
       niche, automaticSourcePlan: true, providerJobsCreated: fetchJobs.length,
       providerJobsBySource, rawResultsBySource, totalRawFetched: results.length,
     });
+    console.info('[trend-discovery] cache policy summary', {
+      niche, mode: 'generation', cachePolicy, providerJobsCreated: fetchJobs.length,
+      cachedResultsUsed: this.lastFetchMetrics.cachedResultsUsed,
+      freshProviderRequests: this.lastFetchMetrics.freshProviderRequests,
+      sameRunRequestsReused: this.lastFetchMetrics.sameRunRequestsReused,
+      skippedExhaustedRequests: this.lastFetchMetrics.skippedExhaustedRequests,
+      freshResultsFetched: this.lastFetchMetrics.freshResultsFetched,
+    });
 
     const groundedResults = results.map((item) => {
       if (item.evidenceRole !== 'problem_discovery' && item.evidenceRole !== 'question_discovery') return item;
@@ -442,6 +527,10 @@ export class TrendsService {
     const deduped = this.dedupeTrends(groundedResults);
     const preQualificationTarget = candidateTarget * 2;
     const plausible = preselectPlausibleTrends(deduped, plan, preQualificationTarget);
+    this.lastFetchMetrics.rawProviderResults = results.length;
+    this.lastFetchMetrics.plausibleCandidates = plausible.eligibleCount;
+    const cumulativeEligible = this.dedupeTrends([...previouslyEligible, ...plausible.selected]);
+    generationSearchRun.hardEligibleByNiche.set(niche, cumulativeEligible);
     console.info('[trend-discovery] niche pool prepared', {
       niche,
       providerResults: results.length,
@@ -450,9 +539,20 @@ export class TrendsService {
       plausibleCandidatesBeforeCap: plausible.eligibleCount,
       candidatesAfterCap: plausible.selected.length,
       fullyQualified: null,
+      cumulativeRaw: previouslyEligible.length + results.length,
+      cumulativeHardEligible: cumulativeEligible.length,
+      targetHardEligible: candidateTarget,
+      remainingNeeded: Math.max(0, candidateTarget - cumulativeEligible.length),
+      newRawThisAttempt: results.length,
+      newHardEligibleThisAttempt: cumulativeEligible.length - previouslyEligible.length,
+      providerJobsPlanned: validRequests.length,
+      providerJobsExecuted: fetchJobs.length,
+      resultLimitPerJob: calculateProviderResultLimit(remainingNeeded, validRequests.length),
+      searchSpaceExhausted: validRequests.length === 0,
+      stopReason: cumulativeEligible.length >= candidateTarget ? 'target_hard_eligible_reached' : validRequests.length === 0 ? 'no_provider_jobs_remaining' : null,
     });
     this.endFetchMetrics();
-    return plausible.selected;
+    return cumulativeEligible;
   }
 
   private async fetchFromSource(params: {
@@ -469,6 +569,7 @@ export class TrendsService {
     evidenceRole?: EvidenceRole;
     sourcePlan?: ReturnType<typeof buildNicheSourcePlan>;
     profileFingerprint?: string;
+    cachePolicy: TrendFetchCachePolicy;
   }): Promise<Trend[]> {
     const { source, query, niche, limit, searchQuery, domain, mediumTags, googleLayers } = params;
     let items: Trend[] = [];
@@ -478,22 +579,22 @@ export class TrendsService {
         items = await this.fetchRedditTrends(domain, niche, query, limit, params.sourcePlan?.relevantSubreddits);
         break;
       case 'medium':
-        items = await this.fetchMediumTrends(niche, limit, mediumTags);
+        items = await this.fetchMediumTrends(niche, limit, mediumTags, params.cachePolicy);
         break;
       case 'google':
-        items = await this.fetchGoogleWithLayers(query, limit, googleLayers);
+        items = await this.fetchGoogleSearchTrends(query, undefined, limit, params.cachePolicy);
         break;
       case 'web':
         items = await this.fetchWebSearchTrends(query, limit);
         break;
       case 'official':
-        items = await this.fetchGoogleSearchTrends(query, undefined, limit);
+        items = await this.fetchGoogleSearchTrends(query, undefined, limit, params.cachePolicy);
         break;
       case 'linkedin':
-        items = await this.fetchGoogleSearchTrends(query, 'linkedin.com', limit);
+        items = await this.fetchGoogleSearchTrends(query, undefined, limit, params.cachePolicy);
         break;
       case 'quora':
-        items = await this.fetchGoogleSearchTrends(query, 'quora.com', limit);
+        items = await this.fetchGoogleSearchTrends(query, undefined, limit, params.cachePolicy);
         break;
       default:
         items = [];
@@ -631,7 +732,7 @@ export class TrendsService {
     return tag;
   }
 
-  async fetchMediumTrends(niche: string, limit: number = 5, mediumTags: string[] = []): Promise<Trend[]> {
+  async fetchMediumTrends(niche: string, limit: number = 5, mediumTags: string[] = [], cachePolicy: TrendFetchCachePolicy = 'use_cache'): Promise<Trend[]> {
     const tags = mediumTags.length
       ? mediumTags
       : [this.normalizeMediumTag(niche)].filter((t): t is string => !!t);
@@ -657,7 +758,7 @@ export class TrendsService {
             publisher: 'Medium',
             discoverySource: 'Medium',
           }));
-        });
+        }, cachePolicy);
         results.push(...batch);
       } catch (error) {
         console.warn('[trends] Medium fetch failed', {
@@ -673,6 +774,7 @@ export class TrendsService {
     query: string,
     limit: number = 5,
     layers: GoogleFreshnessLayer[] = ['7d', '30d', 'fallback'],
+    cachePolicy: TrendFetchCachePolicy = 'use_cache',
   ): Promise<Trend[]> {
     const merged: Trend[] = [];
 
@@ -684,9 +786,8 @@ export class TrendsService {
         freshness: layer,
       });
       const batch = await fetchTrendsWithCache(cacheKey, 'google', async () => {
-        this.trackSourceRequest();
-        return this.fetchGoogleSearchTrends(`${query}${suffix}`.trim(), undefined, limit);
-      });
+        return this.fetchGoogleSearchTrends(`${query}${suffix}`.trim(), undefined, limit, 'bypass');
+      }, cachePolicy);
       merged.push(...batch);
       const deduped = this.dedupeTrends(merged);
       if (deduped.length >= limit) return deduped.slice(0, limit);
@@ -699,7 +800,7 @@ export class TrendsService {
     return this.fetchGoogleWithLayers(query, limit, ['7d', '30d', 'fallback']);
   }
 
-  async fetchGoogleSearchTrends(niche: string, site?: string, limit: number = 5): Promise<Trend[]> {
+  async fetchGoogleSearchTrends(niche: string, site?: string, limit: number = 5, cachePolicy: TrendFetchCachePolicy = 'use_cache'): Promise<Trend[]> {
     try {
       const query = site ? `${niche} site:${site}` : niche;
       const cacheKey = buildTrendCacheKey({
@@ -728,7 +829,7 @@ export class TrendsService {
             rawTitle: parsed.rawTitle,
           };
         });
-      });
+      }, cachePolicy);
     } catch (error) {
       console.warn('[trends] Google News fetch failed', {
         query: niche.slice(0, 80),

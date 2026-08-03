@@ -29,6 +29,24 @@ function claimSimilarity(a: string, b: string): number {
   return jaccardSimilarity(normalizeTrendTitle(a), normalizeTrendTitle(b));
 }
 
+const BROAD_CLUSTERS = new Set(['ai_automation', 'web_development', 'unity_game_development', 'updates', 'other', 'unclassified']);
+
+function dedupeHistory(history: TopicHistoryRow[]): TopicHistoryRow[] {
+  const byTopic = new Map<string, TopicHistoryRow>();
+  for (const row of history) {
+    const key = `${normalizeTrendTitle(row.normalizedTopic)}|${normalizeTrendTitle(row.coreClaim ?? '')}`;
+    const current = byTopic.get(key);
+    if (!current || row.generatedAt > current.generatedAt || (STATUS_WEIGHT[row.status] ?? 0) > (STATUS_WEIGHT[current.status] ?? 0)) byTopic.set(key, row);
+  }
+  return [...byTopic.values()];
+}
+
+function entityOverlap(entities: string[], row: TopicHistoryRow): number {
+  if (!entities.length) return 0;
+  const historyText = normalizeTrendTitle(`${row.normalizedTopic} ${row.coreClaim ?? ''}`);
+  return entities.filter((entity) => historyText.includes(normalizeTrendTitle(entity))).length / entities.length;
+}
+
 export function evaluateTopicNovelty(
   fingerprint: TopicFingerprint,
   history: TopicHistoryRow[],
@@ -38,7 +56,7 @@ export function evaluateTopicNovelty(
   let score = 100;
   let closestMatch: NoveltyEvaluation['closestMatch'];
 
-  for (const row of history) {
+  for (const row of dedupeHistory(history)) {
     const ageDays = daysBetween(now, row.generatedAt);
     const weight = STATUS_WEIGHT[row.status] ?? 0.5;
 
@@ -49,11 +67,16 @@ export function evaluateTopicNovelty(
     const mechSim = row.coreClaim
       ? mechanismOverlap(fingerprint.mechanisms, row.coreClaim.split(/\s+/).filter((w) => w.length > 3))
       : 0;
+    const entitySim = entityOverlap(fingerprint.entities, row);
+    const sameCluster = fingerprint.topicCluster === row.topicCluster;
+    const specificCluster = sameCluster && !BROAD_CLUSTERS.has(fingerprint.topicCluster.toLowerCase());
+    const meaningfulRelationship = topicSim >= 0.65 || claimSim >= 0.60 || mechSim >= 0.65
+      || (specificCluster && claimSim >= 0.45) || entitySim >= 0.5;
 
     if (
       topicSim >= 0.98
       && ageDays <= HISTORY_WINDOWS.exactTopicDays
-      && ['PUBLISHED', 'SCHEDULED', 'APPROVED'].includes(row.status)
+      && weight >= 0.5
     ) {
       return {
         allowed: false,
@@ -89,17 +112,22 @@ export function evaluateTopicNovelty(
     }
 
     if (
-      fingerprint.topicCluster === row.topicCluster
+      specificCluster
       && ageDays <= HISTORY_WINDOWS.clusterCooldownDays
+      && (claimSim >= 0.45 || mechSim >= 0.45 || entitySim >= 0.5 || topicSim >= 0.55)
     ) {
+      const noveltyBefore = score;
       const penalty = Math.round(22 * weight);
       score -= penalty;
       reasons.push(`cluster_cooldown:${row.topicCluster}`);
+      console.info('[trend-history] penalty applied', { candidateTopic: fingerprint.normalizedTopic, candidateCoreClaim: fingerprint.coreClaim, candidateCluster: fingerprint.topicCluster, matchedHistoryTopic: row.normalizedTopic, matchedHistoryCoreClaim: row.coreClaim, matchedHistoryCluster: row.topicCluster, topicSimilarity: topicSim, coreClaimSimilarity: claimSim, mechanismOverlap: mechSim, entityOverlap: entitySim, penaltiesApplied: [`cluster_cooldown:${penalty}`], noveltyBefore, noveltyAfter: score, rejectionReason: score < 35 ? 'cluster_cooldown' : null });
     }
 
-    if (row.status === 'GENERATED' && ageDays <= HISTORY_WINDOWS.generatedDraftDays) {
+    if (row.status === 'GENERATED' && ageDays <= HISTORY_WINDOWS.generatedDraftDays && meaningfulRelationship) {
+      const noveltyBefore = score;
       score -= Math.round(12 * weight);
       reasons.push('recent_generated_draft');
+      console.info('[trend-history] penalty applied', { candidateTopic: fingerprint.normalizedTopic, candidateCoreClaim: fingerprint.coreClaim, candidateCluster: fingerprint.topicCluster, matchedHistoryTopic: row.normalizedTopic, matchedHistoryCoreClaim: row.coreClaim, matchedHistoryCluster: row.topicCluster, topicSimilarity: topicSim, coreClaimSimilarity: claimSim, mechanismOverlap: mechSim, entityOverlap: entitySim, penaltiesApplied: ['recent_generated_draft'], noveltyBefore, noveltyAfter: score, rejectionReason: score < 35 ? 'recent_generated_draft' : null });
     }
 
     const combinedSim = Math.max(topicSim, claimSim, mechSim);

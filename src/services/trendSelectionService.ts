@@ -270,6 +270,7 @@ function rankGenerationCandidate(
       strategyScore: strategyScore?.score,
       strategyReasons: strategyScore?.reasons,
       strategyRiskFlags: strategyScore?.riskFlags,
+      qualificationConfidence: strategyScore?.nicheMatch?.confidence,
     },
     fingerprint,
     relevanceScore: relevance,
@@ -313,6 +314,7 @@ function rankPreviewCandidate(
       strategyScore: strategyScore?.score,
       strategyReasons: strategyScore?.reasons,
       strategyRiskFlags: strategyScore?.riskFlags,
+      qualificationConfidence: strategyScore?.nicheMatch?.confidence,
     },
     fingerprint,
     relevanceScore: relevance,
@@ -427,7 +429,7 @@ export async function processTrendCandidates(params: {
     }
   }
 
-  const preRanked = candidates
+  const preRankedCandidates = candidates
     .map((t) => ({
       trend: t,
       preScore:
@@ -435,11 +437,14 @@ export async function processTrendCandidates(params: {
         + sourceQualityScore(t)
         + recencyScore(t.publishedAt),
     }))
-    .sort((a, b) => b.preScore - a.preScore)
-    .slice(0, cfg.maxFingerprintCandidates || cfg.maxCandidatesPerNiche)
-    .map((x) => x.trend);
+    .sort((a, b) => b.preScore - a.preScore);
+  const preRanked = (pipelineMode === 'preview'
+    ? preRankedCandidates.slice(0, cfg.maxCandidatesPerNiche)
+    : preRankedCandidates).map((x) => x.trend);
 
   let openAiCalls = 0;
+  let strategyAcceptedCount = preRanked.length;
+  let fingerprintedCount = 0;
   const ranked: RankedTrendCandidate[] = [];
   let historyMatchesRemoved = 0;
   let generationHistory: TopicHistoryRow[] = [];
@@ -454,8 +459,7 @@ export async function processTrendCandidates(params: {
       ? await loadRecentTopicHistory(params.userId)
       : []);
     generationHistory = history;
-    const fingerprintLimit = cfg.maxFingerprintCandidates;
-    const toFingerprint = preRanked.slice(0, fingerprintLimit);
+    const toFingerprint = [...preRanked];
     if (strategy) {
       const beforeStrategy = toFingerprint.length;
       const strategyAccepted = toFingerprint.filter((candidate) => {
@@ -492,6 +496,13 @@ export async function processTrendCandidates(params: {
             matchedForeignPillars: score.nicheMatch?.matchedForeignPillars ?? [],
             matchedEntity: score.nicheMatch?.matchedEntity ?? null,
             matchedAlias: score.nicheMatch?.matchedAlias ?? null,
+            pillarSatisfied: score.nicheMatch?.activeNicheEvidence?.pillarSatisfied ?? false,
+            pillarSatisfiedBy: score.nicheMatch?.activeNicheEvidence?.pillarSatisfiedBy ?? null,
+            matchedEntities: score.nicheMatch?.activeNicheEvidence?.matchedEntities ?? [],
+            matchedAliases: score.nicheMatch?.activeNicheEvidence?.matchedAliases ?? [],
+            matchedPlatforms: score.nicheMatch?.activeNicheEvidence?.matchedPlatforms ?? [],
+            evidenceStrength: score.nicheMatch?.activeNicheEvidence?.strength ?? 0,
+            ambiguityResolutionReason: score.nicheMatch?.activeNicheEvidence?.ambiguityResolutionReason ?? null,
             finalRelevanceScore: score.score,
             decision: 'rejected',
           });
@@ -512,7 +523,10 @@ export async function processTrendCandidates(params: {
       rejectedByStrategy += beforeStrategy - strategyAccepted.length;
       toFingerprint.length = 0;
       toFingerprint.push(...strategyAccepted);
+      strategyAcceptedCount = strategyAccepted.length;
     }
+
+    fingerprintedCount = toFingerprint.length;
 
     if (cfg.useAiFingerprints) {
       await params.fingerprintService.fingerprintTrends(
@@ -573,6 +587,7 @@ export async function processTrendCandidates(params: {
           matchedEntity: strategy ? scoreTrendForStrategy(trend, strategy, { profile: params.plan }).nicheMatch?.matchedEntity ?? null : null,
           matchedAlias: strategy ? scoreTrendForStrategy(trend, strategy, { profile: params.plan }).nicheMatch?.matchedAlias ?? null : null,
           directNicheEvidence: strategy ? scoreTrendForStrategy(trend, strategy, { profile: params.plan }).breakdown.directNicheEvidence : 0,
+          activeNicheEvidence: strategy ? scoreTrendForStrategy(trend, strategy, { profile: params.plan }).nicheMatch?.activeNicheEvidence : undefined,
           finalRelevanceScore: item.relevanceScore,
           decision: item.novelty.allowed ? 'qualified' : 'rejected',
         });
@@ -621,7 +636,10 @@ export async function processTrendCandidates(params: {
       rejectedByStrategy,
       strategyRejectionFlags,
       acceptedByPath: acceptancePathCounts,
-      fingerprinted: openAiCalls,
+      strategyAccepted: strategyAcceptedCount,
+      fingerprinted: fingerprintedCount,
+      historyApproved: ranked.filter((item) => item.novelty.allowed).length,
+      noveltyApproved: ranked.filter((item) => item.novelty.allowed).length,
       ranked: ranked.length,
       selected: selected.length,
     });
@@ -637,7 +655,10 @@ export async function processTrendCandidates(params: {
       exactDuplicatesRemoved,
       nearDuplicatesRemoved,
       historyMatchesRemoved,
-      fingerprinted: openAiCalls,
+      fingerprinted: fingerprintedCount,
+      strategyAccepted: strategyAcceptedCount,
+      historyApproved: ranked.filter((item) => item.novelty.allowed).length,
+      noveltyApproved: ranked.filter((item) => item.novelty.allowed).length,
       selected: selected.length,
       evergreenFilled: 0,
       openAiCalls,

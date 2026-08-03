@@ -2,7 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NicheExpansionPlan } from './generationTypes';
 import { buildBatchDiscoveryPlan, buildNicheSourcePlan, buildSourceQueryRequests, evidenceRoleForSource, parseTrendSourceConfig, resolveAutomaticProviderJobs, resolveSourceAvailability } from './trendSourcePlanningService';
-import { TrendsService, parseTrendSources } from './trendsService';
+import { TrendsService, buildProviderRequestKey, calculateProviderResultLimit, parseTrendSources } from './trendsService';
+
+const active = (niche: string, text: string, searchIntent: any = 'recent_development') => [{
+  text, niche, queryOrigin: 'profile', searchIntent, validationConfidence: 0.91, profileFingerprint: 'fp-1',
+}];
 
 function profile(niche: string, entity: string, category: string, problem: string, domain: string): NicheExpansionPlan {
   return {
@@ -20,14 +24,10 @@ function profile(niche: string, entity: string, category: string, problem: strin
 describe('intent-based source planning', () => {
   it('routes discovery intents to source-specific providers and wording', () => {
     const plan = profile('Pet Care', 'Veterinary Association', 'Veterinary nutrition', 'unsafe feeding advice', 'vet.example.org');
-    const requests = buildSourceQueryRequests(plan, buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] });
+    const requests = buildSourceQueryRequests(plan, buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] }, active(plan.niche, 'pet nutrition safety update'));
     assert.ok(requests.some((item) => item.intent === 'recent_development' && item.source === 'google'));
     assert.ok(requests.some((item) => item.intent === 'recent_development' && item.source === 'official'));
-    assert.ok(requests.some((item) => item.intent === 'recurring_problem' && item.source === 'reddit'));
-    assert.ok(requests.some((item) => item.intent === 'verified_solution' && item.source === 'official'));
-    assert.ok(requests.some((item) => item.intent === 'beginner_guidance' && item.source === 'quora'));
-    const byIntent = new Map(requests.map((item) => [`${item.intent}:${item.source}`, item.query]));
-    assert.notEqual(byIntent.get('recent_development:google'), byIntent.get('recurring_problem:reddit'));
+    assert.ok(requests.every((item) => item.providerQuery.includes('pet nutrition safety update')));
   });
 
   it('builds distinct domain-neutral source plans across required niches', () => {
@@ -41,7 +41,7 @@ describe('intent-based source planning', () => {
     ];
     const fingerprints = inputs.map(([niche, entity, category, problem, domain]) => {
       const sourcePlan = buildNicheSourcePlan(profile(niche, entity, category, problem, domain));
-      const requests = buildSourceQueryRequests(profile(niche, entity, category, problem, domain), buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] });
+      const requests = buildSourceQueryRequests(profile(niche, entity, category, problem, domain), buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] }, active(niche, `${niche} current update`));
       assert.ok(sourcePlan.officialEntities.includes(entity));
       assert.ok(sourcePlan.officialDomains.includes(domain));
       assert.ok(sourcePlan.communitySources.length > 0);
@@ -65,13 +65,47 @@ describe('intent-based source planning', () => {
 
   it('falls back to operational providers when web and Reddit are unavailable', () => {
     const plan = profile('AI Automation', 'Automation Guild', 'Workflow automation', 'workflow failures', 'automation.example');
-    const resolution = resolveAutomaticProviderJobs(plan, buildBatchDiscoveryPlan(7), {});
+    const resolution = resolveAutomaticProviderJobs(plan, buildBatchDiscoveryPlan(7), active(plan.niche, 'workflow automation failures', 'practical_implication'), {});
     assert.deepEqual(resolveSourceAvailability(plan, {}).operationalSources.sort(), ['google', 'linkedin', 'medium', 'official', 'quora'].sort());
     assert.ok(resolution.unavailableSources.some((item) => item.source === 'web' && item.reason === 'web_search_not_configured'));
     assert.ok(resolution.unavailableSources.some((item) => item.source === 'reddit' && item.reason === 'reddit_oauth_not_configured'));
-    for (const source of ['google', 'medium', 'linkedin', 'quora']) assert.ok(resolution.jobs.some((job) => job.source === source), source);
+    assert.ok(resolution.jobs.some((job) => job.source === 'linkedin'));
     assert.ok(resolution.jobs.length > 1);
     assert.equal(resolution.intentsWithoutJobs.length, 0);
+  });
+
+  it('uses a rotated retry query as the provider subject and never an intent template', () => {
+    const plan = profile('Pet Care', 'Veterinary Association', 'Pet nutrition', 'unsafe diets', 'pets.example');
+    const rotated = 'senior dog protein guidance 2026';
+    const jobs = resolveAutomaticProviderJobs(plan, buildBatchDiscoveryPlan(7), active(plan.niche, rotated, 'official_update'), {}).jobs;
+    assert.ok(jobs.length > 0);
+    assert.ok(jobs.every((job) => job.originalQuery === rotated && job.providerQuery.includes(rotated)));
+    assert.ok(jobs.every((job) => !job.providerQuery.includes('official guidance update')));
+  });
+
+  it('appends official, Quora, and LinkedIn restrictions without replacing the query', () => {
+    const plan = profile('AI Automation', 'Automation Guild', 'Workflow automation', 'workflow failures', 'automation.example');
+    const query = 'agent workflow recovery patterns';
+    const official = buildSourceQueryRequests(plan, buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] }, active(plan.niche, query, 'official_update')).find((job) => job.source === 'official');
+    const community = buildSourceQueryRequests(plan, buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] }, active(plan.niche, query, 'practical_implication'));
+    assert.equal(official?.providerQuery, `${query} site:automation.example`);
+    assert.equal(community.find((job) => job.source === 'linkedin')?.providerQuery, `${query} site:linkedin.com`);
+    const quora = buildSourceQueryRequests(plan, buildBatchDiscoveryPlan(7), { mode: 'automatic', enabled: [] }, active(plan.niche, query, 'audience_question')).find((job) => job.source === 'quora');
+    assert.equal(quora?.providerQuery, `${query} site:quora.com`);
+  });
+
+  it('keys exhaustion from the exact executed provider query', () => {
+    const common = { niche: 'Pet Care', source: 'google', freshness: '30d', intent: 'recent_development' as const };
+    const first = buildProviderRequestKey({ ...common, providerQuery: 'senior dog nutrition when:30d' });
+    const retry = buildProviderRequestKey({ ...common, providerQuery: 'canine protein research when:30d' });
+    assert.notEqual(first, retry);
+    assert.equal(first, buildProviderRequestKey({ ...common, providerQuery: '  Senior Dog Nutrition   when:30d ' }));
+  });
+
+  it('raises provider result limits as the deficit is spread across fewer jobs', () => {
+    assert.equal(calculateProviderResultLimit(20, 10), 5);
+    assert.equal(calculateProviderResultLimit(20, 3), 7);
+    assert.equal(calculateProviderResultLimit(20, 1), 10);
   });
 
   it('accumulates results from multiple automatic providers', async () => {
@@ -85,8 +119,7 @@ describe('intent-based source planning', () => {
     const results = await service.fetchGenerationTrends({ niche: plan.niche, expansionPlan: plan, sources: ['google'], requestedCount: 7 });
     assert.ok(new Set(results.map((item) => item.source)).size > 1);
     assert.ok(results.some((item) => item.source === 'google'));
-    assert.ok(results.some((item) => item.source === 'medium'));
     assert.ok(results.some((item) => item.source === 'quora'));
-    assert.ok(results.some((item) => item.source === 'linkedin'));
+    assert.ok(results.some((item) => item.source === 'official'));
   });
 });

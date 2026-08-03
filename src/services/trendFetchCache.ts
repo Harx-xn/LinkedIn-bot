@@ -25,6 +25,8 @@ export type TrendCacheStats = {
 
 const stats: TrendCacheStats = { hits: 0, misses: 0 };
 
+export type TrendFetchCachePolicy = 'use_cache' | 'refresh' | 'bypass';
+
 export function resetTrendCacheStats(): void {
   stats.hits = 0;
   stats.misses = 0;
@@ -86,7 +88,20 @@ export async function fetchTrendsWithCache(
   key: string,
   source: string,
   fetcher: () => Promise<Trend[]>,
+  cachePolicy: TrendFetchCachePolicy = 'use_cache',
 ): Promise<Trend[]> {
+  if (cachePolicy === 'bypass') {
+    stats.misses += 1;
+    return fetcher();
+  }
+  if (cachePolicy === 'refresh') {
+    stats.misses += 1;
+    const trends = await fetcher();
+    const ttl = ttlForSource(source);
+    const now = Date.now();
+    cache.set(key, { trends, expiresAt: now + ttl, staleAt: now + Math.floor(ttl * 0.75) });
+    return trends;
+  }
   const fresh = getFreshEntry(key);
   if (fresh) return fresh;
 

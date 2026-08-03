@@ -1,4 +1,7 @@
 export const NICHE_EXPANSION_PLAN_VERSION = 4;
+export const NICHE_PROFILE_SCHEMA_VERSION = 1;
+export const NICHE_QUERY_GENERATION_VERSION = 1;
+export const NICHE_ALIAS_GENERATION_VERSION = 1;
 
 export const TOPIC_DIVERSITY_CONFIG = {
   maxExpansionQueries: 8,
