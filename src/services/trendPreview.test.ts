@@ -55,9 +55,9 @@ describe('trend preview quality', () => {
     assert.ok(legacy.newsQueries.length + legacy.marketQueries.length >= 2);
   });
 
-  it('empty sources JSON falls back to Google News', () => {
-    assert.deepEqual(parseTrendSources('[]'), ['google']);
-    assert.deepEqual(parseTrendSources(null), ['google']);
+  it('empty sources JSON falls back to automatic source planning', () => {
+    assert.deepEqual(parseTrendSources('[]'), ['automatic']);
+    assert.deepEqual(parseTrendSources(null), ['automatic']);
   });
 
   it('flattenExpansionQueries supports bucketed plans', () => {

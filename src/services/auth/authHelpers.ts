@@ -19,6 +19,8 @@ const USER_SELECT = {
   regionId: true,
   trialEndsAt: true,
   isBillingExempt: true,
+  hasCompletedProfileOnboarding: true,
+  botConfigs: { select: { description: true, niches: true } },
   region: {
     select: {
       id: true,
@@ -37,6 +39,7 @@ export type AuthUserResponse = {
   regionId: string | null;
   trialEndsAt?: Date | null;
   isBillingExempt: boolean;
+  hasCompletedProfileOnboarding: boolean;
   effectiveAccess: {
     hasAccess: boolean;
     unlimited: boolean;
@@ -76,7 +79,13 @@ export function buildAuthUserResponse(user: {
   trialEndsAt?: Date | null;
   isBillingExempt: boolean;
   region: AuthUserResponse['region'];
+  hasCompletedProfileOnboarding: boolean;
+  botConfigs?: { description?: string | null; niches?: string | null } | null;
 }): AuthUserResponse {
+  const meaningfulProfile = Boolean(
+    user.botConfigs && (user.botConfigs.description?.trim().length ?? 0) >= 20 &&
+    user.botConfigs.niches && user.botConfigs.niches !== '[]',
+  );
   return {
     id: user.id,
     email: user.email,
@@ -85,6 +94,7 @@ export function buildAuthUserResponse(user: {
     regionId: user.regionId,
     trialEndsAt: user.trialEndsAt ?? null,
     isBillingExempt: user.isBillingExempt,
+    hasCompletedProfileOnboarding: user.hasCompletedProfileOnboarding || meaningfulProfile,
     effectiveAccess: user.isBillingExempt
       ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
       : {

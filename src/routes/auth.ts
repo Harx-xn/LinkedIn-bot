@@ -124,6 +124,7 @@ router.post('/login', async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { email },
     include: {
+      botConfigs: { select: { description: true, niches: true } },
       region: {
         select: {
           id: true,
@@ -158,6 +159,9 @@ router.post('/login', async (req, res) => {
       username: user.username,
       role: user.role,
       isBillingExempt: user.isBillingExempt,
+      hasCompletedProfileOnboarding:
+        user.hasCompletedProfileOnboarding ||
+        Boolean(user.botConfigs && (user.botConfigs.description?.trim().length ?? 0) >= 20 && user.botConfigs.niches !== '[]'),
       effectiveAccess: user.isBillingExempt
         ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
         : { hasAccess: user.role !== 'USER', unlimited: user.role !== 'USER', billingExempt: false, accessSource: user.role !== 'USER' ? 'PRIVILEGED_ROLE' : 'STANDARD' },

@@ -345,6 +345,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
   if (typeof req.body.hashtags === 'string') updateData.hashtags = req.body.hashtags;
   if (typeof req.body.scheduledAt === 'string') updateData.scheduledAt = new Date(req.body.scheduledAt);
   if (req.body.scheduledAt === null) updateData.scheduledAt = null;
+  if (req.body.mediaUrl === null) updateData.mediaUrl = null;
 
   const updated = await prisma.post.update({
     where: { id: post.id },

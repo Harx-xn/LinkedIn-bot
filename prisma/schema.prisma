@@ -107,6 +107,7 @@ model User {
   isActive        Boolean  @default(true)
   themePreference String   @default("LIGHT")
   hasCompletedOnboardingTour Boolean @default(false)
+  hasCompletedProfileOnboarding Boolean @default(false)
 
   // Trial tracking — trial starts only after Stripe Checkout + webhook confirmation.
   trialStartedAt      DateTime?

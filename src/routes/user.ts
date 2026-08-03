@@ -3,6 +3,7 @@ import { prisma } from "../prismaClient";
 import { requireAuth } from "../middleware/auth";
 import { getEntitlement, publishedThisMonth } from "../services/entitlementService";
 import { isLinkedInAccountUsable } from "../services/linkedinService";
+import { hasMeaningfulGhostwriterProfile } from "../services/profileOnboardingService";
 
 type ThemePreference = "LIGHT" | "DARK";
 
@@ -34,7 +35,9 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       role: true,
       themePreference: true,
       hasCompletedOnboardingTour: true,
+      hasCompletedProfileOnboarding: true,
       isBillingExempt: true,
+      botConfigs: { select: { description: true, niches: true } },
 
       regionId: true,
       region: {
@@ -111,6 +114,8 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     },
     themePreference: user.themePreference || "LIGHT",
     hasCompletedOnboardingTour: user.hasCompletedOnboardingTour,
+    hasCompletedProfileOnboarding:
+      user.hasCompletedProfileOnboarding || hasMeaningfulGhostwriterProfile(user.botConfigs),
 
     regionId: user.regionId,
     region: user.region
