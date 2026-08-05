@@ -25,6 +25,7 @@ import entitlementsRouter from './routes/entitlements';
 import supportRouter from './routes/support';
 import dashboardRouter from './routes/dashboard';
 import onboardingRouter from './routes/onboarding';
+import carouselsRouter from './routes/carousels';
 import { handleStripeWebhook } from './routes/stripeWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
@@ -58,7 +59,7 @@ app.use(
 );
 
 
-app.use(express.json());
+app.use(express.json({ limit: '8mb' }));
 // Lightweight request logger.
 app.use((req, _res, next) => {
   console.log(`[REQ] ${req.method} ${req.path}`);
@@ -93,6 +94,7 @@ app.use('/api/entitlements', entitlementsRouter);
 app.use('/api/support', supportRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/onboarding', onboardingRouter);
+app.use('/api/carousels', carouselsRouter);
 // Backwards-compatible aliases (pre-/api mounts)
 app.use('/admin', adminRoutes);
 app.use('/regional-admin', regionRoutes);
