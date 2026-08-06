@@ -43,6 +43,7 @@ router.get('/plans', async (req, res) => {
       currency: true,
       billingCycle: true,
       fullDashboardUnlock: true,
+      convertPostToCarouselEnabled: true,
       maxRewritesPerPost: true,
       dailyPostLimit: true,
       dailyBatchGenerationLimit: true,
@@ -52,6 +53,8 @@ router.get('/plans', async (req, res) => {
       monthlyBatchGenerationLimit: true,
       monthlyImageGenerationLimit: true,
       monthlyManualAiOperationLimit: true,
+      carouselSaveLimit: true,
+      carouselAiGenerationLimit: true,
     },
     orderBy: {
       price: 'asc',

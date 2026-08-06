@@ -373,8 +373,25 @@ export async function postToLinkedInFromPostId(
     isReshareDisabledByAuthor: false
   };
 
+  if (post.attachmentType === 'CAROUSEL') {
+    if (!post.carouselPdfUrl || post.carouselAttachmentStatus !== 'CURRENT') {
+      throw new Error('Carousel attachment is missing or outdated. Update it before publishing.');
+    }
+    const initialize = await axios.post(
+      'https://api.linkedin.com/rest/documents?action=initializeUpload',
+      { initializeUploadRequest: { owner: authorUrn } },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0', 'LinkedIn-Version': apiVersion } },
+    );
+    const uploadUrl = initialize.data?.value?.uploadUrl;
+    const documentUrn = initialize.data?.value?.document;
+    if (!uploadUrl || !documentUrn) throw new Error('LinkedIn did not provide a document upload target.');
+    const pdfResponse = await axios.get(post.carouselPdfUrl, { responseType: 'arraybuffer' });
+    await axios.put(uploadUrl, Buffer.from(pdfResponse.data), { headers: { 'Content-Type': 'application/pdf' } });
+    body.content = { media: { id: documentUrn, title: post.carouselFileName || 'LinkedIn carousel' } };
+  }
+
   // If post has an image, upload it and attach
-  if (publishingMediaUrl) {
+  if (post.attachmentType !== 'CAROUSEL' && publishingMediaUrl) {
     try {
       const imageUrn = await uploadImageToLinkedIn(accessToken, authorUrn, publishingMediaUrl, apiVersion);
       body.content = {
@@ -384,7 +401,7 @@ export async function postToLinkedInFromPostId(
       };
     } catch (error) {
       console.error('Failed to upload image to LinkedIn:', error);
-      // Continue posting without image
+      // Preserve the existing image-post fallback behavior.
     }
   }
 

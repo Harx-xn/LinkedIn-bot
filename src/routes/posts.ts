@@ -36,6 +36,7 @@ import {
   bulkDeletePosts,
   parseBulkDeletePostIds,
 } from '../services/bulkPostDeleteService';
+import { validateCarouselAttachmentForScheduling } from '../services/carouselAttachmentValidation';
 
 const router = Router();
 const imageService = new ImageService();
@@ -117,7 +118,8 @@ router.post('/', requireAuth, async (req, res) => {
       scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
       source: (source === 'GOOGLE_SHEET' || source === 'AI' || source === 'MANUAL' || source === 'AI_TRENDING') ? source : 'MANUAL',
       linkedinAccountId: finalLinkedInAccountId,
-      mediaUrl: mediaUrl
+      mediaUrl: mediaUrl,
+      attachmentType: mediaUrl ? 'IMAGE' : 'NONE',
     }
   });
 
@@ -140,6 +142,11 @@ router.post('/review/confirm', requireAuth, async (req, res) => {
     where,
     select: { id: true },
   });
+  const outdated = await prisma.post.findFirst({ where: { ...where, attachmentType: 'CAROUSEL', OR: [{ carouselPdfUrl: null }, { carouselAttachmentStatus: { not: 'CURRENT' } }] }, select: { id: true } });
+  if (outdated) return res.status(409).json({ code: 'CAROUSEL_ATTACHMENT_OUTDATED', message: 'Update the carousel attachment before scheduling this post.', error: 'Update the carousel attachment before scheduling this post.' });
+  for (const candidate of await prisma.post.findMany({ where: { ...where, attachmentType: 'CAROUSEL' } })) {
+    try { await validateCarouselAttachmentForScheduling(candidate); } catch (error) { return res.status(409).json({ code: 'CAROUSEL_ATTACHMENT_OUTDATED', message: error instanceof Error ? error.message : 'Update the carousel attachment before scheduling this post.', error: error instanceof Error ? error.message : 'Update the carousel attachment before scheduling this post.' }); }
+  }
 
   const result = await prisma.post.updateMany({
     where,
@@ -345,7 +352,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
   if (typeof req.body.hashtags === 'string') updateData.hashtags = req.body.hashtags;
   if (typeof req.body.scheduledAt === 'string') updateData.scheduledAt = new Date(req.body.scheduledAt);
   if (req.body.scheduledAt === null) updateData.scheduledAt = null;
-  if (req.body.mediaUrl === null) updateData.mediaUrl = null;
+  if (req.body.mediaUrl === null) { updateData.mediaUrl = null; if (post.attachmentType === 'IMAGE') updateData.attachmentType = 'NONE'; }
 
   const updated = await prisma.post.update({
     where: { id: post.id },
@@ -418,6 +425,9 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
   if (post.status === 'PUBLISHED') {
     return res.status(400).json({ error: 'Cannot generate images for published posts' });
   }
+  if (post.attachmentType === 'CAROUSEL' && req.body?.replaceExistingMedia !== true) {
+    return res.status(409).json({ code: 'POST_ATTACHMENT_CONFLICT', message: 'Replace the current carousel before adding an image.', error: 'Replace the current carousel before adding an image.' });
+  }
 
   const instructions =
     typeof req.body?.instructions === 'string' ? req.body.instructions.trim() : undefined;
@@ -459,7 +469,7 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
 
     const updated = await prisma.post.update({
       where: { id: post.id },
-      data: { mediaUrl },
+      data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null },
     });
 
     await recordImageGeneration(req.userId!);
@@ -484,6 +494,8 @@ router.post('/:id/confirm-schedule', requireAuth, async (req, res) => {
   if (post.userId !== req.userId) return res.status(403).json({ error: 'Unauthorized' });
   if (post.status !== 'REVIEW') return res.status(400).json({ error: 'Only review posts can be confirmed' });
   if (!post.scheduledAt) return res.status(400).json({ error: 'Missing proposed schedule time' });
+  if (post.attachmentType === 'CAROUSEL' && (!post.carouselPdfUrl || post.carouselAttachmentStatus !== 'CURRENT')) return res.status(409).json({ code: 'CAROUSEL_ATTACHMENT_OUTDATED', message: 'Update the carousel attachment before scheduling this post.', error: 'Update the carousel attachment before scheduling this post.' });
+  try { await validateCarouselAttachmentForScheduling(post); } catch (error) { return res.status(409).json({ code: 'CAROUSEL_ATTACHMENT_OUTDATED', message: error instanceof Error ? error.message : 'Update the carousel attachment before scheduling this post.', error: error instanceof Error ? error.message : 'Update the carousel attachment before scheduling this post.' }); }
 
   const updated = await prisma.post.update({
     where: { id: post.id },
@@ -553,6 +565,9 @@ router.post('/:id/publish', requireAuth, async (req, res) => {
     res.json(updated);
   } catch (err: any) {
     console.error(err);
+    if (post.attachmentType === 'CAROUSEL') {
+      await prisma.post.update({ where: { id: post.id }, data: { status: 'FAILED', errorMessage: err.message || 'Carousel document upload failed' } }).catch(() => undefined);
+    }
     return res.status(500).json({ error: err.message || 'Failed to publish' });
   }
 });

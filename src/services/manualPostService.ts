@@ -1,4 +1,5 @@
 import { prisma } from '../prismaClient';
+import { validateCarouselAttachmentForScheduling } from './carouselAttachmentValidation';
 import { canPublish } from './entitlementService';
 import {
   getUsableLinkedInAccountForUser,
@@ -6,6 +7,7 @@ import {
 } from './linkedinService';
 import { canPublishToLinkedIn } from './planEntitlementService';
 import { scheduleManualPostFingerprintSync } from './manualPost/manualPostFingerprintService';
+import { safeUpdateTopicHistoryStatus } from './topicHistoryService';
 
 /**
  * Manual Posts / Composer service (Taplio-like).
@@ -29,7 +31,7 @@ export const MANUAL_SOURCE = 'MANUAL';
 const MAX_CONTENT_LENGTH = 3000;
 
 // Statuses a manual post may be edited/scheduled/deleted in (i.e. not published).
-export const MUTABLE_STATUSES = ['DRAFT', 'QUEUED', 'FAILED'];
+export const MUTABLE_STATUSES = ['DRAFT', 'REVIEW', 'QUEUED', 'FAILED'];
 
 // Error type that carries an HTTP status so the route layer can respond cleanly.
 export class ManualPostError extends Error {
@@ -101,13 +103,12 @@ async function ensureCanPublishOrSchedule(userId: string): Promise<void> {
   }
 }
 
-// Look up a post that belongs to this user AND is a manual post. Always scopes
-// by userId so one user can never touch another user's post. Bot/generated
-// posts (source !== MANUAL) are intentionally invisible here.
+// Look up any editable post owned by this user. The composer is also the editor
+// for generated batch posts once the user chooses to revise them.
 async function findOwnedManualPost(userId: string, postId: string) {
   if (!postId) throw new ManualPostError(404, 'Post not found');
   const post = await prisma.post.findFirst({
-    where: { id: postId, userId, source: MANUAL_SOURCE },
+    where: { id: postId, userId },
   });
   if (!post) throw new ManualPostError(404, 'Post not found');
   return post;
@@ -148,6 +149,7 @@ export async function createDraft(userId: string, body: ManualPostInput) {
       userId,
       content,
       mediaUrl,
+      attachmentType: mediaUrl ? 'IMAGE' : 'NONE',
       hashtags: parseOptionalHashtags(body.hashtags),
       manualTopic: parseOptionalTopic(body.manualTopic),
       aiGenerated: parseAiGenerated(body.aiGenerated),
@@ -189,7 +191,13 @@ export async function updateManualPost(
     const nextMedia = body.mediaUrl !== undefined ? body.mediaUrl : post.mediaUrl;
     const validated = validateManualPostInput(nextContent, nextMedia);
     if (body.content !== undefined) data.content = validated.content;
-    if (body.mediaUrl !== undefined) data.mediaUrl = validated.mediaUrl;
+    if (body.mediaUrl !== undefined) {
+      data.mediaUrl = validated.mediaUrl;
+      if (validated.mediaUrl) {
+        if (post.attachmentType === 'CAROUSEL') throw new ManualPostError(409, 'Replace the current carousel before adding an image.');
+        data.attachmentType = 'IMAGE';
+      } else if (post.attachmentType === 'IMAGE') data.attachmentType = 'NONE';
+    }
   }
 
   if (body.hashtags !== undefined) {
@@ -217,6 +225,11 @@ export async function updateManualPost(
   }
 
   const updated = await prisma.post.update({ where: { id: post.id }, data });
+  if (data.status === 'DRAFT') {
+    await safeUpdateTopicHistoryStatus(post.id, 'GENERATED');
+  } else if (data.status === SCHEDULED_STATUS) {
+    await safeUpdateTopicHistoryStatus(post.id, 'SCHEDULED');
+  }
   afterManualPostPersisted(updated);
   return updated;
 }
@@ -230,6 +243,7 @@ export async function scheduleManualPost(userId: string, postId: string, schedul
   if (post.status === 'PUBLISHED') {
     throw new ManualPostError(409, 'Post already published');
   }
+  try { await validateCarouselAttachmentForScheduling(post); } catch (error) { throw new ManualPostError(409, error instanceof Error ? error.message : 'Update the carousel attachment before scheduling.'); }
 
   const scheduledAt = parseFutureDate(scheduledAtRaw);
   await ensureCanPublishOrSchedule(userId);
@@ -272,7 +286,7 @@ export async function publishManualPostNow(
     );
     post = await prisma.post.update({
       where: { id: post.id },
-      data: { content: validated.content, mediaUrl: validated.mediaUrl },
+      data: { content: validated.content, mediaUrl: validated.mediaUrl, attachmentType: post.attachmentType === 'CAROUSEL' ? 'CAROUSEL' : validated.mediaUrl ? 'IMAGE' : 'NONE' },
     });
   }
 
@@ -293,7 +307,9 @@ export async function publishManualPostNow(
       mediaUrl: post.mediaUrl,
     });
   } catch (err: any) {
-    // Leave the post in its current (non-published) status; just surface error.
+    if (post.attachmentType === 'CAROUSEL') {
+      await prisma.post.update({ where: { id: post.id }, data: { status: 'FAILED', errorMessage: err?.message || 'Carousel document upload failed' } }).catch(() => undefined);
+    }
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
   }
 
@@ -322,6 +338,7 @@ export async function createAndPublishNow(userId: string, body: ManualPostInput)
       userId,
       content,
       mediaUrl,
+      attachmentType: mediaUrl ? 'IMAGE' : 'NONE',
       status: 'DRAFT',
       source: MANUAL_SOURCE,
       linkedinAccountId,
@@ -355,6 +372,7 @@ export async function createAndSchedule(userId: string, body: ManualPostInput & 
       userId,
       content,
       mediaUrl,
+      attachmentType: mediaUrl ? 'IMAGE' : 'NONE',
       scheduledAt,
       status: SCHEDULED_STATUS,
       source: MANUAL_SOURCE,
@@ -383,7 +401,7 @@ function effectiveDate(p: { publishedAt: Date | null; scheduledAt: Date | null; 
 }
 
 export async function listManualPosts(userId: string, filters: ListFilters) {
-  const where: Record<string, unknown> = { userId, source: MANUAL_SOURCE };
+  const where: Record<string, unknown> = { userId };
   const status = normalizeStatusFilter(filters.status);
   if (status) where.status = status;
 

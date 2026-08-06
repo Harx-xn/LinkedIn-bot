@@ -82,6 +82,8 @@ test('monthly plan fields win and legacy daily fields remain fallbacks', () => {
     dailyBatchGenerationLimit: 2,
     dailyImageGenerationLimit: 3,
     maxRewritesPerPost: 4,
+    carouselSaveLimit: 12,
+    carouselAiGenerationLimit: 6,
   } as any;
 
   assert.deepEqual(getMonthlyLimits(base), {
@@ -89,6 +91,8 @@ test('monthly plan fields win and legacy daily fields remain fallbacks', () => {
     batchGenerations: 8,
     images: 7,
     manualAiOperations: 9,
+    carouselSaves: 12,
+    carouselAiGenerations: 6,
   });
   assert.deepEqual(getMonthlyLimits({
     ...base,
@@ -101,6 +105,8 @@ test('monthly plan fields win and legacy daily fields remain fallbacks', () => {
     batchGenerations: 60,
     images: 90,
     manualAiOperations: 600,
+    carouselSaves: 12,
+    carouselAiGenerations: 6,
   });
 });
 
@@ -117,10 +123,13 @@ test('/entitlements/me summary remains monthly and privileged roles remain unlim
     'monthlyImageGenerationLimit',
     'monthlyManualAiOperationLimit',
     'manualAiOperationsThisMonth',
+    'carouselSaveLimit',
+    'carouselAiGenerationLimit',
+    'carouselAiGenerationsThisPeriod',
   ]) {
     assert.ok(service.includes(field), `missing ${field}`);
   }
-  assert.ok(service.includes('user.role !== UserRole.USER'));
+  assert.ok(service.includes('effectiveAccess.unlimited'));
   assert.ok(service.includes('const UNLIMITED = 999_999'));
   assert.ok(route.includes('getUserPlanEntitlements(userId)'));
   assert.ok(route.includes('res.json(entitlements)'));

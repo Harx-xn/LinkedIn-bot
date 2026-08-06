@@ -5,7 +5,9 @@ import { z } from 'zod';
 import { config } from '../config';
 import { prisma } from '../prismaClient';
 import { createCarouselExport, deleteCarouselExport, getCarouselExport } from '../services/carouselExportStore';
-import { completeCarouselAiGeneration, generateCarouselWithAi, getCarouselAiQuota } from '../services/carouselAiService';
+import { assertCanGenerateCarouselWithAi, completeCarouselAiGeneration, generateCarouselWithAi, getCarouselAiQuota, getPlanCarouselAiQuota, recordPlanCarouselAiGeneration } from '../services/carouselAiService';
+import { PlanLimitError, getUserPlanEntitlements } from '../services/planEntitlementService';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 const text = z.string().max(5000);
@@ -51,7 +53,8 @@ function quotaKey(req: Request, userId?: string) {
 
 router.get('/ai-quota', async (req, res) => {
   const userId = await optionalUserId(req.headers.authorization);
-  return res.set('Cache-Control', 'no-store').json(getCarouselAiQuota(quotaKey(req, userId)));
+  const quota = userId ? await getPlanCarouselAiQuota(userId) : getCarouselAiQuota(quotaKey(req));
+  return res.set('Cache-Control', 'no-store').json(quota);
 });
 
 router.post('/generate-ai', async (req, res) => {
@@ -62,16 +65,89 @@ router.post('/generate-ai', async (req, res) => {
   if (!input.success) return res.status(400).json({ error: input.error.issues[0]?.message || 'Invalid generation request' });
   const userId = await optionalUserId(req.headers.authorization);
   const key = quotaKey(req, userId);
-  const quota = getCarouselAiQuota(key);
-  if (!quota.remaining) return res.status(429).json({ error: 'You have used all 8 free AI generations for today.', quota });
+  let quota;
+  try {
+    quota = userId ? await assertCanGenerateCarouselWithAi(userId) : getCarouselAiQuota(key);
+  } catch (error) {
+    if (error instanceof PlanLimitError) return res.status(error.status).json({ error: error.message, code: error.code, quota: await getPlanCarouselAiQuota(userId!) });
+    throw error;
+  }
+  if (!userId && !quota.remaining) return res.status(429).json({ error: 'You have used all 8 free AI generations for today.', quota });
   try {
     const carousel = await generateCarouselWithAi({ ...input.data, userId });
-    return res.set('Cache-Control', 'no-store').json({ ...carousel, quota: completeCarouselAiGeneration(key) });
+    const completedQuota = userId ? await recordPlanCarouselAiGeneration(userId) : completeCarouselAiGeneration(key);
+    return res.set('Cache-Control', 'no-store').json({ ...carousel, quota: completedQuota });
   } catch (error) {
     console.error('[carousel-ai] generation failed', error);
     const message = error instanceof Error ? error.message : 'Carousel generation failed';
     return res.status(message.includes('not configured') ? 503 : 502).json({ error: message, quota });
   }
+});
+
+router.get('/projects', requireAuth, async (req, res) => {
+  const userId = (req as any).userId as string;
+  const projects = await prisma.carouselProject.findMany({
+    where: { userId },
+    orderBy: { updatedAt: 'desc' },
+    select: { id: true, title: true, projectJson: true, createdAt: true, updatedAt: true },
+  });
+  return res.json({ projects: projects.map(({ projectJson, ...item }) => ({ ...item, project: JSON.parse(projectJson) })) });
+});
+
+router.get('/projects/:id', requireAuth, async (req, res) => {
+  const userId = (req as any).userId as string;
+  const saved = await prisma.carouselProject.findFirst({
+    where: { id: req.params.id, userId },
+    select: { id: true, title: true, projectJson: true, createdAt: true, updatedAt: true },
+  });
+  if (!saved) return res.status(404).json({ error: 'Carousel project not found' });
+  const { projectJson, ...item } = saved;
+  return res.json({ ...item, project: JSON.parse(projectJson) });
+});
+
+router.post('/projects', requireAuth, async (req, res) => {
+  const userId = (req as any).userId as string;
+  const parsed = projectSchema.safeParse(req.body?.project);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid carousel project', details: parsed.error.issues.slice(0, 5) });
+  const entitlements = await getUserPlanEntitlements(userId);
+  if (entitlements.carouselSaveLimit !== null && entitlements.usage.savedCarouselProjects >= entitlements.carouselSaveLimit) {
+    return res.status(403).json({ error: 'Saved carousel project limit reached for your current plan.', code: 'CAROUSEL_SAVE_LIMIT_REACHED' });
+  }
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { regionId: true } });
+  const saved = await prisma.carouselProject.create({
+    data: { userId, regionId: user?.regionId ?? null, title: parsed.data.title, projectJson: JSON.stringify(parsed.data) },
+    select: { id: true, title: true, createdAt: true, updatedAt: true },
+  });
+  return res.status(201).json({ ...saved, project: parsed.data });
+});
+
+router.put('/projects/:id', requireAuth, async (req, res) => {
+  const userId = (req as any).userId as string;
+  const parsed = projectSchema.safeParse(req.body?.project);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid carousel project', details: parsed.error.issues.slice(0, 5) });
+  const existing = await prisma.carouselProject.findFirst({ where: { id: req.params.id, userId }, select: { id: true } });
+  if (!existing) return res.status(404).json({ error: 'Carousel project not found' });
+  const saved = await prisma.carouselProject.update({
+    where: { id: existing.id },
+    data: { title: parsed.data.title, projectJson: JSON.stringify(parsed.data) },
+    select: { id: true, title: true, createdAt: true, updatedAt: true },
+  });
+  await prisma.post.updateMany({
+    where: { userId, carouselProjectId: existing.id, attachmentType: 'CAROUSEL' },
+    data: { carouselAttachmentStatus: 'OUTDATED' },
+  });
+  return res.json({ ...saved, project: parsed.data });
+});
+
+router.delete('/projects/:id', requireAuth, async (req, res) => {
+  const userId = (req as any).userId as string;
+  const existing = await prisma.carouselProject.findFirst({ where: { id: req.params.id, userId }, select: { id: true } });
+  if (!existing) return res.status(404).json({ error: 'Carousel project not found' });
+  await prisma.$transaction([
+    prisma.post.updateMany({ where: { userId, carouselProjectId: existing.id }, data: { carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null, attachmentType: 'NONE' } }),
+    prisma.carouselProject.delete({ where: { id: existing.id } }),
+  ]);
+  return res.status(204).send();
 });
 
 router.get('/export-data/:token', (req, res) => {

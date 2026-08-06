@@ -3,7 +3,6 @@ import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
 import {
   ManualPostError,
-  MANUAL_SOURCE,
   createDraft,
   updateManualPost,
   scheduleManualPost,
@@ -315,7 +314,7 @@ router.post(
     const { postId } = req.params;
 
     const post = await prisma.post.findUnique({ where: { id: postId } });
-    if (!post || post.source !== MANUAL_SOURCE) {
+    if (!post) {
       throw new ManualPostError(404, 'Post not found');
     }
     if (post.userId !== userId) {
@@ -323,6 +322,9 @@ router.post(
     }
     if (post.status === 'PUBLISHED') {
       throw new ManualPostError(400, 'Cannot generate images for published posts');
+    }
+    if (post.attachmentType === 'CAROUSEL' && req.body?.replaceExistingMedia !== true) {
+      throw new ManualPostError(409, 'Replace the current carousel before adding an image.');
     }
 
     const content = post.content?.trim();
@@ -343,7 +345,7 @@ router.post(
 
     const updated = await prisma.post.update({
       where: { id: post.id },
-      data: { mediaUrl },
+      data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null },
     });
 
     await recordImageGeneration(userId);

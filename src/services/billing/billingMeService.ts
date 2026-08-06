@@ -169,6 +169,7 @@ export async function getBillingMe(userId: string) {
     relationship: planRelationship(currentPrice, p.price, sub?.planId === p.id),
     stripePriceIdPresent: Boolean(p.stripePriceId),
     fullDashboardUnlock: p.fullDashboardUnlock,
+    convertPostToCarouselEnabled: p.convertPostToCarouselEnabled,
     maxRewritesPerPost: p.maxRewritesPerPost,
     dailyPostLimit: p.dailyPostLimit,
     dailyBatchGenerationLimit: p.dailyBatchGenerationLimit,

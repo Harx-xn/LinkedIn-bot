@@ -1,4 +1,3 @@
-import { UserRole } from '@prisma/client';
 import type { Plan } from '@prisma/client';
 import { prisma } from '../prismaClient';
 import { hasDashboardAccess } from './billing/billingAccessService';
@@ -27,6 +26,8 @@ export type PlanLimitCode =
   | 'DAILY_BATCH_GENERATION_LIMIT_REACHED'
   | 'IMAGE_GENERATION_LOCKED'
   | 'DAILY_IMAGE_LIMIT_REACHED'
+  | 'CAROUSEL_SAVE_LIMIT_REACHED'
+  | 'CAROUSEL_AI_GENERATION_LIMIT_REACHED'
   | 'DASHBOARD_LOCKED';
 
 // Thrown by the enforcement helpers; carries an HTTP status + machine code so
@@ -59,6 +60,9 @@ export interface PlanEntitlements {
   imageGenerationEnabled: boolean;
   monthlyImageGenerationLimit: number;
   monthlyManualAiOperationLimit: number;
+  carouselSaveLimit: number | null;
+  carouselAiGenerationLimit: number | null;
+  convertPostToCarouselEnabled: boolean;
   /** @deprecated Temporary response aliases for older frontend clients. */
   dailyPostLimit: number;
   dailyBatchGenerationLimit: number;
@@ -68,6 +72,8 @@ export interface PlanEntitlements {
     batchGenerationsThisMonth: number;
     imagesGeneratedThisMonth: number;
     manualAiOperationsThisMonth: number;
+    savedCarouselProjects: number;
+    carouselAiGenerationsThisPeriod: number;
     /** @deprecated Temporary aliases containing monthly usage. */
     postsToday: number;
     batchGenerationsToday: number;
@@ -78,12 +84,16 @@ export interface PlanEntitlements {
     batchGenerations: number;
     images: number;
     manualAiOperations: number;
+    carouselSaves: number | null;
+    carouselAiGenerations: number | null;
   };
   remaining: {
     posts: number;
     batchGenerations: number;
     images: number;
     manualAiOperations: number;
+    carouselSaves: number | null;
+    carouselAiGenerations: number | null;
     /** @deprecated Temporary aliases containing monthly remaining usage. */
     postsToday: number;
     batchGenerationsToday: number;
@@ -103,6 +113,9 @@ const LOCKED_LIMITS = {
   monthlyBatchGenerationLimit: 0,
   monthlyImageGenerationLimit: 0,
   monthlyManualAiOperationLimit: 0,
+  carouselSaveLimit: 0,
+  carouselAiGenerationLimit: 0,
+  convertPostToCarouselEnabled: false,
   // Temporary frontend compatibility aliases.
   dailyPostLimit: 0,
   dailyBatchGenerationLimit: 0,
@@ -222,7 +235,21 @@ export function getMonthlyLimits(plan: SubscriptionPlan | Plan) {
     images: plan.monthlyImageGenerationLimit ?? plan.dailyImageGenerationLimit * 30,
     manualAiOperations:
       plan.monthlyManualAiOperationLimit ?? Math.max(1, plan.maxRewritesPerPost * 150),
+    carouselSaves: plan.carouselSaveLimit,
+    carouselAiGenerations: plan.carouselAiGenerationLimit,
   };
+}
+
+async function getCarouselEntitlementUsage(userId: string, now = new Date()) {
+  const subscription = await getActiveSubscriptionWithPlan(userId);
+  const month = getUtcMonthWindow(now);
+  const periodStart = subscription?.currentPeriodStart ?? subscription?.trialStart ?? month.start;
+  const periodEnd = subscription?.currentPeriodEnd ?? subscription?.trialEnd ?? month.end;
+  const [savedCarouselProjects, carouselAiGenerationsThisPeriod] = await Promise.all([
+    prisma.carouselProject.count({ where: { userId } }),
+    prisma.carouselAiGenerationUsage.count({ where: { userId, createdAt: { gte: periodStart, lt: periodEnd } } }),
+  ]);
+  return { savedCarouselProjects, carouselAiGenerationsThisPeriod, periodStart, periodEnd };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,12 +274,15 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
     imagesGeneratedThisMonth,
     manualAiOperationsThisMonth,
   } = await getMonthlyEntitlementUsage(userId);
+  const carouselUsage = await getCarouselEntitlementUsage(userId);
 
   const usage = {
     postsThisMonth,
     batchGenerationsThisMonth,
     imagesGeneratedThisMonth,
     manualAiOperationsThisMonth,
+    savedCarouselProjects: carouselUsage.savedCarouselProjects,
+    carouselAiGenerationsThisPeriod: carouselUsage.carouselAiGenerationsThisPeriod,
     postsToday: postsThisMonth,
     batchGenerationsToday: batchGenerationsThisMonth,
     imagesGeneratedToday: imagesGeneratedThisMonth,
@@ -265,11 +295,13 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
     billingExempt: effectiveAccess.billingExempt,
     accessSource: effectiveAccess.accessSource,
   };
-  const makeRemaining = (limits: { posts: number; batchGenerations: number; images: number; manualAiOperations: number }) => ({
+  const makeRemaining = (limits: { posts: number; batchGenerations: number; images: number; manualAiOperations: number; carouselSaves: number | null; carouselAiGenerations: number | null }) => ({
     posts: Math.max(0, limits.posts - postsThisMonth),
     batchGenerations: Math.max(0, limits.batchGenerations - batchGenerationsThisMonth),
     images: Math.max(0, limits.images - imagesGeneratedThisMonth),
     manualAiOperations: Math.max(0, limits.manualAiOperations - manualAiOperationsThisMonth),
+    carouselSaves: limits.carouselSaves == null ? null : Math.max(0, limits.carouselSaves - carouselUsage.savedCarouselProjects),
+    carouselAiGenerations: limits.carouselAiGenerations == null ? null : Math.max(0, limits.carouselAiGenerations - carouselUsage.carouselAiGenerationsThisPeriod),
     postsToday: Math.max(0, limits.posts - postsThisMonth),
     batchGenerationsToday: Math.max(0, limits.batchGenerations - batchGenerationsThisMonth),
     imagesToday: Math.max(0, limits.images - imagesGeneratedThisMonth),
@@ -282,6 +314,8 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
       batchGenerations: UNLIMITED,
       images: UNLIMITED,
       manualAiOperations: UNLIMITED,
+      carouselSaves: null,
+      carouselAiGenerations: null,
     };
     return {
       ...responseBase,
@@ -294,6 +328,9 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
       monthlyBatchGenerationLimit: UNLIMITED,
       monthlyImageGenerationLimit: UNLIMITED,
       monthlyManualAiOperationLimit: UNLIMITED,
+      carouselSaveLimit: null,
+      carouselAiGenerationLimit: null,
+      convertPostToCarouselEnabled: true,
       dailyPostLimit: UNLIMITED,
       dailyBatchGenerationLimit: UNLIMITED,
       imageGenerationEnabled: true,
@@ -307,7 +344,7 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
   const sub = await getActiveSubscriptionWithPlan(userId);
 
   if (!sub || !sub.plan) {
-    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0 };
+    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0, carouselSaves: 0, carouselAiGenerations: 0 };
     // Locked/free fallback: no active subscription.
     return {
       ...responseBase,
@@ -323,7 +360,7 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
 
   const plan = await getEffectiveEntitlementPlan(sub);
   if (!plan) {
-    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0 };
+    const limits = { posts: 0, batchGenerations: 0, images: 0, manualAiOperations: 0, carouselSaves: 0, carouselAiGenerations: 0 };
     return {
       ...responseBase,
       hasActiveSubscription: false,
@@ -353,6 +390,9 @@ export async function getUserPlanEntitlements(userId: string): Promise<PlanEntit
     monthlyBatchGenerationLimit: limits.batchGenerations,
     monthlyImageGenerationLimit: limits.images,
     monthlyManualAiOperationLimit: limits.manualAiOperations,
+    carouselSaveLimit: limits.carouselSaves,
+    carouselAiGenerationLimit: limits.carouselAiGenerations,
+    convertPostToCarouselEnabled: plan.convertPostToCarouselEnabled,
     dailyPostLimit: limits.posts,
     dailyBatchGenerationLimit: limits.batchGenerations,
     imageGenerationEnabled,

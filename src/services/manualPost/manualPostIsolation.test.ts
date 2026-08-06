@@ -65,7 +65,7 @@ describe('manual vs batch architectural isolation', () => {
     );
     assert.ok(savedRewrite.includes('rewriteCount: { increment: 1 }'));
     assert.ok(savedRewrite.includes('canRewritePost(userId, post.id)'));
-    assert.ok(savedRewrite.includes('MANUAL_SOURCE'));
+    assert.ok(savedRewrite.includes('where: { id: postId, userId }'));
     assert.ok(savedRewrite.includes('findRewritableManualPost(userId, postId)'));
   });
 

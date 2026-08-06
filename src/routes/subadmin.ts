@@ -581,7 +581,7 @@ router.get("/plans", async (req, res) => {
 function validatePlanFeatureFields(body: Record<string, any>, _partial: boolean) {
   const data: any = {};
 
-  const boolFields = ["fullDashboardUnlock", "imageGenerationEnabled"] as const;
+  const boolFields = ["fullDashboardUnlock", "imageGenerationEnabled", "convertPostToCarouselEnabled"] as const;
   const intFields = [
     "maxRewritesPerPost",
     "dailyPostLimit",
@@ -593,6 +593,8 @@ function validatePlanFeatureFields(body: Record<string, any>, _partial: boolean)
     "monthlyBatchGenerationLimit",
     "monthlyImageGenerationLimit",
     "monthlyManualAiOperationLimit",
+    "carouselSaveLimit",
+    "carouselAiGenerationLimit",
   ] as const;
 
   for (const key of boolFields) {

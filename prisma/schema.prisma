@@ -71,6 +71,8 @@ model Region {
   inviteLinks           InviteLink[]
   imageGenerationUsages ImageGenerationUsage[]
   manualAiRewriteUsages ManualAiRewriteUsage[]
+  carouselAiGenerationUsages CarouselAiGenerationUsage[]
+  carouselProjects           CarouselProject[]
   supportRequests         SupportRequest[]
 }
 
@@ -144,6 +146,8 @@ model User {
   createdInviteLinks      InviteLink[]             @relation("InviteCreatedBy")
   imageGenerationUsages   ImageGenerationUsage[]
   manualAiRewriteUsages   ManualAiRewriteUsage[]
+  carouselAiGenerationUsages CarouselAiGenerationUsage[]
+  carouselProjects           CarouselProject[]
   nicheSearchPlans        UserNicheSearchPlan[]
   topicHistory            GeneratedTopicHistory[]
   topicInventory          TopicInventory[]
@@ -221,6 +225,19 @@ enum SupportRequestStatus {
   IN_PROGRESS
   RESOLVED
   CLOSED
+}
+
+enum PostAttachmentType {
+  NONE
+  IMAGE
+  CAROUSEL
+}
+
+enum CarouselAttachmentStatus {
+  CURRENT
+  OUTDATED
+  GENERATING
+  FAILED
 }
 
 model UserNicheSearchPlan {
@@ -405,6 +422,12 @@ model Post {
   publishedAt       DateTime?
   linkedinPostUrn   String?
   mediaUrl          String?
+  attachmentType    PostAttachmentType @default(NONE)
+  carouselProjectId String?
+  carouselPdfUrl    String?
+  carouselFileName  String?
+  carouselUpdatedAt DateTime?
+  carouselAttachmentStatus CarouselAttachmentStatus?
   errorMessage      String?
   rewriteCount      Int       @default(0)
   manualTopic       String?
@@ -416,10 +439,12 @@ model Post {
   user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
   region             Region?                 @relation(fields: [regionId], references: [id], onDelete: SetNull)
   contentFingerprint PostContentFingerprint?
+  carouselProject    CarouselProject? @relation(fields: [carouselProjectId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([regionId])
   @@index([status, regionId])
+  @@index([carouselProjectId])
 }
 
 model PostContentFingerprint {
@@ -507,6 +532,9 @@ model Plan {
   dailyImageGenerationLimit Int     @default(0)
   monthlyImageGenerationLimit Int?
   monthlyManualAiOperationLimit Int?
+  carouselSaveLimit              Int?
+  carouselAiGenerationLimit      Int?
+  convertPostToCarouselEnabled   Boolean @default(false)
 
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
@@ -725,6 +753,38 @@ model ManualAiRewriteUsage {
 
   @@index([userId, createdAt])
   @@index([regionId, createdAt])
+}
+
+// One row per successful AI carousel generation. Usage is counted within the
+// subscription billing period (falling back to the UTC month when necessary).
+model CarouselAiGenerationUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  regionId  String?
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([regionId, createdAt])
+}
+
+model CarouselProject {
+  id          String   @id @default(cuid())
+  userId      String
+  regionId    String?
+  title       String
+  projectJson String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  attachedPosts Post[]
+
+  @@index([userId, updatedAt])
+  @@index([regionId, updatedAt])
 }
 
 model SupportRequest {

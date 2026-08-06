@@ -8,7 +8,6 @@ import {
 import { getBotVoice } from '../userContentContext';
 import {
   ManualPostError,
-  MANUAL_SOURCE,
   MUTABLE_STATUSES,
 } from '../manualPostService';
 import {
@@ -191,7 +190,7 @@ export async function rewriteUnsavedManualPostV2(
 
 async function findRewritableManualPost(userId: string, postId: string) {
   const post = await prisma.post.findFirst({
-    where: { id: postId, userId, source: MANUAL_SOURCE },
+    where: { id: postId, userId },
   });
   if (!post) throw new ManualPostError(404, 'Post not found');
   if (post.status === 'PUBLISHED') {
