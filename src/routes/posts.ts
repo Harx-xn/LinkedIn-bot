@@ -16,8 +16,10 @@ import {
 } from '../services/userContentContext';
 import {
   GenerativeImageError,
+  parseImageCreativeOverrides,
   type LinkedInImageAspectRatio,
 } from '../services/generativeImagesService';
+import { applyOptionalBrandLogo } from '../services/brandLogoService';
 import {
   PlanLimitError,
   canPublishToLinkedIn,
@@ -446,9 +448,13 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
   }
 
   try {
-    const [imageService, voice] = await Promise.all([
+    const [imageService, voice, botConfig] = await Promise.all([
       getGenerativeImagesServiceForUser(req.userId!),
       getBotVoice(req.userId!),
+      prisma.botConfig.findUnique({
+        where: { userId: req.userId! },
+        select: { brandLogoUrl: true, brandLogoEnabled: true, brandLogoPosition: true },
+      }),
     ]);
 
     const generated = await imageService.generateLinkedInPostImage({
@@ -458,13 +464,21 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
       aspectRatio,
       brandName: resolveBrandNameFromVoice(voice),
       profileDescription: voice.description,
+      ...parseImageCreativeOverrides(req.body),
     });
 
-    const ext = extensionForMimeType(generated.mimeType);
+    const branded = await applyOptionalBrandLogo({
+      buffer: generated.buffer, mimeType: generated.mimeType, userId: req.userId!,
+      enabled: botConfig?.brandLogoEnabled, logoUrl: botConfig?.brandLogoUrl,
+      position: botConfig?.brandLogoPosition, logContext: 'posts',
+    });
+    const finalBuffer = branded.buffer;
+    const finalMimeType = branded.mimeType;
+    const ext = extensionForMimeType(finalMimeType);
     const mediaUrl = await uploadBufferToR2(
-      generated.buffer,
+      finalBuffer,
       `generated/ai-post-${post.id}-${Date.now()}.${ext}`,
-      generated.mimeType,
+      finalMimeType,
     );
 
     const updated = await prisma.post.update({

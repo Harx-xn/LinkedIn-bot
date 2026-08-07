@@ -54,3 +54,34 @@ export async function applyBrandLogoWatermark(input: {
     .composite([{ input: logo.data, left: Math.max(0, left), top: Math.max(0, top) }])
     .toBuffer();
 }
+
+export async function applyOptionalBrandLogo(input: {
+  buffer: Buffer;
+  mimeType: string;
+  userId: string;
+  enabled?: boolean | null;
+  logoUrl?: string | null;
+  position?: unknown;
+  logContext: string;
+}): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (!input.enabled || !input.logoUrl) {
+    return { buffer: input.buffer, mimeType: input.mimeType };
+  }
+  try {
+    return {
+      buffer: await applyBrandLogoWatermark({
+        baseImage: input.buffer,
+        logoUrl: input.logoUrl,
+        userId: input.userId,
+        position: normalizeBrandLogoPosition(input.position),
+      }),
+      mimeType: 'image/png',
+    };
+  } catch (error) {
+    console.warn(`[${input.logContext}] Brand logo watermark skipped`, {
+      userId: input.userId,
+      message: error instanceof Error ? error.message : 'unknown error',
+    });
+    return { buffer: input.buffer, mimeType: input.mimeType };
+  }
+}

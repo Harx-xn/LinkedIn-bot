@@ -11,7 +11,7 @@ import type {
   GenerateLinkedInPostImageInput,
   LinkedInImageAspectRatio,
 } from './generativeImagesService';
-import { applyBrandLogoWatermark, normalizeBrandLogoPosition } from './brandLogoService';
+import { applyOptionalBrandLogo } from './brandLogoService';
 
 export type BotImageMode = 'none' | 'providedBackground' | 'aiGenerated';
 
@@ -121,24 +121,13 @@ export async function generateBatchPostMediaUrl(
         buildBatchGenerativeImageInput(input),
       );
 
-      let finalBuffer = generated.buffer;
-      let finalMimeType = generated.mimeType;
-      if (input.brandLogoEnabled && input.brandLogoUrl) {
-        try {
-          finalBuffer = await applyBrandLogoWatermark({
-            baseImage: generated.buffer,
-            logoUrl: input.brandLogoUrl,
-            userId: input.userId,
-            position: normalizeBrandLogoPosition(input.brandLogoPosition),
-          });
-          finalMimeType = 'image/png';
-        } catch (err) {
-          console.warn('[batch] Brand logo watermark skipped', {
-            userId: input.userId,
-            message: err instanceof Error ? err.message : 'unknown error',
-          });
-        }
-      }
+      const branded = await applyOptionalBrandLogo({
+        buffer: generated.buffer, mimeType: generated.mimeType, userId: input.userId,
+        enabled: input.brandLogoEnabled, logoUrl: input.brandLogoUrl,
+        position: input.brandLogoPosition, logContext: 'batch',
+      });
+      const finalBuffer = branded.buffer;
+      const finalMimeType = branded.mimeType;
       const ext = extensionForMimeType(finalMimeType);
       const prefix = input.uploadKeyPrefix ?? `generated/ai-batch-${input.userId}`;
       const mediaUrl = await uploadBufferToR2(

@@ -14,9 +14,11 @@ import {
   duplicateManualPost,
 } from '../services/manualPostService';
 import { uploadBufferToR2 } from '../middleware/r2';
-import { applyBrandLogoWatermark, normalizeBrandLogoPosition } from '../services/brandLogoService';
+import { applyOptionalBrandLogo } from '../services/brandLogoService';
 import {
   GenerativeImageError,
+  parseImageCreativeOverrides,
+  type GenerateLinkedInPostImageInput,
   type LinkedInImageAspectRatio,
 } from '../services/generativeImagesService';
 import {
@@ -69,7 +71,7 @@ function parseAiImageOptions(body: Record<string, unknown> | undefined) {
     AI_IMAGE_ASPECT_RATIOS.has(aspectRatioRaw as LinkedInImageAspectRatio)
       ? (aspectRatioRaw as LinkedInImageAspectRatio)
       : undefined;
-  return { instructions, style, aspectRatio };
+  return { instructions, style, aspectRatio, ...parseImageCreativeOverrides(body) };
 }
 
 async function generateAndUploadManualAiImage(params: {
@@ -79,7 +81,7 @@ async function generateAndUploadManualAiImage(params: {
   instructions?: string;
   style?: string;
   aspectRatio?: LinkedInImageAspectRatio;
-}): Promise<{ mediaUrl: string; mimeType: string; model: string }> {
+} & Partial<Pick<GenerateLinkedInPostImageInput, 'visualFormat' | 'imageType' | 'mood' | 'colorPalette' | 'complexity' | 'composition' | 'humanPresence' | 'backgroundStyle' | 'textMode'>>): Promise<{ mediaUrl: string; mimeType: string; model: string }> {
   await canUseImageGeneration(params.userId);
 
   const [imageService, voice, botConfig] = await Promise.all([
@@ -98,26 +100,24 @@ async function generateAndUploadManualAiImage(params: {
     aspectRatio: params.aspectRatio,
     brandName: resolveBrandNameFromVoice(voice),
     profileDescription: voice.description,
+    visualFormat: params.visualFormat,
+    imageType: params.imageType,
+    mood: params.mood,
+    colorPalette: params.colorPalette,
+    complexity: params.complexity,
+    composition: params.composition,
+    humanPresence: params.humanPresence,
+    backgroundStyle: params.backgroundStyle,
+    textMode: params.textMode,
   });
 
-  let finalBuffer = generated.buffer;
-  let finalMimeType = generated.mimeType;
-  if (botConfig?.brandLogoEnabled && botConfig.brandLogoUrl) {
-    try {
-      finalBuffer = await applyBrandLogoWatermark({
-        baseImage: generated.buffer,
-        logoUrl: botConfig.brandLogoUrl,
-        userId: params.userId,
-        position: normalizeBrandLogoPosition(botConfig.brandLogoPosition),
-      });
-      finalMimeType = 'image/png';
-    } catch (err) {
-      console.warn('[manual] Brand logo watermark skipped', {
-        userId: params.userId,
-        message: err instanceof Error ? err.message : 'unknown error',
-      });
-    }
-  }
+  const branded = await applyOptionalBrandLogo({
+    buffer: generated.buffer, mimeType: generated.mimeType, userId: params.userId,
+    enabled: botConfig?.brandLogoEnabled, logoUrl: botConfig?.brandLogoUrl,
+    position: botConfig?.brandLogoPosition, logContext: 'manual',
+  });
+  const finalBuffer = branded.buffer;
+  const finalMimeType = branded.mimeType;
   const ext = extensionForMimeType(finalMimeType);
   const mediaUrl = await uploadBufferToR2(
     finalBuffer,
@@ -232,15 +232,13 @@ router.post(
       throw new ManualPostError(400, 'Content is required');
     }
 
-    const { instructions, style, aspectRatio } = parseAiImageOptions(req.body);
+    const options = parseAiImageOptions(req.body);
 
     const result = await generateAndUploadManualAiImage({
       userId,
       postText: content,
       uploadKey: `generated/ai-manual-${userId}-${Date.now()}`,
-      instructions,
-      style,
-      aspectRatio,
+      ...options,
     });
 
     await recordImageGeneration(userId);
@@ -332,15 +330,13 @@ router.post(
       throw new ManualPostError(400, 'Post content is required');
     }
 
-    const { instructions, style, aspectRatio } = parseAiImageOptions(req.body);
+    const options = parseAiImageOptions(req.body);
 
     const { mediaUrl } = await generateAndUploadManualAiImage({
       userId,
       postText: content,
       uploadKey: `generated/ai-manual-${postId}-${Date.now()}`,
-      instructions,
-      style,
-      aspectRatio,
+      ...options,
     });
 
     const updated = await prisma.post.update({

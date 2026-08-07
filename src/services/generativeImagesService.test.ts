@@ -6,6 +6,7 @@ import {
   GenerativeImageError,
   GenerativeImagesService,
   buildLinkedInImagePrompt,
+  resolveImageCreativeDirection,
 } from './generativeImagesService';
 
 describe('GenerativeImagesService', () => {
@@ -15,15 +16,98 @@ describe('GenerativeImagesService', () => {
       profileDescription: 'I help B2B SaaS founders build repeatable revenue systems.',
     });
 
-    assert.match(prompt, /CREATOR \/ PROFILE CONTEXT:/);
+    assert.match(prompt, /SUPPORTING CREATOR \/ PROFILE CONTEXT/);
     assert.match(prompt, /I help B2B SaaS founders build repeatable revenue systems\./);
-    assert.match(prompt, /personalize the industry, audience, and visual metaphor/);
+    assert.match(prompt, /Treat profile context only as supporting/);
     assert.match(prompt, /not like a generic AI\/tech motivational poster/);
     assert.match(prompt, /Avoid weird surreal 3D scenes/);
-    assert.match(prompt, /at most one short headline of 3-7 words/);
+    assert.match(prompt, /Prefer one to five words per label/);
     assert.match(prompt, /Never include hashtags or text beginning with # anywhere in the image/);
     assert.match(prompt, /Never render the creator's niche name/);
-    assert.match(prompt, /VISUAL DECISION RULE:/);
+    assert.match(prompt, /VISUAL CONCEPT/);
+  });
+
+  it('resolves creative direction from universal post structure', () => {
+    const comparison = resolveImageCreativeDirection({
+      postText: 'Manual work versus automated work: both can deliver quality, but one removes repeated friction.',
+    });
+    assert.equal(comparison.composition, 'split');
+    assert.equal(comparison.visualFormat, 'visual_comparison');
+    assert.equal(comparison.textMode, 'minimal');
+
+    const disconnected = resolveImageCreativeDirection({
+      postText: 'The tools are individually excellent, but they do not communicate with each other.',
+    });
+    assert.equal(disconnected.composition, 'layered_editorial');
+    assert.match(disconnected.visualConcept, /components separated/i);
+  });
+
+  it('selects feed-native formats and text behavior from message structure', () => {
+    const process = resolveImageCreativeDirection({
+      postText: 'Here is the workflow. First collect the input. Second validate it. Finally publish the result.',
+    });
+    assert.equal(process.visualFormat, 'diagram');
+    assert.equal(process.textMode, 'structured');
+    assert.equal(process.composition, 'layered_editorial');
+
+    const timeline = resolveImageCreativeDirection({
+      postText: 'We transformed from scattered manual work to one coordinated system.',
+    });
+    assert.equal(timeline.visualFormat, 'timeline_transformation');
+    assert.equal(timeline.composition, 'progression');
+
+    const statistic = resolveImageCreativeDirection({
+      postText: '70% of respondents abandoned the task. That number is the signal we cannot ignore.',
+    });
+    assert.equal(statistic.visualFormat, 'data_graphic');
+    assert.equal(statistic.textMode, 'minimal');
+  });
+
+  it('lets custom instructions override Auto format and human presence', () => {
+    const direction = resolveImageCreativeDirection({
+      postText: 'Every approval adds another frustrating loop to the work.',
+      instructions: 'Make this a humorous 4-stage comic. Do not include people.',
+      visualFormat: 'auto',
+      humanPresence: 'auto',
+    });
+    assert.equal(direction.visualFormat, 'comic');
+    assert.equal(direction.composition, 'grid');
+    assert.equal(direction.mood, 'playful');
+    assert.equal(direction.humanPresence, 'none');
+    assert.equal(direction.textMode, 'structured');
+  });
+
+  it('validates optional controls while preserving legacy request fields', async () => {
+    const { parseImageCreativeOverrides } = await import('./generativeImagesService');
+    assert.deepEqual(parseImageCreativeOverrides({
+      instructions: 'legacy', style: 'professional', aspectRatio: '4:5',
+      visualFormat: 'comic', textMode: 'structured', humanPresence: 'not-valid',
+    }), { visualFormat: 'comic', textMode: 'structured' });
+  });
+
+  it('preserves explicit settings while resolving Auto fields from the post', () => {
+    const direction = resolveImageCreativeDirection({
+      postText: 'A process with three connected steps that turns noise into clarity.',
+      imageType: 'photorealistic',
+      composition: 'close_up',
+      mood: 'auto',
+    });
+    assert.equal(direction.imageType, 'photorealistic');
+    assert.equal(direction.composition, 'close_up');
+    assert.notEqual(direction.mood, 'auto');
+  });
+
+  it('builds one post-first art-directed prompt without niche templates', () => {
+    const prompt = buildLinkedInImagePrompt({
+      postText: 'The bottleneck is not effort. It is the one approval step constraining the entire flow.',
+      style: 'auto',
+    });
+    assert.match(prompt, /OBJECTIVE/);
+    assert.match(prompt, /CENTRAL MESSAGE/);
+    assert.match(prompt, /VISUAL CONCEPT/);
+    assert.match(prompt, /one consequential point/);
+    assert.match(prompt, /Never let niche dictate/);
+    assert.match(prompt, /Do not reproduce every sentence/);
   });
 
   it('uses the profile context fallback when none is supplied', () => {
