@@ -155,10 +155,125 @@ model User {
   postContentFingerprints PostContentFingerprint[]
   authProviderAccounts    AuthProviderAccount[]
   supportRequests         SupportRequest[]
+  linkedinAnalyticsImports LinkedInAnalyticsImport[]
+  linkedinProfileSnapshots LinkedInProfileSnapshot[]
 
   @@index([regionId])
   @@index([role])
   @@index([isBillingExempt])
+}
+
+enum LinkedInAnalyticsStatus {
+  PROCESSING
+  ANALYZING
+  READY
+  FAILED
+}
+
+model LinkedInAnalyticsImport {
+  id                String                    @id @default(cuid())
+  userId            String
+  periodStart       DateTime
+  periodEnd         DateTime
+  status            LinkedInAnalyticsStatus  @default(PROCESSING)
+  impressions       Int                       @default(0)
+  membersReached    Int                       @default(0)
+  engagementCount   Int                       @default(0)
+  followerCount     Int?
+  normalizedData    Json
+  deterministicData Json
+  analysisError     String?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  user         User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dailyMetrics LinkedInAnalyticsDailyMetric[]
+  postMetrics  LinkedInAnalyticsPostMetric[]
+  demographics LinkedInAnalyticsDemographic[]
+  insights     LinkedInAnalyticsInsight[]
+
+  @@unique([userId, periodStart, periodEnd])
+  @@index([userId, periodEnd])
+}
+
+model LinkedInAnalyticsDailyMetric {
+  id           String   @id @default(cuid())
+  importId     String
+  date         DateTime
+  impressions  Int      @default(0)
+  engagements  Int      @default(0)
+  newFollowers Int?
+
+  analyticsImport LinkedInAnalyticsImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@unique([importId, date])
+  @@index([importId])
+}
+
+model LinkedInAnalyticsPostMetric {
+  id                 String   @id @default(cuid())
+  importId           String
+  linkedinPostUrl    String
+  publishedAt        DateTime?
+  impressions        Int      @default(0)
+  engagements        Int      @default(0)
+  engagementRate     Float    @default(0)
+  matchedPostId      String?
+  enrichment         Json?
+  createdAt          DateTime @default(now())
+
+  analyticsImport LinkedInAnalyticsImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId])
+  @@index([matchedPostId])
+}
+
+model LinkedInAnalyticsDemographic {
+  id       String @id @default(cuid())
+  importId String
+  type     String
+  label    String
+  value    Float
+
+  analyticsImport LinkedInAnalyticsImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId, type])
+}
+
+model LinkedInProfileSnapshot {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String?
+  headline    String?
+  location    String?
+  summary     String?
+  skills      Json
+  experience  Json?
+  education   Json?
+  linkedinUrl String?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model LinkedInAnalyticsInsight {
+  id             String   @id @default(cuid())
+  importId       String
+  type           String
+  importance     String
+  title          String
+  finding        String
+  recommendation String
+  nextMove       String?
+  evidence       Json
+  confidence     Float?
+  createdAt      DateTime @default(now())
+
+  analyticsImport LinkedInAnalyticsImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId, importance])
 }
 
 model AuthProviderAccount {

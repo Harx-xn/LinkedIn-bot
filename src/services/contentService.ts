@@ -506,6 +506,47 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
   }
 
   /**
+   * Generic JSON transport for non-post product features. Unlike the manual
+   * composer transport, this does not force the manual-post JSON schema.
+   */
+  async fetchJsonRaw(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+    maxOutputTokens = POST_MAX_OUTPUT_TOKENS,
+  ): Promise<string> {
+    try {
+      if (provider === 'OPENAI') return await this.generateOpenAiGenericJson(prompt, maxOutputTokens);
+      return await this.generateGeminiPost(prompt, OPENAI_REPAIR_TEMPERATURE, 0, maxOutputTokens);
+    } catch (error) {
+      console.warn(`[structured-json] Primary provider ${provider} failed, attempting fallback`, {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
+        return this.generateGeminiPost(prompt, OPENAI_REPAIR_TEMPERATURE, 0, maxOutputTokens);
+      }
+      if (provider === 'GEMINI' && this.openai) {
+        return this.generateOpenAiGenericJson(prompt, maxOutputTokens);
+      }
+      throw error;
+    }
+  }
+
+  private async generateOpenAiGenericJson(prompt: string, maxOutputTokens: number): Promise<string> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_CONTENT_MODEL,
+      temperature: OPENAI_REPAIR_TEMPERATURE,
+      max_completion_tokens: maxOutputTokens,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Return only valid JSON matching the user-requested shape. Do not add fields from unrelated tasks.' },
+        { role: 'user', content: prompt },
+      ],
+    });
+    return response.choices[0].message.content || '';
+  }
+
+  /**
    * Manual-composer only. Returns raw provider text without batch parsing.
    */
   async fetchComposerRewriteRaw(
