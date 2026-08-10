@@ -17,6 +17,7 @@ import {
 import { evaluateTopicCombination } from "./ghostwriterQualityService";
 import { buildDeterministicBatchPlan } from "./ghostwriterBatchPlanner";
 import type { PreviewTrendsResponse, TopicFingerprint, TrendCandidate } from "./generationTypes";
+import { RECENT_STYLE_POST_LIMIT } from './expressionModeService';
 import {
   rankedToLegacyTrends,
   rankedToPreviewItems,
@@ -227,7 +228,7 @@ export class TrendingBotService {
 
           const author = {
             description: strategy.profilePositioning.positioningStatement || config.description || '',
-            tone: strategy.writingStyle.tone[0] || config.tone || 'Professional',
+            tone: strategy.writingStyle.tone[0] || config.tone || 'Conversational',
             niches: [niche],
             targetAudience: [
               strategy.targetAudience.primaryAudience,
@@ -441,13 +442,20 @@ export class TrendingBotService {
 
     const acceptedBodies: string[] = [];
     const batchFingerprints: TopicFingerprint[] = [];
-    const [history, linkedInAccount] = await Promise.all([
+    const [history, linkedInAccount, recentVoicePosts] = await Promise.all([
       loadRecentTopicHistory(userId),
       prisma.linkedInAccount.findFirst({
         where: { userId },
         select: { id: true },
       }),
+      prisma.post.findMany({
+        where: { userId, source: { in: ['AI', 'AI_TRENDING', 'MANUAL'] }, status: { in: ['REVIEW', 'SCHEDULED', 'PUBLISHED'] } },
+        orderBy: { createdAt: 'desc' },
+        take: RECENT_STYLE_POST_LIMIT,
+        select: { content: true },
+      }),
     ]);
+    const recentPosts = recentVoicePosts.map((post) => post.content);
     const persistenceContext: BatchPersistenceContext = {
       linkedinAccountId: linkedInAccount?.id ?? null,
       regionId: user?.regionId ?? null,
@@ -467,7 +475,7 @@ export class TrendingBotService {
         try {
           const result = await generateSlotPostUntilSuccess(
             contentService, plan, trend, author, botConfig, contextBodies, provider,
-            { batchFingerprints: contextFingerprints, recentTopicHistory: history },
+            { batchFingerprints: contextFingerprints, recentTopicHistory: history, recentPosts: [...contextBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT) },
           );
           return { slotIndex, plan, trend, result };
         } catch (error) {
@@ -507,7 +515,7 @@ export class TrendingBotService {
             botConfig,
             acceptedBodies,
             provider,
-            { batchFingerprints, recentTopicHistory: history },
+            { batchFingerprints, recentTopicHistory: history, recentPosts: [...acceptedBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT) },
           );
         }
         acceptedBodies.push(item.result.finalized.body);
@@ -705,7 +713,7 @@ export class TrendingBotService {
       niches,
       author: {
         description: strategy.profilePositioning.positioningStatement || config.description || "",
-        tone: strategy.writingStyle.tone[0] || config.tone || "Professional",
+        tone: strategy.writingStyle.tone[0] || config.tone || "Conversational",
         niches,
         targetAudience: [
           strategy.targetAudience.primaryAudience,

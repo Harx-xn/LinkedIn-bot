@@ -92,7 +92,8 @@ describe('unsupported experience prevention in prompts', () => {
     assert.ok(prompt.includes('labeled hypothetical'));
     assert.ok(prompt.includes('No personal experience claims'));
     assert.ok(prompt.includes('Topic clarity'));
-    assert.ok(prompt.includes('2,000 to 2,800 characters'));
+    assert.ok(prompt.includes('saved short/medium/long preference'));
+    assert.ok(!prompt.includes('2,000 to 2,800 characters'));
     assert.ok(prompt.includes('Do not include **'));
     assert.ok(!prompt.includes('User-supplied supporting context'));
   });
@@ -127,7 +128,7 @@ describe('manual schema parsing', () => {
     }
   });
 
-  it('rejects batch-style headline/body schema', () => {
+  it('preserves a usable body even when presentation scaffolding is omitted', () => {
     const result = parseManualJsonDetailed(JSON.stringify({
       headline: 'Auth',
       subheadline: '',
@@ -135,8 +136,58 @@ describe('manual schema parsing', () => {
       body: 'Server-side tenant authorization checks matter for every SaaS product.',
       hashtags: '#SaaS',
     }));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.hook, '');
+      assert.equal(result.data.closingLine, '');
+      assert.equal(result.data.contentPlan.ctaType, 'none');
+    }
+  });
+
+  it('accepts empty optional hook and closing line', () => {
+    const result = parseManualJsonDetailed(JSON.stringify({
+      ...validManualPost(),
+      hook: '',
+      closingLine: '',
+    }));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.hook, '');
+      assert.equal(result.data.closingLine, '');
+    }
+  });
+
+  it('accepts omitted optional hook and closing line', () => {
+    const { hook: _hook, closingLine: _closingLine, ...withoutPresentation } = validManualPost();
+    const result = parseManualJsonDetailed(JSON.stringify(withoutPresentation));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.data.hook, '');
+      assert.equal(result.data.closingLine, '');
+    }
+  });
+
+  it('accepts a nested usable post and fills safe plan defaults', () => {
+    const result = parseManualJsonDetailed(JSON.stringify({ result: {
+      content: 'Check the input binding before rewriting the movement controller. The handler must receive the action first.',
+      hashtags: [],
+    } }));
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.match(result.data.body, /input binding/);
+      assert.equal(result.data.contentPlan.hookType, 'none');
+      assert.equal(result.data.contentPlan.ctaType, 'none');
+    }
+  });
+
+  it('returns actionable diagnostics when no usable body exists', () => {
+    const result = parseManualJsonDetailed(JSON.stringify({ hook: '', closingLine: '', hashtags: [] }));
     assert.equal(result.ok, false);
-    if (!result.ok) assert.equal(result.stage, 'normalization');
+    if (!result.ok) {
+      assert.equal(result.stage, 'normalization');
+      assert.ok((result.issues?.length ?? 0) > 0);
+      assert.match(result.issues![0], /missing_required_field: body/);
+    }
   });
 });
 

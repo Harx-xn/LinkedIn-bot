@@ -28,6 +28,7 @@ import {
 import { createManualProviderCallBudget } from './manualPostTypes';
 import { getManualVoiceContext } from './manualVoiceProfileService';
 import { getRecentManualFingerprints } from './manualPostFingerprintService';
+import { RECENT_STYLE_POST_LIMIT, selectManualExpressionMode } from '../expressionModeService';
 
 function deriveTopicFromContent(content: string): string {
   const line = content
@@ -75,7 +76,12 @@ export async function generateManualPostV2(
   const { topic, additionalInstructions, supportingContext } = validateGenerateInput(body);
   const provider = parseContentProvider(body.provider);
   const voice = await getBotVoice(userId);
-  const voiceContext = await getManualVoiceContext(userId, topic);
+  const [voiceContext, recentVoiceRows] = await Promise.all([
+    getManualVoiceContext(userId, topic),
+    prisma.post.findMany({ where: { userId, status: { in: ['REVIEW', 'DRAFT', 'SCHEDULED', 'PUBLISHED'] } }, orderBy: { createdAt: 'desc' }, take: RECENT_STYLE_POST_LIMIT, select: { content: true } }),
+  ]);
+  const recentPosts = recentVoiceRows.map((post) => post.content);
+  const expressionMode = selectManualExpressionMode(topic, additionalInstructions, voice.strategy?.writingStyle, recentPosts);
   let recentFingerprints: Awaited<ReturnType<typeof getRecentManualFingerprints>> = [];
   try {
     recentFingerprints = await getRecentManualFingerprints(userId);
@@ -99,10 +105,13 @@ export async function generateManualPostV2(
         author: toAuthorContext(voice),
         voiceContext,
         recentFingerprints,
+        recentPosts,
+        expressionMode,
       },
       provider,
       budget,
     );
+    if (process.env.VOICE_DIVERSITY_DEBUG === 'true') console.info('[manual-expression-mode]', { expressionMode, recentPostsAnalyzed: recentPosts.length });
     generated = result.post;
   } catch (error) {
     if (error instanceof ManualPostError) throw error;

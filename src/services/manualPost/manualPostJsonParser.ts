@@ -28,35 +28,80 @@ function normalizeHashtagArray(value: unknown): string[] {
   return [];
 }
 
-export function normalizeManualPayload(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+type ManualNormalizationResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; issues: string[] };
+
+function unwrapManualPayload(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const obj = value as Record<string, unknown>;
+  for (const key of ['result', 'post', 'data']) {
+    const nested = obj[key];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested;
+  }
+  return value;
+}
+
+function normalizeManualPayloadDetailed(value: unknown): ManualNormalizationResult {
+  const unwrapped = unwrapManualPayload(value);
+  if (!unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) {
+    return { ok: false, issues: ['schema_mismatch: root must be a JSON object'] };
+  }
+  const obj = unwrapped as Record<string, unknown>;
 
   const hook = typeof obj.hook === 'string' ? obj.hook.trim() : '';
-  const body = typeof obj.body === 'string' ? obj.body.trim() : '';
-  const closingLine = typeof obj.closingLine === 'string' ? obj.closingLine.trim() : '';
+  const bodyValue = obj.body ?? obj.content ?? obj.postContent ?? obj.text;
+  const body = typeof bodyValue === 'string' ? bodyValue.trim() : '';
+  const closingLine = typeof obj.closingLine === 'string'
+    ? obj.closingLine.trim()
+    : typeof obj.closing === 'string'
+      ? obj.closing.trim()
+      : '';
 
-  if (!hook || !body || !closingLine) return null;
+  if (!body) {
+    return {
+      ok: false,
+      issues: [bodyValue == null ? 'missing_required_field: body' : `invalid_field_type: body (${typeof bodyValue})`],
+    };
+  }
 
   const planRaw = obj.contentPlan;
-  if (!planRaw || typeof planRaw !== 'object' || Array.isArray(planRaw)) return null;
-  const plan = planRaw as Record<string, unknown>;
-
-  const requiredPlanFields = ['angle', 'coreClaim', 'audience', 'structure', 'hookType', 'evidenceType', 'ctaType'];
+  const suppliedPlan = planRaw && typeof planRaw === 'object' && !Array.isArray(planRaw)
+    ? planRaw as Record<string, unknown>
+    : {};
+  const bodyClaim = body.split(/(?<=[.!?])\s+/)[0]?.trim() || body.slice(0, 160);
+  const planDefaults: Record<string, string> = {
+    angle: 'manual_post',
+    coreClaim: bodyClaim,
+    audience: 'supplied target audience',
+    structure: 'expression-mode-led',
+    hookType: hook ? 'provided' : 'none',
+    evidenceType: 'reasoned_observation',
+    ctaType: closingLine ? 'natural' : 'none',
+  };
   const contentPlan: Record<string, string> = {};
-  for (const field of requiredPlanFields) {
-    if (typeof plan[field] !== 'string' || !plan[field].trim()) return null;
-    contentPlan[field] = (plan[field] as string).trim();
+  for (const field of Object.keys(planDefaults)) {
+    contentPlan[field] = typeof suppliedPlan[field] === 'string' && suppliedPlan[field].trim()
+      ? (suppliedPlan[field] as string).trim()
+      : planDefaults[field];
   }
 
   return {
-    contentPlan,
-    hook,
-    body,
-    closingLine,
-    hashtags: normalizeHashtagArray(obj.hashtags),
-    sourceTopic: typeof obj.sourceTopic === 'string' ? obj.sourceTopic.trim() : undefined,
+    ok: true,
+    value: {
+      contentPlan,
+      hook,
+      body,
+      closingLine,
+      hashtags: normalizeHashtagArray(obj.hashtags),
+      sourceTopic: typeof obj.sourceTopic === 'string' ? obj.sourceTopic.trim() : undefined,
+    },
   };
+}
+
+export function normalizeManualPayload(value: unknown): Record<string, unknown> | null {
+  const result = normalizeManualPayloadDetailed(value);
+  return result.ok ? result.value : null;
 }
 
 export function parseManualJsonDetailed(raw: string): ManualJsonParseResult {
@@ -82,16 +127,17 @@ export function parseManualJsonDetailed(raw: string): ManualJsonParseResult {
     extracted = nested.value;
   }
 
-  const normalized = normalizeManualPayload(extracted);
-  if (!normalized) {
+  const normalization = normalizeManualPayloadDetailed(extracted);
+  if (!normalization.ok) {
     return {
       ok: false,
       stage: 'normalization',
       message: 'Manual post JSON failed normalization',
+      issues: normalization.issues,
     };
   }
 
-  const parsed = manualGeneratedPostSchema.safeParse(normalized);
+  const parsed = manualGeneratedPostSchema.safeParse(normalization.value);
   if (!parsed.success) {
     return {
       ok: false,

@@ -40,7 +40,9 @@ import {
 import type { SpecificityResult } from './generationTypes';
 import { buildDeterministicBatchPlan } from './ghostwriterBatchPlanner';
 import { evaluateTopicCombination } from './ghostwriterQualityService';
-import { MANUAL_POST_OPENAI_JSON_SCHEMA } from './manualPost/manualPostSchemas';
+import { MANUAL_PLANNING_OPENAI_JSON_SCHEMA, MANUAL_POST_OPENAI_JSON_SCHEMA } from './manualPost/manualPostSchemas';
+import { deriveNarrowCentralClaim, isObviouslyGenericClaim } from './claimNarrowingService';
+import { buildExpressionModePromptBlock, buildExpressionModeSystemInstruction, expressionModeFromPrompt } from './expressionModeService';
 
 dotenv.config();
 
@@ -193,10 +195,10 @@ ${trends.slice(0, count + 3).map((t, i) => `${i}: ${t.topic}`).join('\n')}
 
 Rules:
 - Distribute angles: technical_mistake, practical_tutorial, architecture_tradeoff, defensible_opinion, debugging_story, product_lesson, reflection
-- No more than 2 question endings in ${count} posts
+- Prefer a natural ending that stops when the argument is complete. Use a question, takeaway, action, or summary only when intentionally useful.
 - No hook style repeated more than twice
-- At least 2 takeaway endings
 - Do not repeat source topics unless necessary
+- For every post, narrow the topic into one arguable centralClaim. It must name a relationship, condition, mechanism, trade-off, or decision—not merely say the topic is important or beneficial.
 
 Output JSON array only:
 [
@@ -205,8 +207,9 @@ Output JSON array only:
     "sourceTopic": "...",
     "angle": "technical_mistake",
     "hookStyle": "observation",
-    "endingStyle": "takeaway",
+    "endingStyle": "natural",
     "layout": "problem_mechanism_fix",
+    "centralClaim": "A specific, debatable claim that the draft must preserve",
     "rationale": "..."
   }
 ]`;
@@ -228,21 +231,96 @@ Output JSON array only:
     return deterministic;
   }
 
+  async narrowBatchClaims(
+    plans: BatchPostPlan[],
+    trends: TrendCandidate[],
+    author: AuthorContext,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<BatchPostPlan[]> {
+    const fallback = () => plans.map((plan, index) => ({
+      ...plan,
+      centralClaim: deriveNarrowCentralClaim({
+        topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic',
+        candidateClaim: plan.centralClaim ?? plan.coreClaim,
+        angle: plan.angle,
+        expressionMode: plan.expressionMode,
+        author,
+      }),
+    }));
+    const prompt = `${GHOSTWRITER_SYSTEM}
+${buildAuthorBlock(author)}
+
+Narrow each broad topic below into ONE concise, domain-appropriate central claim before drafting.
+The topic is territory; the claim is the specific assertion one post will develop.
+
+${plans.map((plan, index) => {
+  const trend = trends[index];
+  return `${index}. TOPIC: ${plan.sourceTopic ?? trend?.topic ?? 'evergreen author expertise'}
+ANGLE: ${plan.angle}
+EXPRESSION MODE: ${plan.expressionMode ?? 'direct'}
+SOURCE SUMMARY: ${trend?.summary?.trim() || 'none; use conditional or observational wording'}
+SOURCE POINTS: ${(trend?.keyPoints ?? []).join(' | ') || 'none'}`;
+}).join('\n\n')}
+
+Rules:
+- Use the author's niche, positioning, audience pains, desired outcomes, pillars, and available source evidence.
+- Each claim must assert one cause-and-effect relationship, distinction, behavior, process failure, decision rule, trade-off, constraint, misconception, consequence, condition, or non-obvious observation that fits its domain.
+- Do not merely say the topic is important, essential, beneficial, efficient, reduces risk, or drives success.
+- Do not force software or technical vocabulary onto non-technical domains.
+- Do not invent personal experience, outcomes, statistics, medical/financial/legal facts, or named results. Use conditional framing where evidence is limited.
+- Make claims in this batch meaningfully different in their underlying argument, not just their nouns.
+- Return exactly one claim per indexed topic.
+
+Output one JSON object only:
+{"claims":[{"index":0,"centralClaim":"One concise sentence."}]}`;
+
+    try {
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, 1400);
+      const parsed = JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim());
+      const items = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.claims)
+          ? parsed.claims
+          : Array.isArray(parsed?.centralClaims)
+            ? parsed.centralClaims
+            : null;
+      if (!items) return fallback();
+      return plans.map((plan, index) => {
+        const item = items.find((candidate: unknown) => Number((candidate as { index?: unknown })?.index) === index);
+        const candidate = typeof item?.centralClaim === 'string' ? item.centralClaim.trim() : '';
+        return {
+          ...plan,
+          centralClaim: candidate && !isObviouslyGenericClaim(candidate)
+            ? candidate
+            : deriveNarrowCentralClaim({ topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic', candidateClaim: candidate, angle: plan.angle, expressionMode: plan.expressionMode, author }),
+        };
+      });
+    } catch (error) {
+      console.warn('[ghostwriter] central claim planning failed; using non-blocking fallback', { message: error instanceof Error ? error.message : String(error) });
+      return fallback();
+    }
+  }
+
   async generatePlannedPost(
     plan: BatchPostPlan,
     author: AuthorContext,
     sourceLink = '',
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
     trend?: TrendCandidate | null,
+    recentPosts: string[] = [],
   ): Promise<GeneratedPostContent> {
     const prompt = `${GHOSTWRITER_SYSTEM}
 ${buildAuthorBlock(author)}
-${buildPlanBlock(plan, sourceLink, trend)}
+${buildPlanBlock(plan, sourceLink, trend, recentPosts, author)}
 
 ${SPECIFICITY_RULES}
 ${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
 ${LANGUAGE_RULES}
+
+FINAL RHETORICAL AUTHORITY:
+The fixed CENTRAL CLAIM controls what the post argues. The following Expression Mode contract controls how the thought unfolds and overrides earlier generic presentation guidance when it conflicts.
+${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author.strategy)}
 
 Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic, angle, layout.`;
 
@@ -324,7 +402,7 @@ Requirements:
 - Do not invent statistics, customers, incidents, or personal experiences.
 - Avoid excessive one-line fragments and unnecessary emojis.
 - Avoid repetitive generic AI phrasing.
-- Target 2,000 to 2,800 characters when the topic supports it.
+- Let the complexity of the idea determine the natural length. Do not pad the post.
 - Do not use Markdown bold markers or double asterisks.
 - Keep the final formatted post within LinkedIn's 3,000-character limit.
 - Use hashtags only when they add value.
@@ -348,7 +426,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
     topic: string,
     articleLink: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
-    tone: string = 'Professional',
+    tone: string = 'Conversational',
     description: string = '',
     niches: string[] = [],
   ): Promise<GeneratedPostContent> {
@@ -368,7 +446,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
   async generateMixedPost(
     trends: { topic: string; link: string }[],
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
-    tone: string = 'Professional',
+    tone: string = 'Conversational',
     description: string = '',
     niches: string[] = [],
   ): Promise<GeneratedPostContent> {
@@ -505,6 +583,28 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     return this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
   }
 
+  /** Manual planning only. Uses the angles schema rather than the final-post schema. */
+  async fetchComposerPlanningRaw(
+    prompt: string,
+    provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
+  ): Promise<string> {
+    try {
+      if (provider === 'OPENAI') return await this.generateOpenAiManualPlanning(prompt);
+      return await this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, 1800);
+    } catch (error) {
+      console.warn(`[manual-post-v2] Primary planning provider ${provider} failed, attempting fallback`, {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
+        return this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, 1800);
+      }
+      if (provider === 'GEMINI' && this.openai) {
+        return this.generateOpenAiManualPlanning(prompt);
+      }
+      throw error;
+    }
+  }
+
   /**
    * Generic JSON transport for non-post product features. Unlike the manual
    * composer transport, this does not force the manual-post JSON schema.
@@ -595,7 +695,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     currentContent: string,
     suggestions: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
-    tone: string = 'Professional',
+    tone: string = 'Conversational',
     description: string = '',
     strategy?: AuthorContext['strategy'],
   ): Promise<GeneratedPostContent> {
@@ -648,8 +748,30 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
       messages: [
         {
           role: 'system',
-          content: 'You are a LinkedIn manual post composer. Return JSON only matching the requested schema.',
+          content: `You are a LinkedIn manual post composer. Return JSON only matching the requested schema.\n${buildExpressionModeSystemInstruction(expressionModeFromPrompt(prompt))}`,
         },
+        { role: 'user', content: prompt },
+      ],
+    });
+    return response.choices[0].message.content || '';
+  }
+
+  private async generateOpenAiManualPlanning(prompt: string): Promise<string> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_CONTENT_MODEL,
+      temperature: OPENAI_PLAN_TEMPERATURE,
+      max_completion_tokens: 1800,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'manual_post_planning',
+          strict: true,
+          schema: MANUAL_PLANNING_OPENAI_JSON_SCHEMA,
+        },
+      },
+      messages: [
+        { role: 'system', content: 'You are a LinkedIn content planner. Return JSON only matching the requested planning schema.' },
         { role: 'user', content: prompt },
       ],
     });
@@ -671,7 +793,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
         },
       },
       messages: [
-        { role: 'system', content: GHOSTWRITER_SYSTEM },
+        { role: 'system', content: `${GHOSTWRITER_SYSTEM}\n\n${buildExpressionModeSystemInstruction(expressionModeFromPrompt(prompt))}` },
         { role: 'user', content: prompt },
       ],
     });

@@ -114,7 +114,7 @@ export function buildFallbackTopicSuggestions(
   const primaryPillar = strategy?.contentPillars.primaryPillars[0];
   const primaryNiche = primaryPillar?.name || voice.niches.find((niche) => niche.trim()) || 'your niche';
   const sourceHint = trendSources.length > 0 ? trendSources.join(', ') : 'industry news';
-  const tone = strategy?.writingStyle.tone[0] || voice.tone || 'Professional';
+  const tone = strategy?.writingStyle.tone[0] || voice.tone || 'Conversational';
   const audience = strategy?.targetAudience.primaryAudience || 'your audience';
 
   const templates: Array<{ title: string; description: string }> = [

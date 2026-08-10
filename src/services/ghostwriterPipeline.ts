@@ -59,7 +59,7 @@ export async function prepareBatchContext(
 ) {
   const author: AuthorContext = {
     description: config.strategy?.profilePositioning.positioningStatement || config.description || '',
-    tone: config.strategy?.writingStyle.tone[0] || config.tone || 'Professional',
+    tone: config.strategy?.writingStyle.tone[0] || config.tone || 'Conversational',
     niches,
     targetAudience: config.strategy
       ? [
@@ -105,7 +105,7 @@ export async function prepareBatchContextV2(params: {
   };
   const author: AuthorContext = {
     description: params.config.strategy?.profilePositioning.positioningStatement || params.config.description || '',
-    tone: params.config.strategy?.writingStyle.tone[0] || params.config.tone || 'Professional',
+    tone: params.config.strategy?.writingStyle.tone[0] || params.config.tone || 'Conversational',
     niches: params.niches,
     targetAudience: params.config.strategy
       ? [
@@ -187,6 +187,7 @@ export async function generateSlotPost(
   options?: {
     batchFingerprints?: import('./generationTypes').TopicFingerprint[];
     recentTopicHistory?: import('./topicHistoryService').TopicHistoryRow[];
+    recentPosts?: string[];
   },
 ): Promise<GeneratedSlotResult> {
   return generateSlotPostImpl(
@@ -212,6 +213,7 @@ export async function generateSlotPostUntilSuccess(
   options?: {
     batchFingerprints?: import('./generationTypes').TopicFingerprint[];
     recentTopicHistory?: import('./topicHistoryService').TopicHistoryRow[];
+    recentPosts?: string[];
   },
 ) {
   return generateSlotPostUntilSuccessImpl(
@@ -235,7 +237,8 @@ export async function planBatchForGeneration(
   ranked?: RankedTrendCandidate[],
 ) {
   if (ranked?.length) {
-    const plan = buildTopicDiverseBatchPlan(ranked.slice(0, count), count);
+    const basePlan = buildTopicDiverseBatchPlan(ranked.slice(0, count), count, author.strategy?.writingStyle);
+    const plan = await contentService.narrowBatchClaims(basePlan, ranked.slice(0, count).map((item) => item.trend), author, provider);
     const diversityIssues = validatePlanTopicDiversity(plan);
     if (diversityIssues.length) {
       console.warn('[ghostwriter] batch plan diversity warnings', { issues: diversityIssues });
@@ -244,7 +247,8 @@ export async function planBatchForGeneration(
     return plan;
   }
 
-  const plan = await contentService.planBatch(eligible, author, count, provider);
+  const basePlan = await contentService.planBatch(eligible, author, count, provider);
+  const plan = await contentService.narrowBatchClaims(basePlan, eligible, author, provider);
   console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author));
   return plan;
 }

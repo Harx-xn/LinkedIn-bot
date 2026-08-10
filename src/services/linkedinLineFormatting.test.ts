@@ -9,6 +9,11 @@ describe('LinkedIn line formatting', () => {
     assert.ok(out.split('\n\n').length >= 2);
   });
 
+  it('preserves a valid multi-sentence paragraph as one paragraph', () => {
+    const input = 'More leads increase review volume while qualification capacity stays fixed. Reps then spend a larger share of the week rejecting weak opportunities. The conversion problem begins before the sales call.';
+    assert.equal(normalizeLinkedInLineBody(input), input);
+  });
+
   it('keeps a single concise sentence unchanged', () => {
     const input = 'Atomic counters keep plan enforcement accurate.';
     assert.equal(normalizeLinkedInLineBody(input), input);

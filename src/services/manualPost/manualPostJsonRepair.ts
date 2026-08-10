@@ -53,6 +53,7 @@ function logRejectedManualOutput(
     stage: result.stage,
     message: result.message,
     issueCount: result.issues?.length ?? 0,
+    issues: result.issues?.slice(0, 5) ?? ['unknown_normalization_failure'],
   });
 }
 

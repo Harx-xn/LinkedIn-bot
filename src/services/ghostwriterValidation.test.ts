@@ -116,6 +116,23 @@ describe('specificity scoring', () => {
     const r = scoreSpecificity('API server frontend backend token.');
     assert.ok(r.score < 50);
   });
+
+  it('accepts a short Direct-style post with one deeply explained mechanism', () => {
+    const body = 'API scaling problems often start before traffic becomes a problem. An endpoint returning an unbounded dataset does more database work, serializes more data, sends a larger payload, and makes the client process more than it needs. Pagination fixes that particular problem before another server enters the discussion.';
+    const r = scoreSpecificity(body);
+    assert.ok(r.score >= 55);
+    assert.ok(r.signals.includes('explained_mechanism'));
+    assert.deepEqual(r.missing, []);
+
+    const validation = runDeterministicValidation(
+      { headline: '', subheadline: '', bulletPoints: [], body, hashtags: '' },
+      AUTHOR,
+      { trendIndex: 0, sourceTopic: 'API design', angle: 'product_lesson', hookStyle: 'observation', endingStyle: 'natural', layout: 'short_observation', rationale: 'regression', expressionMode: 'direct' },
+      [],
+    );
+    assert.equal(validation.passed, true);
+    assert.ok(!validation.issues.some((issue) => issue.code === 'insufficient_specificity'));
+  });
 });
 
 describe('angle validation', () => {

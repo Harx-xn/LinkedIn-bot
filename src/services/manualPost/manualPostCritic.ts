@@ -114,10 +114,16 @@ export function extractPreservedFactTokens(text: string): string[] {
     'What',
     'Why',
     'How',
+    'Have',
     'Most',
     'Many',
     'When',
     'In',
+    'As',
+    'If',
+    'Conversely',
+    'Consider',
+    'Invest',
   ]);
   return Array.from(
     new Set(

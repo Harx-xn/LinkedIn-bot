@@ -103,7 +103,7 @@ export const batchPlanItemSchema = z.object({
     'lesson',
     'comparison',
   ]),
-  endingStyle: z.enum(['takeaway', 'specific_question', 'summary', 'action']),
+  endingStyle: z.enum(['natural', 'takeaway', 'specific_question', 'summary', 'action']),
   layout: z.enum([
     'short_observation',
     'story_then_lesson',
@@ -114,6 +114,7 @@ export const batchPlanItemSchema = z.object({
     'technical_walkthrough',
   ]).optional(),
   rationale: z.string(),
+  centralClaim: z.string().min(1).optional(),
 });
 
 export const batchPlanSchema = z.array(batchPlanItemSchema);

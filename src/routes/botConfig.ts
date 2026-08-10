@@ -222,8 +222,8 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       niches: nichesStr,
       sources: sourcesStr,
       tone: hasTone
-        ? (typeof tone === 'string' && tone.trim() ? tone : 'Professional')
-        : existingConfig?.tone ?? 'Professional',
+        ? (typeof tone === 'string' && tone.trim() ? tone : 'Conversational')
+        : existingConfig?.tone ?? 'Conversational',
       description: hasDescription
         ? (typeof description === 'string' ? description : '')
         : existingConfig?.description ?? '',
@@ -275,7 +275,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       ...(hasBrandLogoPosition ? { brandLogoPosition } : {}),
       ...(timeSlotsUpdate ? { timeSlots: timeSlotsUpdate } : {}),
       ...(hasTone
-        ? { tone: typeof tone === 'string' && tone.trim() ? tone : 'Professional' }
+        ? { tone: typeof tone === 'string' && tone.trim() ? tone : 'Conversational' }
         : {}),
       ...(hasIsEnabled ? { isEnabled: !!isEnabled } : {}),
       ...(hasDescription ? { description: typeof description === 'string' ? description : '' } : {}),
@@ -304,7 +304,7 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
       brandLogoEnabled: brandLogoEnabled ?? false,
       brandLogoPosition: brandLogoPosition ?? 'bottomRight',
       timeSlots: timeSlotsUpdate ?? ['09:00'],
-      tone: hasTone && typeof tone === 'string' && tone.trim() ? tone : 'Professional',
+      tone: hasTone && typeof tone === 'string' && tone.trim() ? tone : 'Conversational',
       isEnabled: hasIsEnabled ? !!isEnabled : false,
       description: hasDescription && typeof description === 'string' ? description : '',
       includeContactInfo: hasIncludeContactInfo ? parseBoolean(body.includeContactInfo, false) : false,

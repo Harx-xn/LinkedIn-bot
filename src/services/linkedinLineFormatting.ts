@@ -75,8 +75,8 @@ export function normalizeLinkedInLineBody(body: string): string {
     if (!paragraph) return;
 
     const sentences = splitSentences(paragraph);
-    if (sentences.length <= 2) {
-      blocks.push(sentences.join('\n\n'));
+    if (sentences.length <= 3 && paragraph.length <= 420) {
+      blocks.push(paragraph);
       return;
     }
 
@@ -142,7 +142,7 @@ export function validateLinkedInFormatting(body: string): FormattingValidationIs
     }
 
     const sentenceCount = countSentences(paragraph);
-    if (sentenceCount >= 3 || paragraph.length > 320) {
+    if (sentenceCount >= 4 || paragraph.length > 420) {
       issues.push({ code: 'dense_paragraph', severity: 'error', evidence: [paragraph.slice(0, 120)] });
     }
 

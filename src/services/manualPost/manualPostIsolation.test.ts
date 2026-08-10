@@ -101,6 +101,7 @@ describe('manual vs batch architectural isolation', () => {
     assert.ok(provider.includes('invokeManualDraftPrompt'));
     assert.ok(provider.includes('invokeManualCriticPrompt'));
     assert.ok(provider.includes('fetchComposerGenerationRaw'));
+    assert.ok(provider.includes('fetchComposerPlanningRaw'));
     assert.ok(provider.includes('fetchComposerRewriteRaw'));
     assert.ok(provider.includes('parseManualProviderOutputWithRepair'));
     assert.ok(!provider.includes('executeComposerGenerationPrompt'));

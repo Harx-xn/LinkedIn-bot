@@ -460,7 +460,7 @@ model BotConfig {
   brandLogoPosition  String   @default("bottomRight")
   isEnabled          Boolean  @default(false)
   description        String?  @default("")
-  tone               String?  @default("Professional")
+  tone               String?  @default("Conversational")
   includeContactInfo Boolean  @default(false)
   includeWebsiteLink Boolean  @default(false)
   contactInfo        String?

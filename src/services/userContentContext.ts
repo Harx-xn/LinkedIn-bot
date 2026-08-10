@@ -85,7 +85,7 @@ export async function getBotVoice(userId: string): Promise<BotVoice> {
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 
   return {
-    tone: strategy.writingStyle.tone[0] || config?.tone || 'Professional',
+    tone: strategy.writingStyle.tone[0] || config?.tone || 'Conversational',
     description: strategy.profilePositioning.positioningStatement || config?.description || '',
     backgroundImageUrl: config?.backgroundImageUrl || undefined,
     contactInfo: config?.contactInfo || null,

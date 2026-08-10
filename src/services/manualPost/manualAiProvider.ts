@@ -54,7 +54,8 @@ export async function invokeManualPlanningPrompt(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
 ): Promise<ManualPlanningResult> {
-  const raw = await fetchManualStageRaw(contentService, prompt, provider, budget, 'generation');
+  budget.recordProviderCall();
+  const raw = await contentService.fetchComposerPlanningRaw(prompt, provider);
   return parseManualPlanningResult(raw);
 }
 

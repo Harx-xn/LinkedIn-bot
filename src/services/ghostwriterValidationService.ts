@@ -85,18 +85,13 @@ const DETERMINISTIC_TECH_RULES: DeterministicTechnicalRule[] = [
   { pattern: /\binstant(?:ly)?\s+scalab/i, code: 'instant_scalability', severity: 'warning', suggestion: 'Scalability depends on architecture and workload.' },
 ];
 
-const ANGLE_SPECIFICITY_MIN: Record<PostAngle, number> = {
-  practical_tutorial: 65,
-  technical_mistake: 65,
-  architecture_tradeoff: 65,
-  debugging_story: 60,
-  defensible_opinion: 50,
-  product_lesson: 50,
-  reflection: 40,
-};
-
 export function getSpecificityThreshold(plan: BatchPostPlan): number {
-  return ANGLE_SPECIFICITY_MIN[plan.angle] ?? 50;
+  switch (plan.expressionMode) {
+    case 'reflective': return 45;
+    case 'opinionated': return 50;
+    case 'conversational': return 50;
+    default: return 55;
+  }
 }
 
 export function isTopicSuitableForAngle(topic: string, angle: PostAngle): boolean {
@@ -186,65 +181,36 @@ export function detectDeterministicTechnicalIssues(text: string): QualityIssue[]
 export function scoreSpecificity(text: string): SpecificityResult {
   const signals: string[] = [];
   const missing: string[] = [];
-  const categories = {
-    namedMechanism: 0,
-    implementationBoundary: 0,
-    failureMode: 0,
-    actionableImplementation: 0,
-    tradeoffOrCondition: 0,
-    causalExplanation: 0,
-  };
 
   if (/use api checks for security/i.test(text)) {
-    return { score: 15, signals: [], missing: ['named_mechanism', 'implementation_boundary', 'failure_mode'] };
+    return { score: 15, signals: [], missing: ['concrete_support'] };
   }
 
-  if (/\b(tenant|authorization|entitlement|middleware|endpoint|queue|webhook|scheduler|idempoten|transaction|database|handler|route|prisma|postgres|token|subscription)\b/i.test(text)) {
-    categories.namedMechanism = 18;
-    signals.push('named_mechanism');
-  }
-  if (/\b(server-side|client-side|api layer|database layer|middleware|boundary|same transaction|tenant-scoped|protected (?:api )?operation)\b/i.test(text)) {
-    categories.implementationBoundary = 18;
-    signals.push('implementation_boundary');
-  }
-  if (/\b(failure mode|duplicate|retry|timeout|race condition|drift|leak|cross-tenant|incorrect|fails when|breaks when)\b/i.test(text)) {
-    categories.failureMode = 18;
-    signals.push('failure_mode');
-  }
-  if (/\b(step \d|first,|then,|configure|implement|validate|increment|check|add)\b/i.test(text)) {
-    categories.actionableImplementation = 16;
-    signals.push('actionable_implementation');
-  }
-  if (/\b(trade-?off|depending on|limitation|when|may|can|if)\b/i.test(text)) {
-    categories.tradeoffOrCondition = 14;
-    signals.push('tradeoff_or_condition');
-  }
-  if (/\b(because|cause|leads to|results in|prevents|when .+ then)\b/i.test(text)) {
-    categories.causalExplanation = 16;
-    signals.push('causal_explanation');
-  }
+  const concreteTerms = text.match(/\b(?:api|endpoint|request|response|query|row|record|dataset|payload|serializ\w*|memory|client|server|pagination|cache|index|database|transaction|middleware|handler|controller|binding|input|queue|worker|webhook|retry|idempoten\w*|tenant|authentication|authorization|token|constraint|lock|thread|process|cpu|latency|timeout|event|table|join|route|service|versioning|version|backward compatibility|http|method|resource|schema|data format|postgres|prisma|subscription|entitlement)\b/gi) ?? [];
+  const concreteCount = new Set(concreteTerms.map((term) => term.toLowerCase())).size;
+  const hasCausalDepth = /\b(?:because|when|whenever|if|unless|while|so that|which (?:means|causes|forces|prevents|increases|reduces)|increases?|reduces?|prevents?|requires?|returns?|serializes?|reaches?|triggers?|blocks?|breaks?|changes?|integrates?|evolves?|defines?|reveals?|hides?|crowds? out|depends? on|leads? to|results? in|before|after|instead of|rather than)\b/i.test(text);
+  const hasPreciseOperation = /\b(?:check|validate|bind|paginate|cache|index|query|return|serialize|increment|enforce|scope|deduplicate|trace|inspect|measure|limit)\w*\b/i.test(text);
+  const hasConcreteRelationship = concreteCount >= 2 && (hasCausalDepth || hasPreciseOperation);
+  const contentWords = text.toLowerCase().match(/\b[a-z][a-z'-]{4,}\b/g) ?? [];
+  const stopWords = new Set(['about', 'after', 'again', 'being', 'could', 'every', 'first', 'their', 'there', 'these', 'thing', 'those', 'through', 'under', 'which', 'while', 'would']);
+  const distinctiveWords = new Set(contentWords.filter((word) => !stopWords.has(word)));
+  // Specific relationships are domain-neutral: legal deadlines, clinical follow-up,
+  // sales qualification, and operational constraints do not need software nouns.
+  const hasDomainNeutralRelationship = hasCausalDepth && distinctiveWords.size >= 7 && text.trim().length >= 70;
+  const hasQuantifiedDetail = /\b\d[\d,]*(?:\s?(?:ms|mb|gb|rows?|records?|requests?|%))?\b/i.test(text);
+  const genericOnly = /\b(?:best practices|scalable systems?|improve performance|ensure reliability|enhance user experience|reduce technical debt|robust solutions?)\b/i.test(text) && concreteCount < 2;
 
-  const keywordOnly = categories.namedMechanism > 0 &&
-    categories.implementationBoundary === 0 &&
-    categories.failureMode === 0 &&
-    categories.causalExplanation === 0;
-  if (keywordOnly) categories.namedMechanism = Math.min(categories.namedMechanism, 8);
+  let score = 10;
+  if (concreteCount >= 1) { score = 30; signals.push('concrete_subject', 'named_mechanism'); }
+  if (concreteCount >= 3) { score = 40; signals.push('concrete_detail'); }
+  if (hasConcreteRelationship) { score = Math.max(score, 78); signals.push('explained_mechanism'); }
+  if (hasDomainNeutralRelationship) { score = Math.max(score, 74); signals.push('specific_relationship'); }
+  if (hasCausalDepth && concreteCount >= 1) signals.push('causal_explanation');
+  if (hasQuantifiedDetail && concreteCount >= 1) { score = Math.max(score, 72); signals.push('quantified_detail'); }
+  if (hasConcreteRelationship && hasQuantifiedDetail) score = 90;
+  if (genericOnly && !hasDomainNeutralRelationship) score = Math.min(score, 25);
 
-  const score = Math.min(
-    100,
-    categories.namedMechanism +
-      categories.implementationBoundary +
-      categories.failureMode +
-      categories.actionableImplementation +
-      categories.tradeoffOrCondition +
-      categories.causalExplanation,
-  );
-
-  if (categories.namedMechanism === 0) missing.push('named_mechanism');
-  if (categories.implementationBoundary === 0) missing.push('implementation_boundary');
-  if (categories.failureMode === 0) missing.push('failure_mode');
-  if (categories.actionableImplementation === 0) missing.push('actionable_implementation');
-  if (categories.causalExplanation === 0) missing.push('causal_explanation');
+  if (score < 45) missing.push('concrete_support');
 
   return { score, signals, missing };
 }
@@ -261,12 +227,12 @@ export function validateAngleContent(body: string, plan: BatchPostPlan): Quality
         issues.push({ code: 'debugging_missing_cause', severity: 'error', instruction: 'Explain a likely mechanism or cause.' });
       }
       if (!/\b(fix|prevent|guard|idempoten|atomic|constraint)\b/i.test(body)) {
-        issues.push({ code: 'debugging_missing_prevention', severity: 'error', instruction: 'Include a correction and prevention lesson.' });
+        issues.push({ code: 'debugging_missing_fix', severity: 'error', instruction: 'Include a correction or decision that addresses the cause.' });
       }
       break;
     case 'technical_mistake':
       if (!/\b(mistake|wrong|incorrect|anti-?pattern|should not|instead|pitfall|risk|problem|avoid)\b/i.test(body)) {
-        issues.push({ code: 'mistake_not_named', severity: 'error', instruction: 'Name the actual mistake and consequence.' });
+        issues.push({ code: 'mistake_not_named', severity: 'error', instruction: 'Name the actual mistake or risky assumption.' });
       }
       break;
     case 'architecture_tradeoff':
@@ -284,8 +250,8 @@ export function validateAngleContent(body: string, plan: BatchPostPlan): Quality
       }
       break;
     case 'defensible_opinion':
-      if (!/\b(because|since|reason|however|limitation|counter)\b/i.test(body)) {
-        issues.push({ code: 'opinion_missing_reasoning', severity: 'error', instruction: 'Include reasoning and a limitation or counterpoint.' });
+      if (!/\b(because|since|reason|means|therefore|so that|which)\b/i.test(body)) {
+        issues.push({ code: 'opinion_missing_reasoning', severity: 'error', instruction: 'Support the position with defensible reasoning.' });
       }
       break;
     case 'product_lesson':
@@ -377,7 +343,7 @@ export function runDeterministicValidation(
       code: 'insufficient_specificity',
       severity: 'error',
       evidence: specificity.missing,
-      instruction: `Add concrete mechanism, boundary, or failure mode. Score ${specificity.score} < ${minSpec}.`,
+      instruction: `Add the smallest relevant concrete mechanism, boundary, technical detail, or causal explanation without changing the Expression Mode structure. Score ${specificity.score} < ${minSpec}.`,
     });
     score -= 20;
   }
@@ -449,10 +415,6 @@ export function validateFormattedBody(
 
   if (body.includes('**')) {
     issues.push({ code: 'markdown_bold_markers', severity: 'error' });
-  }
-
-  if (body.length < 2000) {
-    issues.push({ code: 'body_below_target_length', severity: 'warning' });
   }
 
   if (body.length > 3000) {

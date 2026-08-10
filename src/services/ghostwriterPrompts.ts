@@ -1,4 +1,5 @@
 import type { AuthorContext, BatchPostPlan, GeneratedPostContent, QualityIssue, SpecificityResult, TechnicalReviewIssue, TrendCandidate } from './generationTypes';
+import { buildExpressionModePromptBlock } from './expressionModeService';
 
 export const TECHNICAL_DISTINCTIONS = `TECHNICAL ACCURACY DISTINCTIONS:
 
@@ -17,46 +18,30 @@ export const TECHNICAL_DISTINCTIONS = `TECHNICAL ACCURACY DISTINCTIONS:
 - Token authentication does not automatically solve tenant isolation or session management.`;
 
 export const LINKEDIN_LINE_FORMAT_RULES = `FORMAT AND RHYTHM: Write in a clear, conversational LinkedIn format that is easy to scan on mobile.
- - Open with a specific observation, mistake, consequence, or useful distinction.
- - The first two lines should create curiosity without using clickbait.
- - Prefer short paragraphs separated by blank lines.
- - Most paragraphs should contain one sentence.
- - Two closely connected sentences may stay together when that improves flow.
- - Avoid paragraphs containing three or more sentences.
- - Use short standalone lines selectively for emphasis. 
- - Do not make every sentence sound dramatic. 
- - Build a natural progression: hook, problem, mechanism, example, action, takeaway.
+ - Let the selected Expression Mode determine the opening, progression, cadence, and ending behavior.
+ - Use natural paragraphs separated by whitespace; mix one-line, two-sentence, and occasional compact grouped explanations when useful.
+ - Use short standalone lines selectively for emphasis without making every sentence dramatic.
  - Use numbered lists only for ordered steps or clearly separated reasons. 
  - Use hyphen bullets only for practical checks, actions, or examples.
  - Keep list items concise and structurally consistent.
  - Vary sentence length so the post does not feel robotic. 
  - Avoid repeating the headline, image text, or the same conclusion in different words.
- - The caption should add depth beyond what appears in the image. - End with a useful takeaway, decision rule, or specific question.
+ - The caption should add depth beyond what appears in the image.
  - Do not copy the wording or subject matter of any supplied example.
  - Do not invent personal stories, clients, incidents, metrics, or results.
 
  The final post should feel written by an experienced practitioner, not like a textbook, documentation page, or generic AI summary.`;
 
 
- export const SPECIFICITY_RULES = `SPECIFICITY REQUIREMENTS: The post must contain at least three of these signal types: 
- 1. A named technical mechanism
- 2. A clear implementation boundary
- 3. A concrete failure mode 
- 4. An actionable implementation step 
- 5. A meaningful trade-off or condition
- 6. A cause-and-effect explanation 
- 
- At least one paragraph must explain how a mechanism creates or prevents a specific outcome.
- 
- Prefer concrete statements such as:
-  - where a check belongs - what can fail
-  - what condition must be enforced 
-  - what implementation choice reduces the risk 
-  - when one approach is preferable to another
-   
-   Do not add technical terminology only to increase specificity.
-   
-   Do not repeat definitions that are already obvious from the headline or image. Do not invent metrics, customers, incidents, implementation history, or personal experience.`;
+ export const SPECIFICITY_RULES = `SPECIFICITY REQUIREMENTS:
+Ground the central claim with enough concrete detail to make it useful and credible.
+One strong domain-appropriate mechanism, process detail, constraint, example, causal explanation, boundary, diagnostic observation, comparison, or decision rule may be sufficient.
+Choose the kind of specificity that naturally supports this post and its Expression Mode. Do not add multiple categories merely to demonstrate completeness, and do not turn specificity into a checklist.
+Do not add a failure scenario, consequence, action step, example, trade-off, or implementation boundary unless the idea genuinely needs it.
+Prefer one precise explanation over several generic supporting sections.
+When an example is useful, integrate it naturally into the reasoning rather than creating a separate essay-style scenario paragraph.
+Do not add specialist terminology only to appear specific.
+Do not repeat definitions that are already obvious from the headline or image. Do not invent metrics, customers, incidents, implementation history, or personal experience.`;
 
 export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
 - Topic clarity: one specific topic, one central claim, and no mixed angles.
@@ -64,50 +49,40 @@ export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
 - Topic-audience match: connect the idea to the target audience's pain, goal, objection, or desired outcome.
 - Profile alignment: write from the author's saved positioning and expertise without inventing biography.
 - Original insight: include a useful mechanism, reframing, trade-off, or decision rule instead of generic advice.
-- Dwell quality: create a post worth reading slowly, with progression, specificity, and no filler.
-- Conversational potential: end with a useful takeaway or specific conversation-worthy observation, not engagement bait.
-- Credibility/proof: use supplied proof when available; otherwise use technical reasoning, concrete examples, or labeled hypotheticals.
-- Minimum length: target 2,000 to 2,800 characters for the body when the topic supports it, while staying under LinkedIn's 3,000-character limit.
+- Dwell quality: provide appropriate depth and concrete value without filler. A compact post can be complete without staged progression.
+- Conversational potential: make the idea worth discussing without requiring a question, CTA, or explicit conclusion.
+- Credibility/proof: use supplied proof when available; otherwise use sound technical reasoning. Use a concrete example or labeled hypothetical only when it materially helps.
+- Length: respect the saved short/medium/long preference and topic complexity; never pad a simple idea, while staying under LinkedIn's 3,000-character limit.
 - Formatting: never use Markdown bold markers or double asterisks. Do not include ** anywhere in the output.`;
 
  export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
 - Write as a ghostwriter for the supplied author profile.
 - Write an original LinkedIn post, not a summary of the source article.
-- Use the assigned angle, hook style, ending style, and layout as guidance.
-- Aim for at least 2,000 characters and no more than 2,800 characters when the subject supports it.
+- Use the assigned angle for what the post explores and the Expression Mode for how it is structured.
+- Treat hook, ending, and legacy layout as optional presentation hints. Ignore them when they conflict with the Expression Mode or the natural completion of the idea.
+- Respect the saved short/medium/long preference while letting content completeness determine exact length.
 - Prioritize substance over reaching a target length.
 - Do not use Markdown bold markers or double asterisks.
 - Avoid repeating the same point in the introduction, middle, and conclusion.
 - Every section should move the idea forward.
 
-Recommended progression:
+Variation rules:
+- Not every post needs a problem statement, example, failure scenario, consequence, list, question, recommendation, or explicit conclusion.
+- Paragraph count and opening length should vary naturally. Some posts may start immediately with the claim.
+- Use as many paragraphs as the idea needs. A complete post may be one compact block, two short paragraphs, several standalone lines, a walkthrough, or a longer explanation.
+- Do not add paragraphs merely to make the post appear complete.
+- Use a concrete example, failure mode, implementation detail, or hypothetical only when it materially improves the argument.
+- When an example is useful, state it directly and integrate it into the reasoning instead of introducing a separate generic scenario.
+- A post may end when its reasoning, solution, or implication is complete. Do not append a recap, takeaway, CTA, or question by default.
+- When ending style is natural, do not append a stock closing sentence beginning with "Remember", "Ultimately", "In conclusion", "In summary", "In short", "The key is", or "By prioritizing".
+- Do not end with motivational advice about laying a foundation, future growth, success, trust, resilience, or user experience after the technical point is already complete.
 
-1. Hook: 
-  Introduce a specific tension, mistake, distinction, or consequence.
-
-2. Context:
-   Explain why the issue matters without using generic industry statements.  
-
-3. Mechanism:
-   Explain what actually happens at the implementation or system boundary.    
-
-4. Example or failure mode:
-   Show one realistic scenario without inventing personal experience.
-
-5. Practical response:
-   Give a useful action, checklist, implementation rule, or decision principle.
-   
-6. Ending:
-   Finish with a concise takeaway or a genuinely specific question.
-   
-   
 Additional rules: - Use bullets only for genuine checklists, actions, or comparisons.
  - Use no more than four bullets unless the assigned layout requires ordered steps.
  - Do not use engagement bait.
  - Do not use phrases such as "In today's world", "game changer", or "unlock your potential".
  - Do not begin with broad phrases such as "When building a SaaS platform".
- - Do not restate the headline as the final sentence.
- - Do not write a generic conclusion about importance, security, growth, or success.
+ - If the post has an explicit ending, do not restate the headline or add a generic conclusion about importance, security, growth, or success.
  - Use qualified technical language where appropriate: can, may, often, depending on, in some systems.
  - The body should complement the accompanying image rather than paraphrase it.   
 
@@ -142,10 +117,9 @@ Do not use first-person experience unless that exact experience exists in the su
 Mentioning a project name from the profile does NOT authorize a debugging story or implementation anecdote.
 
 When personal evidence is unavailable:
-- write as an observation
-- explain a technical mechanism
-- present a conditional recommendation
-- discuss a trade-off
+- ground the claim in the single most natural credible form: an observation, technical mechanism, conditional recommendation, constraint, or trade-off
+- do not include all of these forms merely to make the post appear comprehensive
+- let the selected Expression Mode determine whether the post explains, recommends, compares, or simply states a well-supported point
 
 Internally distinguish verified author facts, source facts, general technical knowledge, opinion, and conditional recommendations — but do NOT label them in the final post.
 
@@ -198,30 +172,24 @@ export function buildAngleSpecificityBlock(
   switch (plan.angle) {
     case 'practical_tutorial':
       return `ANGLE REQUIREMENTS (practical_tutorial):
-- Start with the problem the implementation solves.
-- Include 3 to 5 ordered implementation steps.
-- Name the relevant layers, such as API, service, database, middleware, or worker.
-- Show one incorrect implementation and the failure it can cause.
-- End with a concise implementation rule.
-- Do not turn the entire post into a generic checklist.`;
+- Required thinking: a usable process or implementation approach and the details needed to carry it out in this domain.
+- Ordered steps are appropriate, but include only the steps the implementation needs.
+- Name relevant workflow stages, decisions, roles, tools, or system layers only when useful.
+- Mention an incorrect approach only if it clarifies a meaningful boundary.`;
 
     case 'architecture_tradeoff':
       return `ANGLE REQUIREMENTS (architecture_tradeoff):
-- Introduce the decision that must be made.
-- Name two genuinely different approaches.
-- Explain where each approach fits.
-- Include one operational or maintenance risk for each side when relevant.
-- Explain the deciding condition rather than declaring one universal winner.
-- End with a practical decision rule.`;
+- Required thinking: two genuinely different approaches and the condition that makes each appropriate.
+- Operational or maintenance risks are optional unless they affect the decision.
+- Do not declare a universal winner when the choice depends on context.
+- The Expression Mode determines presentation and order.`;
 
     case 'technical_mistake':
       return `ANGLE REQUIREMENTS (technical_mistake):
-- Open with the mistaken assumption or implementation.
-- Explain why it appears reasonable.
-- Describe the mechanism that makes it fail.
-- Include one concrete failure scenario.
-- Provide an implementation-level correction.
-- End with the principle engineers should remember.`;
+- Required thinking: identify one mistaken assumption, behavior, process, or mechanism and provide a domain-grounded correction.
+- Explain why it can appear reasonable only when that adds useful context.
+- A failure example is optional when the mechanism is already concrete.
+- The Expression Mode determines presentation and order.`;
 
     case 'debugging_story':
       return `ANGLE REQUIREMENTS (debugging_story):
@@ -230,39 +198,35 @@ export function buildAngleSpecificityBlock(
 - Include the visible symptom.
 - Include the underlying cause.
 - Include one diagnostic check.
-- Include the fix and one prevention lesson.
+ - Include the fix; add prevention guidance only when useful.
 - Keep the sequence clear and easy to follow.`;
 
     case 'product_lesson':
       return `ANGLE REQUIREMENTS (product_lesson):
-- Start with a product or implementation decision.
-- Connect that decision to a named technical mechanism.
-- Explain the user-facing or system consequence.
+- Required thinking: a meaningful product, process, or implementation decision and the domain reasoning that makes it useful.
+- A consequence, user impact, or broader principle is optional.
 - Avoid generic business lessons.
-- End with one actionable product or engineering principle.`;
+- The Expression Mode determines presentation and order.`;
 
     case 'reflection':
       return `ANGLE REQUIREMENTS (reflection):
-- Begin with a specific observation, not a motivational statement.
-- Include at least one concrete example or distinction.
-- Explain why the observation changes a decision or implementation.
-- Lower technical density than a tutorial is acceptable.
-- End with a concise takeaway rather than repeating the opening.`;
+- Required thinking: a precise observation and its meaningful implication.
+- Examples and implementation decisions are optional when the observation is already concrete.
+- Lower specialist-detail density than a tutorial is acceptable.
+- The Expression Mode determines presentation and order.`;
 
     case 'defensible_opinion':
       return `ANGLE REQUIREMENTS (defensible_opinion):
-- State a clear but qualified position.
-- Explain the reasoning behind it.
-- Include one realistic counterargument or limitation.
-- Use a concrete example or mechanism.
-- End with a specific question or decision point, not generic engagement bait.`;
+- Required thinking: a clear position supported by credible, domain-grounded reasoning.
+- A qualification, counterargument, limitation, or example is optional.
+- Do not require a question, CTA, or artificial balance.
+- The Expression Mode determines presentation and order.`;
 
     default:
       return `ANGLE REQUIREMENTS (${plan.angle}):
 - Open with a specific idea.
 - Explain the mechanism or reasoning.
-- Include a concrete consequence.
-- End with an actionable takeaway.`;
+ - Add consequences or actions only when they are relevant to the selected angle.`;
   }
 }
 
@@ -293,21 +257,29 @@ Rules:
 - When evidence is missing, do not imply the post summarizes the article.`;
 }
 
-export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null): string {
+export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null, recentPosts: string[] = [], author?: AuthorContext): string {
+  const centralClaim = plan.centralClaim ?? plan.coreClaim ?? plan.sourceTopic ?? 'Develop one narrow claim from the source topic.';
   return `
 ${buildSourceEvidenceBlock(trend)}
 ${buildAngleSpecificityBlock(plan)}
+${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author?.strategy)}
 
 ASSIGNED BATCH PLAN:
+- CENTRAL CLAIM (fixed): ${centralClaim}
 - Angle: ${plan.angle}
-- Hook style: ${plan.hookStyle}
-- Ending style: ${plan.endingStyle}
-- Layout: ${plan.layout}
+- Optional hook hint: ${plan.hookStyle}
+- Optional ending preference: ${plan.endingStyle} (use only when the Expression Mode and completed idea benefit from an explicit ending)
+- Legacy layout hint: ${plan.layout} (subordinate to the Expression Mode; do not treat it as a required section sequence)
 - Source topic (inspiration only): ${plan.sourceTopic ?? 'evergreen author expertise'}
 - Rationale: ${plan.rationale}
 ${sourceLink ? `- Reference link (do not summarize unless directly relevant): ${sourceLink}` : ''}
 
 The source is inspiration only. Transform it into an author-relevant ${plan.angle.replace(/_/g, ' ')} post.
+Develop the fixed CENTRAL CLAIM above. Do not broaden it, replace it with a general topic summary, or introduce a second thesis.
+This post exists to develop that claim, not to cover the broader category.
+Every major paragraph must support, explain, challenge, illustrate, qualify, or apply it.
+Do not turn it into a checklist of adjacent benefits, risks, best practices, or subtopics. Depth on one relevant point is better than breadth.
+Avoid category-introduction openings such as "When it comes to...", "X plays a crucial role", or "The importance of X cannot be overstated." Open from the claim, an observation, distinction, outcome, behavior, problem, or direct position as the Expression Mode requires.
 Do NOT write a headline summary of the trend.
 `;
 }
@@ -344,25 +316,25 @@ export function buildRepairPrompt(
 ${buildAuthorBlock(author)}
 ${plan ? buildPlanBlock(plan) : ''}
 
-Rewrite the complete post as a clean final draft.
+Repair the post as a clean final draft while preserving its successful rhetorical shape.
 
-Preserve the valid core idea, assigned angle, and verified facts.
+Preserve the fixed CENTRAL CLAIM, assigned angle, and verified facts.
 Do not preserve sentence structure when it causes awkward or contradictory prose.
 Address every listed issue.
 Do not invent personal experiences, results, users, metrics, or project history.
 The repaired output must read as one coherent post, not as patched fragments.
 
 
-Improve the writing as well as correcting the listed issues.
+Fix the listed issues without normalizing the post into a standard essay structure.
 
 Specifically:
-- Strengthen the first two lines.
 - Remove repeated definitions and conclusions.
 - Replace broad statements with concrete mechanisms or consequences.
-- Make each section advance the argument.
+- Preserve the selected Expression Mode, opening behavior, paragraph rhythm, and natural ending.
+- Change only the sections needed to resolve the listed issues, plus minimal edits for coherence.
 - Preserve natural whitespace and short paragraphs.
 - Do not create a list unless the content genuinely benefits from one.
-- Ensure the closing line adds a new takeaway instead of restating the headline.
+- Do not add a scenario, action steps, takeaway, CTA, question, or closing section unless a listed issue specifically requires it and the Expression Mode supports it.
 - Ensure the body adds information beyond the image headline and bullet points.
 
 
@@ -386,7 +358,11 @@ Output valid JSON:
 }
 
 ${SPECIFICITY_RULES}
-${LINKEDIN_LINE_FORMAT_RULES}`;
+${LINKEDIN_LINE_FORMAT_RULES}
+
+FINAL REPAIR AUTHORITY:
+Fix only the identified issue. Preserve the rhetorical movement and stopping behavior of the selected Expression Mode. Do not add an example, action step, consequence, positive-outcome paragraph, or conclusion unless it is the specific missing element.
+${plan ? buildExpressionModePromptBlock(plan.expressionMode, []) : ''}`;
 }
 
 export function buildExpandSpecificityPrompt(
@@ -401,22 +377,25 @@ ${buildPlanBlock(plan, undefined)}
 ${SPECIFICITY_RULES}
 ${LINKEDIN_LINE_FORMAT_RULES}
 
-Expand specificity in this post without changing the core claim.
+Make this post concretely useful without changing the fixed CENTRAL CLAIM or expanding its rhetorical structure.
 
 Current signals: ${(specificity?.signals ?? []).join(', ') || 'none'}
 Missing signals: ${(specificity?.missing ?? []).join(', ') || 'unknown'}
 
-Add only what is missing:
-- a named mechanism
-- an implementation boundary
-- a failure scenario
-- actionable implementation detail
-- cause-and-effect reasoning
+Identify and add the single most valuable concrete detail: one precise mechanism, implementation fact, constraint, diagnostic observation, or causal relationship may be enough.
+Preserve the selected Expression Mode, paragraph rhythm, opening, and ending behavior.
+Do not add a scenario, consequence, action step, takeaway, or conclusion unless it is necessary to clarify the central claim.
+Do not add a new paragraph when the detail can be integrated into an existing sentence.
+Replace vague supporting material with the precise detail; do not keep generic sections around it merely to preserve length.
 
 Do not invent metrics, customers, incidents, or personal experience.
 
 CURRENT POST:
 ${post.body}
+
+FINAL REPAIR AUTHORITY:
+Fix only the identified specificity issue. Preserve the rhetorical movement and stopping behavior of the selected Expression Mode. Do not add an example, action step, consequence, positive-outcome paragraph, or conclusion unless that is the exact missing detail.
+${buildExpressionModePromptBlock(plan.expressionMode, [])}
 
 Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 }

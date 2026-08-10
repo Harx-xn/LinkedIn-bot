@@ -60,6 +60,7 @@ type AttemptCounters = {
 export type SlotGenerationOptions = {
   batchFingerprints?: TopicFingerprint[];
   recentTopicHistory?: TopicHistoryRow[];
+  recentPosts?: string[];
 };
 
 function mergeIssues(...groups: QualityIssue[][]): QualityIssue[] {
@@ -303,7 +304,7 @@ export async function generateSlotPost(
     let generated: GeneratedPostContent;
     try {
       generated = applyLinkedInFormatting(
-        await contentService.generatePlannedPost(plan, author, sourceLink, provider, trend),
+        await contentService.generatePlannedPost(plan, author, sourceLink, provider, trend, slotOptions?.recentPosts ?? []),
         sourceTitle,
       );
     } catch (err) {
@@ -334,12 +335,7 @@ export async function generateSlotPost(
       );
       lastAcceptance = attempt.accepted ? attempt.result.acceptance : attempt.acceptance;
       if (attempt.accepted) {
-        console.log('[ghostwriter] post accepted', {
-          sourceTitle: sourceTitle.slice(0, 60),
-          angle: plan.angle,
-          freshGenerationAttempt: fresh,
-          provider,
-        });
+        console.log('[ghostwriter] post accepted', { sourceTitle: sourceTitle.slice(0, 60), angle: plan.angle, expressionMode: plan.expressionMode, freshGenerationAttempt: fresh, provider });
         return attempt.result;
       }
 

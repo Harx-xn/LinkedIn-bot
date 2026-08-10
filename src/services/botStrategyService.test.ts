@@ -183,6 +183,8 @@ describe('bot strategy config', () => {
     assert.equal(strategy.profilePositioning.positioningStatement, '');
     assert.deepEqual(strategy.legacy.sources, ['google']);
     assert.deepEqual(strategy.contentPillars.primaryPillars, []);
+    assert.deepEqual(strategy.writingStyle.tone, ['Conversational']);
+    assert.equal(strategy.writingStyle.formality, 'balanced');
   });
 
   it('author prompt includes strategy positioning, audience, goals, pillars, and style', () => {

@@ -384,6 +384,8 @@ export type AuthorContext = {
   strategy?: import('./botStrategyService').EffectiveBotStrategy;
 };
 
+export type ExpressionMode = 'direct' | 'analytical' | 'diagnostic' | 'conversational' | 'opinionated' | 'walkthrough' | 'reflective';
+
 export type PostAngle =
   | 'technical_mistake'
   | 'practical_tutorial'
@@ -402,7 +404,7 @@ export type HookStyle =
   | 'lesson'
   | 'comparison';
 
-export type EndingStyle = 'takeaway' | 'specific_question' | 'summary' | 'action';
+export type EndingStyle = 'natural' | 'takeaway' | 'specific_question' | 'summary' | 'action';
 
 export type PostLayout =
   | 'short_observation'
@@ -425,10 +427,12 @@ export type BatchPostPlan = {
   topicCluster?: TopicCluster;
   normalizedTopic?: string;
   coreClaim?: string;
+  centralClaim?: string;
   mechanismFocus?: string[];
   matchedPillar?: string;
   suggestedAngle?: string;
   audienceRelevance?: string;
+  expressionMode?: ExpressionMode;
 };
 
 export type ImageContentMode =

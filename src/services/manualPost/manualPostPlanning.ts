@@ -5,7 +5,10 @@ import type {
   ManualPlanningResult,
   SelectedManualPlan,
 } from './manualPostTypes';
+import { deriveNarrowCentralClaim, isObviouslyGenericClaim } from '../claimNarrowingService';
 import { isVagueManualHook } from './manualGenericAiDetector';
+import { getExpressionModeFallbackStructure } from '../expressionModeService';
+import type { ExpressionMode } from '../generationTypes';
 import {
   calculateFingerprintSimilarity,
   CORE_CLAIM_REJECT_THRESHOLD,
@@ -188,6 +191,8 @@ export function rejectAngle(
   const topicOverlap = overlapRatio(angle.coreClaim, topic);
   const titleClaimOverlap = overlapRatio(angle.title, angle.coreClaim);
 
+  if (isObviouslyGenericClaim(angle.coreClaim)) return 'central claim is generic';
+
   if (titleClaimOverlap < 0.08 && overlapRatio(angle.title, topic) > 0.85) {
     return 'mixes unrelated concepts';
   }
@@ -336,7 +341,7 @@ export function selectManualPlan(
 
   return {
     title: selectedAngle.title,
-    coreClaim: selectedAngle.coreClaim,
+    coreClaim: deriveNarrowCentralClaim({ topic, candidateClaim: selectedAngle.coreClaim }),
     audience: selectedAngle.audience,
     structure: selectedAngle.structure,
     evidenceMode: selectedAngle.evidenceMode,
@@ -345,13 +350,13 @@ export function selectManualPlan(
   };
 }
 
-export function createFallbackManualPlan(topic: string): SelectedManualPlan {
+export function createFallbackManualPlan(topic: string, expressionMode: ExpressionMode = 'direct', author?: import('../generationTypes').AuthorContext): SelectedManualPlan {
   const trimmedTopic = topic.trim() || 'this topic';
   return {
     title: trimmedTopic,
-    coreClaim: `A practical, focused perspective on ${trimmedTopic} for practitioners who need a clear takeaway.`,
+    coreClaim: deriveNarrowCentralClaim({ topic: trimmedTopic, expressionMode, author }),
     audience: 'Practitioners working on this topic',
-    structure: 'hook → problem → mechanism → consequence → closing',
+    structure: getExpressionModeFallbackStructure(expressionMode),
     evidenceMode: 'reasoned_observation',
     hook: '',
     selectedHookType: 'specific_observation',
@@ -366,6 +371,6 @@ export function selectedPlanToContentPlan(plan: SelectedManualPlan): ManualConte
     structure: plan.structure,
     hookType: plan.selectedHookType,
     evidenceType: plan.evidenceMode,
-    ctaType: 'takeaway',
+    ctaType: 'none',
   };
 }

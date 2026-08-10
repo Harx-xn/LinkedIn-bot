@@ -12,9 +12,9 @@ export const manualContentPlanSchema = z.object({
 
 export const manualGeneratedPostSchema = z.object({
   contentPlan: manualContentPlanSchema,
-  hook: z.string().min(1),
+  hook: z.string(),
   body: z.string().min(40),
-  closingLine: z.string().min(1),
+  closingLine: z.string(),
   hashtags: z.array(z.string()).max(3).default([]),
   sourceTopic: z.string().optional(),
 });
@@ -39,10 +39,67 @@ export const MANUAL_POST_OPENAI_JSON_SCHEMA = {
         ctaType: { type: 'string', minLength: 1 },
       },
     },
-    hook: { type: 'string', minLength: 1 },
+    hook: { type: 'string' },
     body: { type: 'string', minLength: 40 },
-    closingLine: { type: 'string', minLength: 1 },
+    closingLine: { type: 'string' },
     hashtags: { type: 'array', items: { type: 'string' }, maxItems: 3 },
     sourceTopic: { type: 'string' },
+  },
+} as const;
+
+/** Strict OpenAI schema for manual planning only. Draft generation must not use this. */
+export const MANUAL_PLANNING_OPENAI_JSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['angles'],
+  properties: {
+    angles: {
+      type: 'array',
+      minItems: 3,
+      maxItems: 5,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'title', 'coreClaim', 'audience', 'structure', 'evidenceMode',
+          'specificity', 'novelty', 'audienceFit', 'voiceFit',
+          'evidenceAvailability', 'hookCandidates',
+        ],
+        properties: {
+          title: { type: 'string', minLength: 1 },
+          coreClaim: { type: 'string', minLength: 1 },
+          audience: { type: 'string', minLength: 1 },
+          structure: { type: 'string', minLength: 1 },
+          evidenceMode: {
+            type: 'string',
+            enum: ['technical_example', 'reasoned_observation', 'labeled_hypothetical', 'supplied_experience'],
+          },
+          specificity: { type: 'number', minimum: 0, maximum: 10 },
+          novelty: { type: 'number', minimum: 0, maximum: 10 },
+          audienceFit: { type: 'number', minimum: 0, maximum: 10 },
+          voiceFit: { type: 'number', minimum: 0, maximum: 10 },
+          evidenceAvailability: { type: 'number', minimum: 0, maximum: 10 },
+          hookCandidates: {
+            type: 'array',
+            minItems: 0,
+            maxItems: 3,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['text', 'type', 'specificity', 'curiosity', 'topicRelevance', 'clarity', 'voiceFit'],
+              properties: {
+                text: { type: 'string', minLength: 1 },
+                type: { type: 'string', minLength: 1 },
+                specificity: { type: 'number', minimum: 0, maximum: 10 },
+                curiosity: { type: 'number', minimum: 0, maximum: 10 },
+                topicRelevance: { type: 'number', minimum: 0, maximum: 10 },
+                clarity: { type: 'number', minimum: 0, maximum: 10 },
+                voiceFit: { type: 'number', minimum: 0, maximum: 10 },
+              },
+            },
+          },
+        },
+      },
+    },
   },
 } as const;

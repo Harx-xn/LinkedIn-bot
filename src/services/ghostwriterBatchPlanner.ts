@@ -8,6 +8,8 @@ import type {
   TrendCandidate,
 } from './generationTypes';
 import { resolvePlanAngle } from './ghostwriterValidationService';
+import { selectBatchExpressionMode } from './expressionModeService';
+import type { WritingStyle } from './botStrategyService';
 
 const DEFAULT_ANGLE_SEQUENCE: PostAngle[] = [
   'technical_mistake',
@@ -40,21 +42,22 @@ const LAYOUT_BY_ANGLE: Record<PostAngle, PostLayout> = {
 };
 
 const ENDING_BY_ANGLE: Record<PostAngle, BatchPostPlan['endingStyle']> = {
-  technical_mistake: 'takeaway',
-  practical_tutorial: 'action',
-  architecture_tradeoff: 'takeaway',
-  defensible_opinion: 'specific_question',
-  debugging_story: 'summary',
-  product_lesson: 'takeaway',
-  reflection: 'takeaway',
+  technical_mistake: 'natural',
+  practical_tutorial: 'natural',
+  architecture_tradeoff: 'natural',
+  defensible_opinion: 'natural',
+  debugging_story: 'natural',
+  product_lesson: 'natural',
+  reflection: 'natural',
 };
 
 export function buildTopicDiverseBatchPlan(
   ranked: RankedTrendCandidate[],
   count: number,
+  writingStyle?: WritingStyle,
 ): BatchPostPlan[] {
   const trends = ranked.map((r) => r.trend);
-  const plans = buildDeterministicBatchPlan(trends, count);
+  const plans = buildDeterministicBatchPlan(trends, count, writingStyle);
   return plans.map((plan, i) => {
     const fp = ranked[i]?.fingerprint;
     if (!fp) return plan;
@@ -71,6 +74,7 @@ export function buildTopicDiverseBatchPlan(
 export function buildDeterministicBatchPlan(
   trends: TrendCandidate[],
   count: number,
+  writingStyle?: WritingStyle,
 ): BatchPostPlan[] {
   const plans: BatchPostPlan[] = [];
   let questionEndings = 0;
@@ -88,7 +92,7 @@ export function buildDeterministicBatchPlan(
       else questionEndings++;
     }
 
-    plans.push({
+    const basePlan: BatchPostPlan = {
       trendIndex: trend ? i : null,
       sourceTopic: trend?.topic ?? null,
       angle,
@@ -99,7 +103,8 @@ export function buildDeterministicBatchPlan(
         ? `Use trend as inspiration for a ${angle.replace(/_/g, ' ')} post`
         : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
       evergreen: !trend,
-    });
+    };
+    plans.push({ ...basePlan, expressionMode: selectBatchExpressionMode(i, angle) });
   }
 
   return plans;

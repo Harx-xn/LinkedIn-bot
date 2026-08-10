@@ -217,7 +217,7 @@ function parseTone(raw: string | null | undefined): string[] {
   const tones = parseStringArray(raw);
   if (tones.length > 0) return tones;
   const value = raw?.trim();
-  return value ? [value] : ['Professional'];
+  return value ? [value] : ['Conversational'];
 }
 
 function pillarFromNiche(niche: string): ContentPillar {
@@ -306,7 +306,7 @@ function defaultTopicRules(): TopicRules {
 function defaultWritingStyle(source: LegacyStrategySource): WritingStyle {
   return {
     tone: parseTone(source.tone),
-    formality: 'professional',
+    formality: 'balanced',
     postLength: 'medium',
     preferredFormats: [],
     avoidStyles: [],
