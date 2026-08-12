@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
 import {
@@ -264,7 +265,7 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const post = await createAndPublishNow(userId, req.body || {});
+    const post = await createAndPublishNow(userId, req.body || {}, randomUUID());
     res.json(post);
   }),
 );
@@ -356,7 +357,12 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const post = await publishManualPostNow(userId, req.params.postId, req.body || {});
+    const post = await publishManualPostNow(
+      userId,
+      req.params.postId,
+      req.body || {},
+      randomUUID(),
+    );
     res.json(post);
   }),
 );

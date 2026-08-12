@@ -10,10 +10,13 @@ import { assertFrontendUrl, getRegionalStripeClient } from './stripeClientServic
 import { validatePlanStripePrice } from './stripePlanService';
 import { syncSubscriptionFromStripe } from './stripeSubscriptionSyncService';
 import type { StripeSubscriptionFull } from './stripeTypes';
+import { getPaymentProvider } from './providers/providerFactory';
+import { getSafepayClient } from './providers/safepay/safepayClient';
+import { syncSafepaySubscription } from './providers/safepay/safepaySubscriptionSyncService';
 
 async function loadOwnedSubscription(userId: string) {
   const sub = await getManageableSubscription(userId);
-  if (!sub?.stripeSubscriptionId || !sub.regionId) {
+  if (!sub?.regionId || (!sub.providerSubscriptionId && !sub.stripeSubscriptionId)) {
     throw new BillingError(
       400,
       'SUBSCRIPTION_NOT_MANAGEABLE',
@@ -24,6 +27,10 @@ async function loadOwnedSubscription(userId: string) {
 }
 
 export async function createPortalSession(userId: string) {
+  const owned = await getManageableSubscription(userId);
+  if (owned && (owned.provider ?? 'STRIPE') !== 'STRIPE') {
+    throw new BillingError(400, 'SUBSCRIPTION_NOT_MANAGEABLE', 'This provider is managed directly in Veyrais.');
+  }
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { stripeCustomerId: true, regionId: true },
@@ -61,6 +68,18 @@ export async function createPortalSession(userId: string) {
 
 export async function cancelSubscription(userId: string) {
   const sub = await loadOwnedSubscription(userId);
+  const provider = getPaymentProvider(sub.provider ?? 'STRIPE');
+  if (!provider.capabilities.cancel) throw new BillingError(400, 'SUBSCRIPTION_NOT_MANAGEABLE', 'Cancellation is not supported for this subscription.');
+  if (provider.type === 'SAFEPAY') {
+    const { client } = await getSafepayClient(sub.regionId!);
+    try {
+      const result = await client.subscription.cancel(sub.providerSubscriptionId!);
+      const synced = await syncSafepaySubscription(sub.regionId!, { ...result, reference: sub.id });
+      return { cancelAtPeriodEnd: synced.cancelAtPeriodEnd, cancellationEffectiveAt: synced.currentPeriodEnd?.toISOString() ?? null, status: synced.status };
+    } catch {
+      throw new BillingError(502, 'SUBSCRIPTION_NOT_MANAGEABLE', "We couldn't update your subscription.");
+    }
+  }
   const stripe = await getRegionalStripeClient(sub.regionId!);
 
   const updated = await stripe.subscriptions.update(sub.stripeSubscriptionId!, {
@@ -93,15 +112,16 @@ export async function reactivateSubscription(userId: string) {
   const sub = await prisma.subscription.findFirst({
     where: {
       userId,
-      stripeSubscriptionId: { not: null },
-      cancelAtPeriodEnd: true,
-      status: { in: ['TRIALING', 'ACTIVE', 'PAST_DUE'] },
+      OR: [
+        { stripeSubscriptionId: { not: null }, cancelAtPeriodEnd: true },
+        { provider: 'SAFEPAY', providerSubscriptionId: { not: null }, status: 'PAUSED' },
+      ],
     },
     include: { plan: true },
     orderBy: { createdAt: 'desc' },
   });
 
-  if (!sub?.stripeSubscriptionId || !sub.regionId) {
+  if (!sub?.regionId || (!sub.providerSubscriptionId && !sub.stripeSubscriptionId)) {
     throw new BillingError(
       400,
       'SUBSCRIPTION_NOT_MANAGEABLE',
@@ -109,8 +129,19 @@ export async function reactivateSubscription(userId: string) {
     );
   }
 
+  if (sub.provider === 'SAFEPAY') {
+    const { client } = await getSafepayClient(sub.regionId);
+    try {
+      const result = await client.subscription.resume(sub.providerSubscriptionId!);
+      const synced = await syncSafepaySubscription(sub.regionId, { ...result, reference: sub.id });
+      return { cancelAtPeriodEnd: synced.cancelAtPeriodEnd, status: synced.status };
+    } catch {
+      throw new BillingError(502, 'SUBSCRIPTION_NOT_MANAGEABLE', "We couldn't update your subscription.");
+    }
+  }
+
   const stripe = await getRegionalStripeClient(sub.regionId);
-  const updated = await stripe.subscriptions.update(sub.stripeSubscriptionId, {
+  const updated = await stripe.subscriptions.update(sub.stripeSubscriptionId!, {
     cancel_at_period_end: false,
   });
 
@@ -131,6 +162,10 @@ export async function reactivateSubscription(userId: string) {
 
 export async function changePlan(userId: string, targetPlanId: string) {
   const sub = await loadOwnedSubscription(userId);
+  const provider = getPaymentProvider(sub.provider ?? 'STRIPE');
+  if (!provider.capabilities.proratedPlanChanges) {
+    throw new BillingError(400, 'SUBSCRIPTION_NOT_MANAGEABLE', 'Plan changes are not supported for this subscription provider.');
+  }
 
   if (!sub.plan) {
     throw new BillingError(400, 'SUBSCRIPTION_NOT_MANAGEABLE', 'Current subscription plan not found');

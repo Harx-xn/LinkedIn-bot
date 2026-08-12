@@ -2,10 +2,10 @@ import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { BillingError, sanitizeExternalError } from '../services/billing/billingError';
 import {
-  createPaidCheckoutSession,
-  createTrialCheckoutSession,
   getCheckoutStatus,
 } from '../services/billing/stripeCheckoutService';
+import { createProviderCheckout } from '../services/billing/providerCheckoutService';
+import { prisma } from '../prismaClient';
 
 const router = Router();
 
@@ -33,14 +33,14 @@ router.post('/trial-checkout', requireAuth, async (req: Request, res: Response) 
 
   try {
     const userId = (req as any).userId;
-    const result = await createTrialCheckoutSession({
+    const result = await createProviderCheckout({
       userId,
       planId,
       promoCode,
       inviteCode,
       mode: 'trial',
     });
-    return res.json({ url: result.url, sessionId: result.sessionId });
+    return res.json({ url: result.url, sessionId: result.sessionId, provider: result.provider });
   } catch (err) {
     return handleBillingError(res, err);
   }
@@ -59,14 +59,14 @@ router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
 
   try {
     const userId = (req as any).userId;
-    const result = await createPaidCheckoutSession({
+    const result = await createProviderCheckout({
       userId,
       planId,
       promoCode,
       inviteCode,
       mode: 'paid',
     });
-    return res.json({ url: result.url });
+    return res.json({ url: result.url, sessionId: result.sessionId, provider: result.provider });
   } catch (err) {
     return handleBillingError(res, err);
   }
@@ -75,6 +75,21 @@ router.post('/checkout', requireAuth, async (req: Request, res: Response) => {
 router.get('/checkout-status/:sessionId', requireAuth, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).userId;
+    const providerSub = await prisma.subscription.findFirst({
+      where: { id: req.params.sessionId, userId, provider: 'SAFEPAY' },
+      select: { status: true, providerStatus: true },
+    });
+    if (providerSub) {
+      if (providerSub.providerStatus === 'CHECKOUT_PENDING') {
+        return res.json({ status: 'PROCESSING', subscriptionStatus: 'INCOMPLETE', billingStatus: 'TRIAL_PENDING' });
+      }
+      const settled = ['TRIALING', 'ACTIVE', 'INCOMPLETE', 'CANCELED'].includes(providerSub.status);
+      return res.json({
+        status: settled ? providerSub.status : 'PROCESSING',
+        subscriptionStatus: providerSub.status,
+        billingStatus: providerSub.status,
+      });
+    }
     const result = await getCheckoutStatus({
       userId,
       sessionId: req.params.sessionId,

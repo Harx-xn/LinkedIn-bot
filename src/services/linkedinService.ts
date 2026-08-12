@@ -4,6 +4,10 @@ import { prisma } from '../prismaClient';
 import { decryptSecret } from './secretCrypto';
 import { updateGoogleSheetPostStatus } from './sheetsService';
 import { prepareLinkedInCommentary } from './linkedinPublishingText';
+import {
+  linkedinPublishMediaType,
+  linkedinPublishTextDiagnostics,
+} from './linkedinPublishDiagnostics';
 
 const LINKEDIN_AUTH_URL = 'https://www.linkedin.com/oauth/v2/authorization';
 const LINKEDIN_TOKEN_URL = 'https://www.linkedin.com/oauth/v2/accessToken';
@@ -312,6 +316,7 @@ async function uploadImageToLinkedIn(
 export async function postToLinkedInFromPostId(
   postId: string,
   publishingOverride?: { content: string; mediaUrl: string | null },
+  diagnosticContext?: { publishTraceId?: string },
 ) {
   let post = await prisma.post.findUnique({
     where: { id: postId },
@@ -350,7 +355,37 @@ export async function postToLinkedInFromPostId(
   // second database read ever publishing the pre-rewrite version of a post.
   const publishingContent = publishingOverride?.content ?? post.content;
   const publishingMediaUrl = publishingOverride?.mediaUrl ?? post.mediaUrl;
+  const publishTraceId = diagnosticContext?.publishTraceId;
+  const mediaType = linkedinPublishMediaType(post.attachmentType, publishingMediaUrl);
+  const publishingText = linkedinPublishTextDiagnostics(publishingContent);
+
+  if (publishTraceId) {
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_service_input', publishTraceId,
+      userId: post.userId, postId: post.id,
+      linkedinConnectionId: activeLinkedInAccount.id, authorUrn,
+      publishingContentLength: publishingText.length,
+      publishingContentSha256: publishingText.sha256,
+      publishingStartSample: publishingText.startSample,
+      publishingEndSample: publishingText.endSample,
+      hasMedia: mediaType !== 'TEXT', mediaType,
+    });
+  }
   const commentary = prepareLinkedInCommentary(publishingContent);
+  const commentaryText = linkedinPublishTextDiagnostics(commentary);
+
+  if (publishTraceId) {
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_commentary_prepared', publishTraceId,
+      postId: post.id,
+      beforeNormalizationLength: publishingText.length,
+      afterNormalizationLength: commentaryText.length,
+      beforeSha256: publishingText.sha256,
+      afterSha256: commentaryText.sha256,
+      normalizedStartSample: commentaryText.startSample,
+      normalizedEndSample: commentaryText.endSample,
+    });
+  }
 
   console.info('[linkedin-publish] prepared commentary', {
     postId: post.id,
@@ -405,20 +440,57 @@ export async function postToLinkedInFromPostId(
     }
   }
 
-  const response = await axios.post(
-    'https://api.linkedin.com/rest/posts',
-    body,
-    {
+  const endpoint = 'https://api.linkedin.com/rest/posts';
+  if (publishTraceId) {
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_payload_ready', publishTraceId,
+      userId: post.userId, postId: post.id,
+      linkedinConnectionId: activeLinkedInAccount.id, authorUrn,
+      endpoint: '/rest/posts',
+      commentaryLength: commentaryText.length,
+      commentarySha256: commentaryText.sha256,
+      serializedPayloadByteLength: Buffer.byteLength(JSON.stringify(body), 'utf8'),
+      commentaryStartSample: commentaryText.startSample,
+      commentaryEndSample: commentaryText.endSample,
+      hasMedia: mediaType !== 'TEXT', mediaType,
+    });
+  }
+
+  let response;
+  try {
+    response = await axios.post(endpoint, body, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'X-Restli-Protocol-Version': '2.0.0',
         'LinkedIn-Version': apiVersion
       }
+    });
+  } catch (error: any) {
+    if (publishTraceId) {
+      console.error('[linkedin-publish-diagnostic]', {
+        event: 'linkedin_publish_failure', publishTraceId,
+        userId: post.userId, postId: post.id, authorUrn,
+        linkedinStatus: error?.response?.status ?? null,
+        linkedinErrorCode: error?.response?.data?.code ?? error?.code ?? null,
+        linkedinErrorMessage: error?.response?.data?.message ?? error?.message ?? 'LinkedIn request failed',
+      });
     }
-  );
+    throw error;
+  }
 
   const urn = response.headers['x-restli-id'] as string | undefined;
+
+  if (publishTraceId) {
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_success', publishTraceId,
+      userId: post.userId, postId: post.id, authorUrn,
+      linkedinStatus: response.status,
+      linkedinPostUrn: urn ?? null,
+      commentaryLength: commentaryText.length,
+      commentarySha256: commentaryText.sha256,
+    });
+  }
 
   const publishedAt = new Date();
   await prisma.post.update({

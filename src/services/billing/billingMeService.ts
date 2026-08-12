@@ -12,6 +12,7 @@ import {
 } from './billingAccessService';
 import { reconcileUserStripeSubscriptionForAccess } from './billingReconciliationService';
 import { isStripeConfigured } from './stripeClientService';
+import { getPaymentProvider } from './providers/providerFactory';
 
 function iso(d: Date | null | undefined): string | null {
   return d ? d.toISOString() : null;
@@ -134,12 +135,16 @@ export async function getBillingMe(userId: string) {
     }
   }
 
-  const [dashboardAccess, trialEligible, sub, stripeConfigured] = await Promise.all([
+  const [dashboardAccess, trialEligible, sub, stripeConfigured, paymentConfig] = await Promise.all([
     hasDashboardAccess(userId),
     isTrialEligible(userId),
     getManageableSubscription(userId),
     resolveStripeConfigured(user.regionId),
+    user.regionId ? prisma.paymentConfig.findUnique({ where: { regionId: user.regionId } }) : null,
   ]);
+  const selectedProvider = paymentConfig?.provider ?? 'MANUAL';
+  let providerCapabilities = null;
+  try { providerCapabilities = getPaymentProvider(sub?.provider ?? selectedProvider).capabilities; } catch { providerCapabilities = null; }
 
   const billingRequired =
     user.billingAccessStatus === 'BILLING_REQUIRED' ||
@@ -154,7 +159,8 @@ export async function getBillingMe(userId: string) {
   const plans = user.regionId
     ? await prisma.plan.findMany({
         where: { regionId: user.regionId, isActive: true },
-        orderBy: { price: 'asc' },
+      orderBy: { price: 'asc' },
+      include: { providerMappings: true },
       })
     : [];
 
@@ -168,6 +174,9 @@ export async function getBillingMe(userId: string) {
     billingCycle: p.billingCycle,
     relationship: planRelationship(currentPrice, p.price, sub?.planId === p.id),
     stripePriceIdPresent: Boolean(p.stripePriceId),
+    providerPlanConfigured: selectedProvider === 'STRIPE'
+      ? Boolean(p.stripePriceId || p.providerMappings.some((m) => m.provider === 'STRIPE'))
+      : p.providerMappings.some((m) => m.provider === selectedProvider && m.environment === (paymentConfig?.safepayEnvironment ?? 'LIVE')),
     fullDashboardUnlock: p.fullDashboardUnlock,
     convertPostToCarouselEnabled: p.convertPostToCarouselEnabled,
     maxRewritesPerPost: p.maxRewritesPerPost,
@@ -191,6 +200,8 @@ export async function getBillingMe(userId: string) {
     dashboardAccess,
     trialEligible,
     stripeConfigured,
+    selectedProvider,
+    providerCapabilities,
     stripeCustomerPresent: Boolean(user.stripeCustomerId || sub?.stripeCustomerId),
     portalAvailable: Boolean(user.stripeCustomerId || sub?.stripeCustomerId),
     trial: {
@@ -212,7 +223,9 @@ export async function getBillingMe(userId: string) {
       currentPeriodEnd: iso(sub?.currentPeriodEnd),
       cancelAtPeriodEnd,
       cancellationEffectiveAt: cancelAtPeriodEnd ? iso(sub?.currentPeriodEnd) : null,
-      paymentMethodPresent: !!sub?.stripeDefaultPaymentMethodId,
+      provider: sub?.provider ?? null,
+      providerStatus: sub?.providerStatus ?? null,
+      paymentMethodPresent: Boolean(sub?.providerPaymentMethodPresent || sub?.stripeDefaultPaymentMethodId),
     },
     availablePlans,
     recommendedAction: resolveRecommendedAction({

@@ -29,6 +29,7 @@ import dashboardRouter from './routes/dashboard';
 import onboardingRouter from './routes/onboarding';
 import carouselsRouter from './routes/carousels';
 import { handleStripeWebhook } from './routes/stripeWebhook';
+import { handleSafepayWebhook } from './routes/safepayWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
 
@@ -43,8 +44,13 @@ const allowedOrigins = [
 
 app.post(
   '/api/payments/webhook/stripe/:regionId',
-
+  express.raw({ type: 'application/json' }),
   handleStripeWebhook
+);
+app.post(
+  '/api/payments/webhook/safepay/:regionId',
+  express.raw({ type: 'application/json' }),
+  handleSafepayWebhook,
 );
 app.use(
   cors({

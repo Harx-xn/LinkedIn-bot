@@ -466,6 +466,9 @@ router.get("/payment-config", async (req, res) => {
     const stripeSecretKey = decryptSecret(cfg.stripeSecretKey);
     const stripeWebhookSecret = decryptSecret(cfg.stripeWebhookSecret);
     const paypalClientSecret = decryptSecret(cfg.paypalClientSecret);
+    const safepayPublicKey = decryptSecret(cfg.safepayPublicKey);
+    const safepaySecretKey = decryptSecret(cfg.safepaySecretKey);
+    const safepayWebhookSecret = decryptSecret(cfg.safepayWebhookSecret);
 
     return res.json({
       provider: cfg.provider,
@@ -482,6 +485,14 @@ router.get("/payment-config", async (req, res) => {
         secretConfigured: !!paypalClientSecret,
         secretMasked: maskSecret(paypalClientSecret),
         mode: cfg.paypalMode || "sandbox",
+      },
+      safepay: {
+        publicKeyConfigured: !!safepayPublicKey,
+        publicKeyMasked: maskSecret(safepayPublicKey),
+        secretConfigured: !!safepaySecretKey,
+        secretMasked: maskSecret(safepaySecretKey),
+        webhookConfigured: !!safepayWebhookSecret,
+        environment: cfg.safepayEnvironment || "SANDBOX",
       },
     });
   } catch (error: any) {
@@ -501,9 +512,13 @@ router.put("/payment-config", async (req, res) => {
       paypalClientId,
       paypalClientSecret,
       paypalMode,
+      safepayPublicKey,
+      safepaySecretKey,
+      safepayWebhookSecret,
+      safepayEnvironment,
     } = req.body as Record<string, any>;
 
-    const allowed = ["STRIPE", "PAYPAL", "MANUAL"];
+    const allowed = ["STRIPE", "SAFEPAY", "PAYPAL", "MANUAL"];
     if (provider !== undefined && !allowed.includes(provider)) {
       return res.status(400).json({ message: "Invalid provider" });
     }
@@ -532,6 +547,13 @@ router.put("/payment-config", async (req, res) => {
         return res.status(400).json({ message: "Invalid PayPal mode" });
       }
       writable.paypalMode = paypalMode;
+    }
+    if (safepayPublicKey !== undefined) writable.safepayPublicKey = encryptSecret(safepayPublicKey || null);
+    if (safepaySecretKey !== undefined) writable.safepaySecretKey = encryptSecret(safepaySecretKey || null);
+    if (safepayWebhookSecret !== undefined) writable.safepayWebhookSecret = encryptSecret(safepayWebhookSecret || null);
+    if (safepayEnvironment !== undefined) {
+      if (!["SANDBOX", "LIVE"].includes(safepayEnvironment)) return res.status(400).json({ message: "Invalid Safepay environment" });
+      writable.safepayEnvironment = safepayEnvironment;
     }
 
     const cfg = await prisma.paymentConfig.upsert({
@@ -573,6 +595,41 @@ router.get("/plans", async (req, res) => {
     return res.json(plans.map((plan) => formatSubAdminPlanResponse(plan)));
   } catch (error: any) {
     return res.status(403).json({ message: error.message });
+  }
+});
+
+// Safepay currently documents plan creation in its merchant dashboard. This
+// endpoint stores an environment-specific external plan mapping without
+// pretending Stripe Product/Price semantics apply.
+router.put("/plans/:planId/provider-mappings/safepay", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const { planId } = req.params;
+    const providerPlanId = String(req.body?.providerPlanId ?? "").trim();
+    const environment = String(req.body?.environment ?? "SANDBOX").toUpperCase();
+    if (!providerPlanId) return res.status(400).json({ message: "Safepay plan ID is required" });
+    if (!["SANDBOX", "LIVE"].includes(environment)) return res.status(400).json({ message: "Invalid Safepay environment" });
+    const plan = await prisma.plan.findFirst({ where: { id: planId, regionId } });
+    if (!plan) return res.status(404).json({ message: "Plan not found in your region" });
+    const mapping = await prisma.planProviderMapping.upsert({
+      where: { planId_provider_environment: { planId, provider: "SAFEPAY", environment } },
+      create: { planId, provider: "SAFEPAY", environment, providerPlanId },
+      update: { providerPlanId },
+    });
+    return res.json(mapping);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message || "Could not save provider mapping" });
+  }
+});
+
+router.get("/plans/:planId/provider-mappings", async (req, res) => {
+  try {
+    const regionId = getRegion(req);
+    const plan = await prisma.plan.findFirst({ where: { id: req.params.planId, regionId } });
+    if (!plan) return res.status(404).json({ message: "Plan not found in your region" });
+    return res.json(await prisma.planProviderMapping.findMany({ where: { planId: plan.id } }));
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
   }
 });
 

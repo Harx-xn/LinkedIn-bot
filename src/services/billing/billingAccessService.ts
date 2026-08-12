@@ -158,7 +158,10 @@ export async function hasDashboardAccess(userId: string): Promise<boolean> {
 
   if (status === BillingAccessStatus.TRIALING || status === BillingAccessStatus.ACTIVE) {
     if (!sub) return false;
-    if (sub.stripeSubscriptionId && !sub.stripeDefaultPaymentMethodId) {
+    if (
+      (sub.providerSubscriptionId || sub.stripeSubscriptionId) &&
+      !(sub.providerPaymentMethodPresent || sub.stripeDefaultPaymentMethodId)
+    ) {
       return false;
     }
     return true;

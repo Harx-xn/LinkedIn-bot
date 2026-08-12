@@ -21,6 +21,8 @@ export interface BillingInvoiceDto {
   periodEnd: string | null;
   hostedInvoiceUrl: string | null;
   invoicePdf: string | null;
+  provider?: string;
+  providerTransactionId?: string | null;
 }
 
 interface StripeInvoiceLike {
@@ -80,6 +82,7 @@ export async function getBillingInvoices(userId: string): Promise<{ invoices: Bi
         OR: [
           { stripeSubscriptionId: { not: null } },
           { stripeCustomerId: { not: null } },
+          { provider: 'SAFEPAY', providerSubscriptionId: { not: null } },
         ],
       },
       orderBy: { createdAt: 'desc' },
@@ -90,6 +93,26 @@ export async function getBillingInvoices(userId: string): Promise<{ invoices: Bi
       select: { regionId: true, stripeCustomerId: true },
     }),
   ]);
+
+  const ownedProvider = sub?.provider ?? (sub?.stripeSubscriptionId ? 'STRIPE' : null);
+  if (ownedProvider === 'SAFEPAY') {
+    const transactions = await prisma.billingTransaction.findMany({ where: { userId, provider: 'SAFEPAY' }, orderBy: { createdAt: 'desc' }, take: 20 });
+    return { invoices: transactions.map((item) => ({
+      id: item.id,
+      number: item.providerInvoiceId,
+      status: normalizeInvoiceStatus(item.status),
+      amountDue: item.amount,
+      amountPaid: item.amountPaid,
+      currency: item.currency.toLowerCase(),
+      createdAt: item.createdAt.toISOString(),
+      periodStart: item.periodStart?.toISOString() ?? null,
+      periodEnd: item.periodEnd?.toISOString() ?? null,
+      hostedInvoiceUrl: item.receiptUrl,
+      invoicePdf: null,
+      provider: 'SAFEPAY',
+      providerTransactionId: item.providerTransactionId,
+    })) };
+  }
 
   const regionId = sub?.regionId ?? user?.regionId ?? null;
   const stripeCustomerId = sub?.stripeCustomerId ?? user?.stripeCustomerId ?? null;

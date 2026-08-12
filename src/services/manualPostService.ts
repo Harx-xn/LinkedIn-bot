@@ -8,6 +8,10 @@ import {
 import { canPublishToLinkedIn } from './planEntitlementService';
 import { scheduleManualPostFingerprintSync } from './manualPost/manualPostFingerprintService';
 import { safeUpdateTopicHistoryStatus } from './topicHistoryService';
+import {
+  linkedinPublishMediaType,
+  linkedinPublishTextDiagnostics,
+} from './linkedinPublishDiagnostics';
 
 /**
  * Manual Posts / Composer service (Taplio-like).
@@ -266,8 +270,32 @@ export async function publishManualPostNow(
   userId: string,
   postId: string,
   body?: ManualPostInput,
+  publishTraceId?: string,
 ) {
   let post = await findOwnedManualPost(userId, postId);
+
+  if (publishTraceId) {
+    const requestContent = typeof body?.content === 'string' ? body.content : post.content;
+    const requestText = linkedinPublishTextDiagnostics(requestContent);
+    const requestMediaUrl = typeof body?.mediaUrl === 'string'
+      ? body.mediaUrl
+      : body?.mediaUrl === null
+        ? null
+        : post.mediaUrl;
+    const mediaType = linkedinPublishMediaType(post.attachmentType, requestMediaUrl);
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_request_received',
+      publishTraceId,
+      userId,
+      postId,
+      requestContentLength: requestText.length,
+      requestContentSha256: requestText.sha256,
+      requestStartSample: requestText.startSample,
+      requestEndSample: requestText.endSample,
+      hasMedia: mediaType !== 'TEXT',
+      mediaType,
+    });
+  }
 
   if (post.status === 'PUBLISHED') {
     throw new ManualPostError(409, 'Post already published');
@@ -290,6 +318,20 @@ export async function publishManualPostNow(
     });
   }
 
+  if (publishTraceId) {
+    const databaseText = linkedinPublishTextDiagnostics(post.content);
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_content_persisted',
+      publishTraceId,
+      userId,
+      postId,
+      databaseContentLength: databaseText.length,
+      databaseContentSha256: databaseText.sha256,
+      databaseStartSample: databaseText.startSample,
+      databaseEndSample: databaseText.endSample,
+    });
+  }
+
   let linkedinAccountId = post.linkedinAccountId;
   if (!linkedinAccountId) {
     linkedinAccountId = await getLinkedInAccountId(userId);
@@ -305,7 +347,7 @@ export async function publishManualPostNow(
     await postToLinkedInFromPostId(post.id, {
       content: post.content,
       mediaUrl: post.mediaUrl,
-    });
+    }, { publishTraceId });
   } catch (err: any) {
     if (post.attachmentType === 'CAROUSEL') {
       await prisma.post.update({ where: { id: post.id }, data: { status: 'FAILED', errorMessage: err?.message || 'Carousel document upload failed' } }).catch(() => undefined);
@@ -321,8 +363,26 @@ export async function publishManualPostNow(
 // ---------------------------------------------------------------------------
 // 5. Create + publish immediately in one request
 // ---------------------------------------------------------------------------
-export async function createAndPublishNow(userId: string, body: ManualPostInput) {
+export async function createAndPublishNow(
+  userId: string,
+  body: ManualPostInput,
+  publishTraceId?: string,
+) {
   const { content, mediaUrl } = validateManualPostInput(body.content, body.mediaUrl);
+
+  if (publishTraceId) {
+    const requestText = linkedinPublishTextDiagnostics(content);
+    const mediaType = linkedinPublishMediaType(undefined, mediaUrl);
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_request_received', publishTraceId, userId,
+      postId: null,
+      requestContentLength: requestText.length,
+      requestContentSha256: requestText.sha256,
+      requestStartSample: requestText.startSample,
+      requestEndSample: requestText.endSample,
+      hasMedia: mediaType !== 'TEXT', mediaType,
+    });
+  }
 
   // Gate before creating anything so we don't leave orphan drafts.
   await ensureCanPublishOrSchedule(userId);
@@ -345,8 +405,20 @@ export async function createAndPublishNow(userId: string, body: ManualPostInput)
     },
   });
 
+  if (publishTraceId) {
+    const databaseText = linkedinPublishTextDiagnostics(post.content);
+    console.info('[linkedin-publish-diagnostic]', {
+      event: 'linkedin_publish_content_persisted', publishTraceId, userId,
+      postId: post.id,
+      databaseContentLength: databaseText.length,
+      databaseContentSha256: databaseText.sha256,
+      databaseStartSample: databaseText.startSample,
+      databaseEndSample: databaseText.endSample,
+    });
+  }
+
   try {
-    await postToLinkedInFromPostId(post.id, { content, mediaUrl });
+    await postToLinkedInFromPostId(post.id, { content, mediaUrl }, { publishTraceId });
   } catch (err: any) {
     throw new ManualPostError(500, err?.message || 'Failed to publish post');
   }

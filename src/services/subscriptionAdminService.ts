@@ -299,10 +299,9 @@ export async function updateAdminSubscription(params: {
     targetPlan = plan;
   }
 
-  const paymentConfig = await prisma.paymentConfig.findUnique({
-    where: { regionId },
-  });
-  const provider = paymentConfig?.provider ?? 'MANUAL';
+  // Management operations are routed by immutable subscription ownership,
+  // never by the region's provider selected for new checkouts.
+  const provider = existing.provider ?? (existing.stripeSubscriptionId ? 'STRIPE' : 'MANUAL');
 
   if (patch.planChanging && targetPlan) {
     if (existing.stripeSubscriptionId && provider === 'PAYPAL') {

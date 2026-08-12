@@ -56,31 +56,31 @@ model Region {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users                 User[]
-  botConfigs            BotConfig[]
-  linkedinAccounts      LinkedInAccount[]
-  posts                 Post[]
-  schedules             Schedule[]
-  sheetConfigs          SheetConfig[]
-  generationJobs        BotGenerationJob[]
-  subscriptions         Subscription[]
-  plans                 Plan[]
-  paymentConfig         PaymentConfig?
-  platformSettings      PlatformSetting[]
-  promotions            Promotion[]
-  inviteLinks           InviteLink[]
-  imageGenerationUsages ImageGenerationUsage[]
-  manualAiRewriteUsages ManualAiRewriteUsage[]
+  users                      User[]
+  botConfigs                 BotConfig[]
+  linkedinAccounts           LinkedInAccount[]
+  posts                      Post[]
+  schedules                  Schedule[]
+  sheetConfigs               SheetConfig[]
+  generationJobs             BotGenerationJob[]
+  subscriptions              Subscription[]
+  plans                      Plan[]
+  paymentConfig              PaymentConfig?
+  platformSettings           PlatformSetting[]
+  promotions                 Promotion[]
+  inviteLinks                InviteLink[]
+  imageGenerationUsages      ImageGenerationUsage[]
+  manualAiRewriteUsages      ManualAiRewriteUsage[]
   carouselAiGenerationUsages CarouselAiGenerationUsage[]
   carouselProjects           CarouselProject[]
-  supportRequests         SupportRequest[]
+  supportRequests            SupportRequest[]
 }
 
 model PaymentConfig {
   id       String @id @default(cuid())
   regionId String @unique
 
-  provider String  @default("MANUAL") // STRIPE | PAYPAL | MANUAL
+  provider String  @default("MANUAL") // STRIPE | SAFEPAY | PAYPAL | MANUAL
   isActive Boolean @default(true)
 
   // Stripe
@@ -92,6 +92,12 @@ model PaymentConfig {
   paypalClientId     String?
   paypalClientSecret String?
   paypalMode         String? @default("sandbox") // sandbox | live
+
+  // Safepay (separate credentials are expected per environment)
+  safepayPublicKey     String?
+  safepaySecretKey     String?
+  safepayWebhookSecret String?
+  safepayEnvironment   String? @default("SANDBOX") // SANDBOX | LIVE
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -105,11 +111,11 @@ model User {
   username     String  @unique
   passwordHash String?
 
-  role            UserRole @default(USER)
-  isActive        Boolean  @default(true)
-  themePreference String   @default("LIGHT")
-  hasCompletedOnboardingTour Boolean @default(false)
-  hasCompletedProfileOnboarding Boolean @default(false)
+  role                          UserRole @default(USER)
+  isActive                      Boolean  @default(true)
+  themePreference               String   @default("LIGHT")
+  hasCompletedOnboardingTour    Boolean  @default(false)
+  hasCompletedProfileOnboarding Boolean  @default(false)
 
   // Trial tracking — trial starts only after Stripe Checkout + webhook confirmation.
   trialStartedAt      DateTime?
@@ -117,7 +123,7 @@ model User {
   trialRedeemedAt     DateTime?
   billingAccessStatus BillingAccessStatus @default(BILLING_REQUIRED)
   stripeCustomerId    String?
-  isBillingExempt     Boolean   @default(false)
+  isBillingExempt     Boolean             @default(false)
   billingExemptAt     DateTime?
   billingExemptById   String?
   billingExemptReason String?
@@ -133,30 +139,30 @@ model User {
   googleClientId       String?
   googleClientSecret   String?
 
-  botConfigs              BotConfig?
-  linkedinAccounts        LinkedInAccount[]
-  posts                   Post[]
-  schedules               Schedule[]
-  sheetConfigs            SheetConfig[]
-  subscriptions           Subscription[]
-  BotGenerationJob        BotGenerationJob[]
-  promotionRedemptions    PromotionRedemption[]
-  inviteRedemptions       InviteRedemption[]
-  notifications           Notification[]
-  createdInviteLinks      InviteLink[]             @relation("InviteCreatedBy")
-  imageGenerationUsages   ImageGenerationUsage[]
-  manualAiRewriteUsages   ManualAiRewriteUsage[]
+  botConfigs                 BotConfig?
+  linkedinAccounts           LinkedInAccount[]
+  posts                      Post[]
+  schedules                  Schedule[]
+  sheetConfigs               SheetConfig[]
+  subscriptions              Subscription[]
+  BotGenerationJob           BotGenerationJob[]
+  promotionRedemptions       PromotionRedemption[]
+  inviteRedemptions          InviteRedemption[]
+  notifications              Notification[]
+  createdInviteLinks         InviteLink[]                @relation("InviteCreatedBy")
+  imageGenerationUsages      ImageGenerationUsage[]
+  manualAiRewriteUsages      ManualAiRewriteUsage[]
   carouselAiGenerationUsages CarouselAiGenerationUsage[]
   carouselProjects           CarouselProject[]
-  nicheSearchPlans        UserNicheSearchPlan[]
-  topicHistory            GeneratedTopicHistory[]
-  topicInventory          TopicInventory[]
-  voiceProfile            UserVoiceProfile?
-  postContentFingerprints PostContentFingerprint[]
-  authProviderAccounts    AuthProviderAccount[]
-  supportRequests         SupportRequest[]
-  linkedinAnalyticsImports LinkedInAnalyticsImport[]
-  linkedinProfileSnapshots LinkedInProfileSnapshot[]
+  nicheSearchPlans           UserNicheSearchPlan[]
+  topicHistory               GeneratedTopicHistory[]
+  topicInventory             TopicInventory[]
+  voiceProfile               UserVoiceProfile?
+  postContentFingerprints    PostContentFingerprint[]
+  authProviderAccounts       AuthProviderAccount[]
+  supportRequests            SupportRequest[]
+  linkedinAnalyticsImports   LinkedInAnalyticsImport[]
+  linkedinProfileSnapshots   LinkedInProfileSnapshot[]
 
   @@index([regionId])
   @@index([role])
@@ -171,22 +177,22 @@ enum LinkedInAnalyticsStatus {
 }
 
 model LinkedInAnalyticsImport {
-  id                String                    @id @default(cuid())
+  id                String                  @id @default(cuid())
   userId            String
   periodStart       DateTime
   periodEnd         DateTime
-  status            LinkedInAnalyticsStatus  @default(PROCESSING)
-  impressions       Int                       @default(0)
-  membersReached    Int                       @default(0)
-  engagementCount   Int                       @default(0)
+  status            LinkedInAnalyticsStatus @default(PROCESSING)
+  impressions       Int                     @default(0)
+  membersReached    Int                     @default(0)
+  engagementCount   Int                     @default(0)
   followerCount     Int?
   normalizedData    Json
   deterministicData Json
   analysisError     String?
-  createdAt         DateTime                  @default(now())
-  updatedAt         DateTime                  @updatedAt
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
 
-  user         User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
   dailyMetrics LinkedInAnalyticsDailyMetric[]
   postMetrics  LinkedInAnalyticsPostMetric[]
   demographics LinkedInAnalyticsDemographic[]
@@ -211,16 +217,16 @@ model LinkedInAnalyticsDailyMetric {
 }
 
 model LinkedInAnalyticsPostMetric {
-  id                 String   @id @default(cuid())
-  importId           String
-  linkedinPostUrl    String
-  publishedAt        DateTime?
-  impressions        Int      @default(0)
-  engagements        Int      @default(0)
-  engagementRate     Float    @default(0)
-  matchedPostId      String?
-  enrichment         Json?
-  createdAt          DateTime @default(now())
+  id              String    @id @default(cuid())
+  importId        String
+  linkedinPostUrl String
+  publishedAt     DateTime?
+  impressions     Int       @default(0)
+  engagements     Int       @default(0)
+  engagementRate  Float     @default(0)
+  matchedPostId   String?
+  enrichment      Json?
+  createdAt       DateTime  @default(now())
 
   analyticsImport LinkedInAnalyticsImport @relation(fields: [importId], references: [id], onDelete: Cascade)
 
@@ -356,21 +362,21 @@ enum CarouselAttachmentStatus {
 }
 
 model UserNicheSearchPlan {
-  id          String   @id @default(cuid())
-  userId      String
-  niche       String
-  domain      String
-  confidence  Float
-  subtopics   Json
-  queries     Json
-  exclusions  Json
-  version     Int      @default(1)
-  schemaVersion Int    @default(1)
-  queryGenerationVersion Int @default(1)
-  aliasGenerationVersion Int @default(1)
-  inputFingerprint String?
-  generatedAt DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  userId                 String
+  niche                  String
+  domain                 String
+  confidence             Float
+  subtopics              Json
+  queries                Json
+  exclusions             Json
+  version                Int      @default(1)
+  schemaVersion          Int      @default(1)
+  queryGenerationVersion Int      @default(1)
+  aliasGenerationVersion Int      @default(1)
+  inputFingerprint       String?
+  generatedAt            DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -402,39 +408,39 @@ model GeneratedTopicHistory {
 }
 
 model TopicInventory {
-  id String @id @default(cuid())
-  userId String
-  niche String
-  title String
-  normalizedTopic String
-  coreClaim String?
-  semanticCluster String?
-  mechanism String?
-  intent String?
-  relevanceScore Float
-  strategyScore Float
-  confidenceScore Float
+  id                 String               @id @default(cuid())
+  userId             String
+  niche              String
+  title              String
+  normalizedTopic    String
+  coreClaim          String?
+  semanticCluster    String?
+  mechanism          String?
+  intent             String?
+  relevanceScore     Float
+  strategyScore      Float
+  confidenceScore    Float
   sourceQualityScore Float
-  noveltyScore Float
-  recencyScore Float
-  finalScore Float
-  sourceUrl String?
-  sourceName String?
-  discoverySource String?
-  evidenceRole String?
-  evidenceSummary String?
-  supportingSources Json?
-  fingerprint String
+  noveltyScore       Float
+  recencyScore       Float
+  finalScore         Float
+  sourceUrl          String?
+  sourceName         String?
+  discoverySource    String?
+  evidenceRole       String?
+  evidenceSummary    String?
+  supportingSources  Json?
+  fingerprint        String
   profileFingerprint String?
-  sourcePublishedAt DateTime?
-  discoveredAt DateTime @default(now())
-  expiresAt DateTime?
-  status TopicInventoryStatus @default(AVAILABLE)
-  reservedByJobId String?
-  reservedAt DateTime?
-  consumedAt DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  sourcePublishedAt  DateTime?
+  discoveredAt       DateTime             @default(now())
+  expiresAt          DateTime?
+  status             TopicInventoryStatus @default(AVAILABLE)
+  reservedByJobId    String?
+  reservedAt         DateTime?
+  consumedAt         DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -525,36 +531,36 @@ model Schedule {
 }
 
 model Post {
-  id                String    @id @default(cuid())
-  userId            String
-  regionId          String?
-  linkedinAccountId String?
-  source            String    @default("MANUAL")
-  status            String    @default("DRAFT")
-  content           String
-  hashtags          String?
-  scheduledAt       DateTime?
-  publishedAt       DateTime?
-  linkedinPostUrn   String?
-  mediaUrl          String?
-  attachmentType    PostAttachmentType @default(NONE)
-  carouselProjectId String?
-  carouselPdfUrl    String?
-  carouselFileName  String?
-  carouselUpdatedAt DateTime?
+  id                       String                    @id @default(cuid())
+  userId                   String
+  regionId                 String?
+  linkedinAccountId        String?
+  source                   String                    @default("MANUAL")
+  status                   String                    @default("DRAFT")
+  content                  String
+  hashtags                 String?
+  scheduledAt              DateTime?
+  publishedAt              DateTime?
+  linkedinPostUrn          String?
+  mediaUrl                 String?
+  attachmentType           PostAttachmentType        @default(NONE)
+  carouselProjectId        String?
+  carouselPdfUrl           String?
+  carouselFileName         String?
+  carouselUpdatedAt        DateTime?
   carouselAttachmentStatus CarouselAttachmentStatus?
-  errorMessage      String?
-  rewriteCount      Int       @default(0)
-  manualTopic       String?
-  aiGenerated       Boolean   @default(false)
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  errorMessage             String?
+  rewriteCount             Int                       @default(0)
+  manualTopic              String?
+  aiGenerated              Boolean                   @default(false)
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
 
   linkedinAccount    LinkedInAccount?        @relation(fields: [linkedinAccountId], references: [id], onDelete: SetNull)
   user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
   region             Region?                 @relation(fields: [regionId], references: [id], onDelete: SetNull)
   contentFingerprint PostContentFingerprint?
-  carouselProject    CarouselProject? @relation(fields: [carouselProjectId], references: [id], onDelete: SetNull)
+  carouselProject    CarouselProject?        @relation(fields: [carouselProjectId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([regionId])
@@ -637,19 +643,19 @@ model Plan {
   stripePriceId String?
 
   // Feature toggles / usage limits enforced server-side per active subscription.
-  fullDashboardUnlock       Boolean @default(true)
-  maxRewritesPerPost        Int     @default(3)
-  dailyPostLimit            Int     @default(5)
-  dailyBatchGenerationLimit Int     @default(1)
-  monthlyPostLimit          Int?
-  monthlyBatchGenerationLimit Int?
-  imageGenerationEnabled    Boolean @default(false)
-  dailyImageGenerationLimit Int     @default(0)
-  monthlyImageGenerationLimit Int?
+  fullDashboardUnlock           Boolean @default(true)
+  maxRewritesPerPost            Int     @default(3)
+  dailyPostLimit                Int     @default(5)
+  dailyBatchGenerationLimit     Int     @default(1)
+  monthlyPostLimit              Int?
+  monthlyBatchGenerationLimit   Int?
+  imageGenerationEnabled        Boolean @default(false)
+  dailyImageGenerationLimit     Int     @default(0)
+  monthlyImageGenerationLimit   Int?
   monthlyManualAiOperationLimit Int?
-  carouselSaveLimit              Int?
-  carouselAiGenerationLimit      Int?
-  convertPostToCarouselEnabled   Boolean @default(false)
+  carouselSaveLimit             Int?
+  carouselAiGenerationLimit     Int?
+  convertPostToCarouselEnabled  Boolean @default(false)
 
   regionId String?
   region   Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
@@ -657,10 +663,30 @@ model Plan {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  subscriptions Subscription[]
+  subscriptions    Subscription[]
+  providerMappings PlanProviderMapping[]
 
   @@unique([code, regionId])
   @@index([regionId])
+}
+
+model PlanProviderMapping {
+  id                String   @id @default(cuid())
+  planId            String
+  provider          String
+  environment       String   @default("LIVE")
+  providerPlanId    String?
+  providerProductId String?
+  providerPriceId   String?
+  metadata          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, provider, environment])
+  @@index([provider, providerPlanId])
+  @@index([provider, providerPriceId])
 }
 
 model Subscription {
@@ -673,6 +699,14 @@ model Subscription {
   startsAt  DateTime  @default(now())
   endsAt    DateTime?
   autoRenew Boolean   @default(true)
+
+  // Provider ownership is immutable after creation. The regional selection only
+  // controls new checkouts.
+  provider                     String  @default("MANUAL")
+  providerSubscriptionId       String?
+  providerCustomerId           String?
+  providerStatus               String?
+  providerPaymentMethodPresent Boolean @default(false)
 
   stripeCustomerId             String?
   stripeSubscriptionId         String? @unique
@@ -700,10 +734,13 @@ model Subscription {
   region               Region?               @relation(fields: [regionId], references: [id], onDelete: SetNull)
   plan                 Plan                  @relation(fields: [planId], references: [id], onDelete: Restrict)
   promotionRedemptions PromotionRedemption[]
+  billingTransactions  BillingTransaction[]
 
+  @@unique([provider, providerSubscriptionId])
   @@index([userId])
   @@index([regionId])
   @@index([planId])
+  @@index([provider, providerCustomerId])
 }
 
 model PlatformSetting {
@@ -820,8 +857,38 @@ model PaymentEvent {
   attempts        Int       @default(0)
   processedAt     DateTime?
   errorMessage    String?
+  regionId        String?
+  payload         Json?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+model BillingTransaction {
+  id                    String    @id @default(cuid())
+  subscriptionId        String?
+  userId                String
+  regionId              String?
+  provider              String
+  providerInvoiceId     String?
+  providerTransactionId String?
+  amount                Int
+  amountPaid            Int       @default(0)
+  currency              String
+  status                String
+  periodStart           DateTime?
+  periodEnd             DateTime?
+  paidAt                DateTime?
+  failedAt              DateTime?
+  receiptUrl            String?
+  metadata              Json?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerTransactionId])
+  @@index([userId, createdAt])
+  @@index([subscriptionId])
 }
 
 model Notification {
@@ -894,8 +961,8 @@ model CarouselProject {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region        Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
   attachedPosts Post[]
 
   @@index([userId, updatedAt])
