@@ -3,7 +3,7 @@ import { config } from '../config';
 import { prisma } from '../prismaClient';
 import { decryptSecret } from './secretCrypto';
 import { updateGoogleSheetPostStatus } from './sheetsService';
-import { prepareLinkedInCommentary } from './linkedinPublishingText';
+import { prepareLinkedInCommentaryStages } from './linkedinPublishingText';
 import {
   linkedinPublishMediaType,
   linkedinPublishTextDiagnostics,
@@ -371,19 +371,24 @@ export async function postToLinkedInFromPostId(
       hasMedia: mediaType !== 'TEXT', mediaType,
     });
   }
-  const commentary = prepareLinkedInCommentary(publishingContent);
+  const { normalizedContent, commentary } = prepareLinkedInCommentaryStages(publishingContent);
+  const normalizedText = linkedinPublishTextDiagnostics(normalizedContent);
   const commentaryText = linkedinPublishTextDiagnostics(commentary);
 
   if (publishTraceId) {
     console.info('[linkedin-publish-diagnostic]', {
       event: 'linkedin_publish_commentary_prepared', publishTraceId,
       postId: post.id,
-      beforeNormalizationLength: publishingText.length,
-      afterNormalizationLength: commentaryText.length,
-      beforeSha256: publishingText.sha256,
-      afterSha256: commentaryText.sha256,
-      normalizedStartSample: commentaryText.startSample,
-      normalizedEndSample: commentaryText.endSample,
+      rawContentLength: publishingText.length,
+      rawContentSha256: publishingText.sha256,
+      normalizedContentLength: normalizedText.length,
+      normalizedContentSha256: normalizedText.sha256,
+      escapedCommentaryLength: commentaryText.length,
+      escapedCommentarySha256: commentaryText.sha256,
+      normalizedStartSample: normalizedText.startSample,
+      normalizedEndSample: normalizedText.endSample,
+      escapedStartSample: commentaryText.startSample,
+      escapedEndSample: commentaryText.endSample,
     });
   }
 
