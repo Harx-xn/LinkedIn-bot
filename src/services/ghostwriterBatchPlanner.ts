@@ -103,6 +103,18 @@ export function buildDeterministicBatchPlan(
         ? `Use trend as inspiration for a ${angle.replace(/_/g, ' ')} post`
         : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
       evergreen: !trend,
+      depthPlan: {
+        centralClaim: trend?.topic ?? 'Develop one narrow claim from author expertise.',
+        whyThisClaimIsInteresting: trend?.suggestedAngle ?? null,
+        strongestObservations: (trend?.keyPoints ?? []).slice(0, 3),
+        underlyingCauseOrMechanism: null,
+        deeperInterpretation: trend?.summary?.trim() || null,
+        meaningfulConsequence: trend?.audienceRelevance ?? null,
+        usefulTensionOrQualification: null,
+        personalPerspective: { supported: false, insight: null },
+        endingInsight: null,
+        avoidIdeas: ['generic recommendation', 'summary that restates the central claim'],
+      },
     };
     plans.push({ ...basePlan, expressionMode: selectBatchExpressionMode(i, angle) });
   }

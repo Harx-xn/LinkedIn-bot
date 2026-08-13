@@ -11,16 +11,22 @@ function clampScore(value: unknown, fallback = 0): number {
   return Math.max(0, Math.min(10, n));
 }
 
-export function evaluateDeterministicDraftQuality(content: string): {
+export function evaluateDeterministicDraftQuality(
+  content: string,
+  options: { allowEnumeration?: boolean } = {},
+): {
   genericAiRisk: number;
   matches: string[];
+  detectedIssues: string[];
   needsQualityRepair: boolean;
 } {
-  const risk = calculateManualGenericAiRisk(content);
+  const risk = calculateManualGenericAiRisk(content, options);
   return {
     genericAiRisk: risk.score,
     matches: risk.matches,
-    needsQualityRepair: risk.score > 4,
+    detectedIssues: risk.detectedIssues,
+    needsQualityRepair: risk.score > 4 || risk.detectedIssues.some((issue) =>
+      issue === 'ENUMERATION_WITHOUT_INTERPRETATION' || issue === 'THESIS_RESTATEMENT'),
   };
 }
 
@@ -33,6 +39,13 @@ export function criticScoresNeedRewrite(scores: ManualCriticScores): boolean {
     (scores.audienceFit ?? 8) < 7 ||
     (scores.conversationPotential ?? 8) < 7 ||
     (scores.dwellQuality ?? 8) < 7 ||
+    (scores.argumentProgression ?? 8) < 7 ||
+    (scores.semanticRedundancy ?? 0) > 3 ||
+    (scores.centralClaimClarity ?? 8) < 7 ||
+    (scores.depthInterpretation ?? 8) < 7 ||
+    (scores.structuralFit ?? 8) < 7 ||
+    (scores.endingQuality ?? 8) < 7 ||
+    (scores.nicheNaturalness ?? 8) < 7 ||
     scores.genericAiRisk > 4
   );
 }
@@ -56,6 +69,14 @@ export function parseManualCriticResult(raw: string): ManualCriticResult {
     audienceFit: clampScore(scoresObj.audienceFit, 8),
     conversationPotential: clampScore(scoresObj.conversationPotential, 8),
     dwellQuality: clampScore(scoresObj.dwellQuality, 8),
+    argumentProgression: clampScore(scoresObj.argumentProgression, 8),
+    semanticRedundancy: clampScore(scoresObj.semanticRedundancy, 0),
+    centralClaimClarity: clampScore(scoresObj.centralClaimClarity, 8),
+    depthInterpretation: clampScore(scoresObj.depthInterpretation, 8),
+    structuralFit: clampScore(scoresObj.structuralFit, 8),
+    endingQuality: clampScore(scoresObj.endingQuality, 8),
+    nicheNaturalness: clampScore(scoresObj.nicheNaturalness, 8),
+    lengthFit: clampScore(scoresObj.lengthFit, 8),
     readability: clampScore(scoresObj.readability),
     genericAiRisk: clampScore(scoresObj.genericAiRisk),
   };
@@ -102,35 +123,14 @@ export function applyBoundedManualRevision(
 }
 
 export function extractPreservedFactTokens(text: string): string[] {
-  const genericSentenceStarters = new Set([
-    'A',
-    'An',
-    'The',
-    'This',
-    'That',
-    'These',
-    'Those',
-    'Here',
-    'What',
-    'Why',
-    'How',
-    'Have',
-    'Most',
-    'Many',
-    'When',
-    'In',
-    'As',
-    'If',
-    'Conversely',
-    'Consider',
-    'Invest',
-  ]);
   return Array.from(
     new Set(
       text
-        .match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b|\b\d+(?:\.\d+)?%|\$[\d,]+(?:\.\d+)?\b/g) ?? [],
+        // Preserve credible factual anchors, not every capitalized sentence
+        // opener (for example "Trust" or "Teams").
+        .match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b|\b[A-Z]{2,}\b|\b[A-Z][A-Za-z]*[A-Z][A-Za-z]*\b|\b\d+(?:\.\d+)?%|\$[\d,]+(?:\.\d+)?\b/g) ?? [],
     ),
-  ).filter((token) => !genericSentenceStarters.has(token));
+  );
 }
 
 export function preservedFactsSurviveRevision(

@@ -39,8 +39,9 @@ async function fetchManualStageRaw(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
   mode: 'generation' | 'rewrite',
+  callKind: 'writer' | 'repair',
 ): Promise<string> {
-  budget.recordProviderCall();
+  budget.recordProviderCall(callKind, prompt);
   if (mode === 'rewrite') {
     return contentService.fetchComposerRewriteRaw(prompt, provider);
   }
@@ -54,7 +55,7 @@ export async function invokeManualPlanningPrompt(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
 ): Promise<ManualPlanningResult> {
-  budget.recordProviderCall();
+  budget.recordProviderCall('planner', prompt);
   const raw = await contentService.fetchComposerPlanningRaw(prompt, provider);
   return parseManualPlanningResult(raw);
 }
@@ -66,8 +67,8 @@ export async function invokeManualDraftPrompt(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
 ): Promise<ManualGeneratedPost> {
-  const raw = await fetchManualStageRaw(contentService, prompt, provider, budget, 'generation');
-  const parsed = await parseManualProviderOutputWithRepair(contentService, raw, provider, prompt);
+  const raw = await fetchManualStageRaw(contentService, prompt, provider, budget, 'generation', 'writer');
+  const parsed = await parseManualProviderOutputWithRepair(contentService, raw, provider, prompt, budget);
   return parsed;
 }
 
@@ -78,7 +79,18 @@ export async function invokeManualCriticPrompt(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
 ): Promise<string> {
-  return fetchManualStageRaw(contentService, prompt, provider, budget, 'rewrite');
+  return fetchManualStageRaw(contentService, prompt, provider, budget, 'rewrite', 'repair');
+}
+
+/** One deterministic-issue-driven repair returning the final post schema directly. */
+export async function invokeManualTargetedRepairPrompt(
+  contentService: ContentService,
+  prompt: string,
+  provider: ContentProvider,
+  budget: ManualProviderCallBudget,
+): Promise<ManualGeneratedPost> {
+  const raw = await fetchManualStageRaw(contentService, prompt, provider, budget, 'generation', 'repair');
+  return parseManualProviderOutputWithRepair(contentService, raw, provider, prompt, budget);
 }
 
 /** Legacy single-call manual generation kept for rewrite transport tests. */

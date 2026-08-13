@@ -6,8 +6,9 @@ import {
 import type { BotVoice } from '../userContentContext';
 import { calculateManualGenericAiRisk } from './manualGenericAiDetector';
 import type { ManualGeneratedPost } from './manualPostTypes';
+import { MAX_LINKEDIN_POST_LENGTH } from '../generatedPostLength';
 
-export const MANUAL_LINKEDIN_CHAR_LIMIT = 3000;
+export const MANUAL_LINKEDIN_CHAR_LIMIT = MAX_LINKEDIN_POST_LENGTH;
 
 export function normalizeManualLinkedInBodyV2(body: string): string {
   return normalizeTaplioStyleBody(body);
@@ -37,6 +38,7 @@ export function finalizeManualGeneratedPostV2(
   manual: ManualGeneratedPost,
   fallbackContent: string,
   options: FinalizeManualPostOptions,
+  enforceMaximum = true,
 ) {
   const body = assembleManualPostBody(manual);
   const hashtags = normalizeManualHashtags(manual.hashtags, body, options.topic);
@@ -69,7 +71,7 @@ export function finalizeManualGeneratedPostV2(
     },
   );
 
-  if (finalized.content.length > MANUAL_LINKEDIN_CHAR_LIMIT) {
+  if (enforceMaximum && finalized.content.length > MANUAL_LINKEDIN_CHAR_LIMIT) {
     throw new Error(`Generated content exceeds ${MANUAL_LINKEDIN_CHAR_LIMIT} characters`);
   }
 

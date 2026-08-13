@@ -5,6 +5,7 @@ import {
   SPECIFICITY_RULES,
   VARIED_FORMAT_RULES,
   buildRepairPrompt,
+  DEFAULT_EDITORIAL_RULES,
   GHOSTWRITER_SYSTEM,
 } from './ghostwriterPrompts';
 import { buildExpressionModePromptBlock } from './expressionModeService';
@@ -16,7 +17,7 @@ test('global production rules do not prescribe one six-stage essay progression',
   assert.doesNotMatch(globalRules, /Recommended progression/i);
   assert.doesNotMatch(globalRules, /Voice Plan|adaptive (?:character )?range/i);
   assert.match(globalRules, /Not every post needs a problem statement, example/);
-  assert.match(globalRules, /may end when its reasoning, solution, or implication is complete/);
+  assert.match(DEFAULT_EDITORIAL_RULES, /End by sharpening, reframing, resolving, exposing a tension, or stopping/);
   assert.match(GHOSTWRITER_SYSTEM, /single most natural credible form/);
   assert.match(GHOSTWRITER_SYSTEM, /do not include all of these forms/);
 });
@@ -52,13 +53,13 @@ test('batch repair preserves the selected expression mode and unusual structure'
 
 test('expression modes define distinct movement, optional moves, avoids, and stopping behavior', () => {
   const expected: Record<string, RegExp[]> = {
-    direct: [/CLAIM -> SUPPORT -> STOP/, /scenarios, consequence sections, recommendations/, /once the claim has concrete support/],
+    direct: [/CLAIM -> SUPPORT -> STOP/, /scenarios, recommendation sections/, /completed the argument and satisfied the generation contract/],
     analytical: [/CAUSAL REASONING/, /automatic pivot from analysis into advice/, /causal relationship and its implication/],
-    diagnostic: [/OBSERVABLE PROBLEM -> INVESTIGATION -> UNDERLYING CAUSE/, /educational setup/, /cause and appropriate response/],
-    conversational: [/NATURAL THOUGHT PROGRESSION/, /announced hypothetical stories/, /real person would naturally stop/],
+    diagnostic: [/symptom -> trace -> cause -> fix or decision/, /educational setup/, /cause and appropriate response/],
+    conversational: [/observation -> free-form discussion/, /announced hypothetical stories/, /real person would naturally stop/],
     opinionated: [/POSITION -> REASONS -> OPTIONAL QUALIFICATION/, /forced balance/, /position has been sufficiently defended/],
     walkthrough: [/GOAL -> SEQUENCE OR PROCESS/, /lesson after the final step/, /last meaningful step may be the final line/],
-    reflective: [/OBSERVATION -> IMPLICATION/, /recommendations, action steps, forced lessons/, /end on the implication or observation/],
+    reflective: [/OBSERVATION -> IMPLICATION/, /Do not force recommendations, action steps, lessons/, /end on the implication or observation/],
   };
   for (const [mode, patterns] of Object.entries(expected)) {
     const block = buildExpressionModePromptBlock(mode as ExpressionMode, []);
@@ -67,11 +68,11 @@ test('expression modes define distinct movement, optional moves, avoids, and sto
   }
 });
 
-test('voice diversity changes rhetorical construction rather than synonyms', () => {
-  const block = buildExpressionModePromptBlock('direct', ['For instance, imagine a team. This can lead to waste. Ultimately, adopt a process.']);
-  assert.match(block, /Do not introduce a hypothetical merely to make the post feel complete/);
-  assert.match(block, /Do not convert every observation into advice/);
-  assert.match(block, /Do not append a positive-outcome paragraph/);
-  assert.match(block, /Change sentence construction, thought ordering, paragraph function, or rhetorical move/);
-  assert.match(block, /scenario -> consequence -> recommendation/);
+test('voice diversity uses compact fingerprints and changes construction rather than synonyms', () => {
+  const omitted = 'FULL_BODY_TAIL_SHOULD_BE_OMITTED';
+  const block = buildExpressionModePromptBlock('direct', [`For instance, imagine a team. ${'Context '.repeat(20)}${omitted}`]);
+  assert.match(block, /RECENT RHETORICAL FINGERPRINTS/);
+  assert.match(block, /full post bodies omitted/);
+  assert.match(block, /Change the thought ordering, not merely synonyms/);
+  assert.doesNotMatch(block, new RegExp(omitted));
 });

@@ -292,3 +292,42 @@ describe('final formatted validation', () => {
     assert.ok(issues.some((i) => i.code === 'too_many_hashtags_after_format'));
   });
 });
+
+describe('editorial progression validation', () => {
+  const basePlan = {
+    trendIndex: 0,
+    sourceTopic: 'Automation trust',
+    angle: 'product_lesson' as const,
+    hookStyle: 'observation' as const,
+    endingStyle: 'natural' as const,
+    layout: 'short_observation' as const,
+    rationale: 'test',
+  };
+
+  it('emits explicit enumeration and generic-ending issue codes', () => {
+    const result = runDeterministicValidation(
+      {
+        headline: '', subheadline: '', bulletPoints: [], hashtags: '',
+        body: `Automation projects struggle for several reasons.\n\n- Training\n- Trust\n- Reliability\n- Communication\n\nTherefore, organizations should improve their automation strategy.`,
+      },
+      AUTHOR,
+      basePlan,
+      [],
+    );
+    assert.ok(result.issues.some((issue) => issue.code === 'ENUMERATION_WITHOUT_INTERPRETATION'));
+    assert.ok(result.issues.some((issue) => issue.code === 'GENERIC_RECOMMENDATION_ENDING'));
+  });
+
+  it('keeps intentional walkthrough enumeration valid', () => {
+    const result = runDeterministicValidation(
+      {
+        headline: '', subheadline: '', bulletPoints: [], hashtags: '',
+        body: `Use this deployment sequence.\n\n1. Validate the configuration\n2. Run the migration\n3. Verify health checks\n4. Inspect rollback readiness`,
+      },
+      AUTHOR,
+      { ...basePlan, angle: 'practical_tutorial', layout: 'technical_walkthrough', expressionMode: 'walkthrough' },
+      [],
+    );
+    assert.equal(result.issues.some((issue) => issue.code === 'ENUMERATION_WITHOUT_INTERPRETATION'), false);
+  });
+});

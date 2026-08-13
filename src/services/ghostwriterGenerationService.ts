@@ -27,6 +27,7 @@ import {
 } from './ghostwriterValidationService';
 import { normalizeHashtags } from './postContentFormatting';
 import type { GhostwriterBotConfig } from './ghostwriterPipeline';
+import { estimatePromptTokens, logGenerationTelemetry } from './generationTelemetry';
 
 export const MAX_FRESH_GENERATIONS = 3;
 export const MAX_TARGETED_REPAIRS_PER_GENERATION = 2;
@@ -216,6 +217,7 @@ async function tryAcceptPost(
     sourceTitle,
     batchFingerprints: slotOptions?.batchFingerprints,
     history: slotOptions?.recentTopicHistory,
+    enforceLength: true,
   });
   let technicalReview: TechnicalReviewResult = { passed: true, confidence: 1, issues: [] };
   if (deterministic.passed) {
@@ -292,6 +294,7 @@ export async function generateSlotPost(
   let lastAcceptance: SlotAcceptanceDecision | undefined;
   let lastCandidate: ReturnType<typeof finalizeGeneratedPostContent> | null = null;
   let lastGenerated: GeneratedPostContent | null = null;
+  let initialLength = 0;
 
   for (let fresh = 1; fresh <= MAX_FRESH_GENERATIONS; fresh++) {
     const counters: AttemptCounters = {
@@ -319,6 +322,18 @@ export async function generateSlotPost(
     }
 
     lastGenerated = generated;
+    if (initialLength === 0) {
+      initialLength = finalizeGeneratedPostContent(generated, sourceTitle, {
+        topic: sourceTitle,
+        includeContactInfo: !!config.includeContactInfo,
+        includeWebsiteLink: !!config.includeWebsiteLink,
+        contactInfo: config.contactInfo,
+        websiteUrl: config.websiteUrl,
+        description: config.description,
+      }).content.length;
+    }
+
+    lastGenerated = generated;
 
     for (let repairRound = 0; repairRound <= MAX_TARGETED_REPAIRS_PER_GENERATION; repairRound++) {
       const attempt = await tryAcceptPost(
@@ -336,6 +351,31 @@ export async function generateSlotPost(
       lastAcceptance = attempt.accepted ? attempt.result.acceptance : attempt.acceptance;
       if (attempt.accepted) {
         console.log('[ghostwriter] post accepted', { sourceTitle: sourceTitle.slice(0, 60), angle: plan.angle, expressionMode: plan.expressionMode, freshGenerationAttempt: fresh, provider });
+        const writerPromptEstimate = estimatePromptTokens(JSON.stringify({ plan, author: { description: author.description, tone: author.tone, niches: author.niches }, recent: slotOptions?.recentPosts?.slice(0, 5).map((post) => post.slice(0, 96)) ?? [] }));
+        logGenerationTelemetry({
+          generationType: 'ghostwriter_batch_slot',
+          expressionMode: plan.expressionMode ?? null,
+          plannerCalls: 0,
+          writerCalls: fresh,
+          repairCalls: repairRound,
+          plannerPromptTokens: [],
+          writerPromptTokens: writerPromptEstimate,
+          repairPromptTokens: [],
+          totalPromptTokens: writerPromptEstimate,
+          promptTokenEstimate: writerPromptEstimate,
+          initialLength,
+          repairInputLength: repairRound > 0 ? initialLength : null,
+          repairOutputLength: repairRound > 0 ? attempt.result.finalized.content.length : null,
+          finalLength: attempt.result.finalized.content.length,
+          qualityRiskScore: Math.max(0, 100 - attempt.result.acceptance.qualityScore),
+          detectedIssues: attempt.result.acceptance.warningIssueCodes,
+          repairTriggered: repairRound > 0,
+          repairAccepted: repairRound > 0,
+          repairRejected: false,
+          minimumLengthSatisfied: attempt.result.finalized.content.length >= 1600 && attempt.result.finalized.content.length <= 3000,
+          plannerFallbackUsed: false,
+          plannerValidationFailureReason: null,
+        });
         return attempt.result;
       }
 
@@ -345,6 +385,7 @@ export async function generateSlotPost(
         sourceTitle,
         batchFingerprints: slotOptions?.batchFingerprints,
         history: slotOptions?.recentTopicHistory,
+        enforceLength: true,
       });
       const blocking = deterministic.issues.filter((i) => i.severity === 'error');
       lastAcceptance = buildAcceptanceDecision({

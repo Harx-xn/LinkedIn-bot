@@ -153,11 +153,11 @@ describe('manual voice sample weighting', () => {
 });
 
 describe('manual voice prompt integration', () => {
-  it('includes AUTHOR IDENTITY, EXPLICIT PREFERENCES, VOICE PROFILE, and STYLE REFERENCES', () => {
+  it('includes one compact authoritative voice block and style references', () => {
     const blocks = buildManualVoiceContextBlocks(voiceContextFixture());
-    assert.ok(blocks.includes('AUTHOR IDENTITY'));
-    assert.ok(blocks.includes('EXPLICIT PREFERENCES'));
-    assert.ok(blocks.includes('VOICE PROFILE (from BotConfig)'));
+    assert.ok(blocks.includes('VOICE CONTEXT — AUTHORITATIVE'));
+    assert.ok(!blocks.includes('EXPLICIT PREFERENCES'));
+    assert.ok(!blocks.includes('VOICE PROFILE (from BotConfig)'));
     assert.ok(blocks.includes('STYLE REFERENCES'));
     assert.ok(blocks.includes(STYLE_REFERENCE_INSTRUCTIONS));
     assert.ok(blocks.includes('Do not reuse exact phrases'));
@@ -169,7 +169,7 @@ describe('manual voice prompt integration', () => {
       author: { description: 'Engineer', tone: 'Professional', niches: ['SaaS'] },
       voiceContext: voiceContextFixture(),
     });
-    assert.ok(prompt.includes('VOICE PROFILE (from BotConfig)'));
+    assert.ok(prompt.includes('VOICE CONTEXT — AUTHORITATIVE'));
     assert.ok(prompt.includes('STYLE REFERENCES'));
   });
 
@@ -180,7 +180,7 @@ describe('manual voice prompt integration', () => {
       author: { description: 'Engineer', tone: 'Professional', niches: [] },
       voiceContext: voiceContextFixture(),
     });
-    assert.ok(prompt.includes('AUTHOR IDENTITY'));
+    assert.ok(prompt.includes('VOICE CONTEXT — AUTHORITATIVE'));
     assert.ok(prompt.includes('STYLE REFERENCES'));
   });
 
@@ -190,7 +190,7 @@ describe('manual voice prompt integration', () => {
       learnedVoiceProfile: null,
       selectedWritingSamples: [],
     });
-    assert.ok(blocks.includes('BotConfig description is missing'));
+    assert.ok(blocks.includes('VOICE CONTEXT — AUTHORITATIVE'));
     assert.ok(blocks.includes('No eligible writing samples available yet'));
   });
 });
@@ -224,8 +224,8 @@ describe('manual voice data scoping', () => {
       learnedVoiceProfile: null,
       selectedWritingSamples: [],
     });
-    assert.ok(blocks.includes('AUTHOR IDENTITY'));
-    assert.ok(blocks.includes('BotConfig description is missing'));
+    assert.ok(blocks.includes('VOICE CONTEXT — AUTHORITATIVE'));
+    assert.ok(blocks.includes('No detailed voice profile supplied'));
   });
 });
 

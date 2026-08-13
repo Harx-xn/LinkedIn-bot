@@ -35,8 +35,8 @@ export const LINKEDIN_LINE_FORMAT_RULES = `FORMAT AND RHYTHM: Write in a clear, 
 
  export const SPECIFICITY_RULES = `SPECIFICITY REQUIREMENTS:
 Ground the central claim with enough concrete detail to make it useful and credible.
-One strong domain-appropriate mechanism, process detail, constraint, example, causal explanation, boundary, diagnostic observation, comparison, or decision rule may be sufficient.
-Choose the kind of specificity that naturally supports this post and its Expression Mode. Do not add multiple categories merely to demonstrate completeness, and do not turn specificity into a checklist.
+Choose the one to three specificity dimensions that most strengthen this claim: a mechanism, process detail, constraint, example, causal explanation, boundary, diagnostic observation, comparison, or decision rule. One strong dimension may be sufficient.
+Do not add multiple categories merely to demonstrate completeness, and do not turn specificity into a checklist.
 Do not add a failure scenario, consequence, action step, example, trade-off, or implementation boundary unless the idea genuinely needs it.
 Prefer one precise explanation over several generic supporting sections.
 When an example is useful, integrate it naturally into the reasoning rather than creating a separate essay-style scenario paragraph.
@@ -45,14 +45,14 @@ Do not repeat definitions that are already obvious from the headline or image. D
 
 export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
 - Topic clarity: one specific topic, one central claim, and no mixed angles.
-- Clear niche match: make the post obviously relevant to the selected niche or pillar.
+- Clear niche match: use niche-specific context only when it materially strengthens the argument. Do not insert an industry paragraph merely to demonstrate relevance; implicit relevance is acceptable when the claim already naturally serves the audience.
 - Topic-audience match: connect the idea to the target audience's pain, goal, objection, or desired outcome.
 - Profile alignment: write from the author's saved positioning and expertise without inventing biography.
 - Original insight: include a useful mechanism, reframing, trade-off, or decision rule instead of generic advice.
 - Dwell quality: provide appropriate depth and concrete value without filler. A compact post can be complete without staged progression.
 - Conversational potential: make the idea worth discussing without requiring a question, CTA, or explicit conclusion.
 - Credibility/proof: use supplied proof when available; otherwise use sound technical reasoning. Use a concrete example or labeled hypothetical only when it materially helps.
-- Length: respect the saved short/medium/long preference and topic complexity; never pad a simple idea, while staying under LinkedIn's 3,000-character limit.
+- Length: normally target approximately 1,800–2,500 characters, with at least 1,600 and no more than 3,000 characters. Add length only through useful reasoning, examples, specificity, contrast, implications, or narrative development; never use repetition, filler, or generic advice.
 - Formatting: never use Markdown bold markers or double asterisks. Do not include ** anywhere in the output.`;
 
  export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
@@ -63,26 +63,19 @@ export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
 - Respect the saved short/medium/long preference while letting content completeness determine exact length.
 - Prioritize substance over reaching a target length.
 - Do not use Markdown bold markers or double asterisks.
-- Avoid repeating the same point in the introduction, middle, and conclusion.
-- Every section should move the idea forward.
 
 Variation rules:
 - Not every post needs a problem statement, example, failure scenario, consequence, list, question, recommendation, or explicit conclusion.
 - Paragraph count and opening length should vary naturally. Some posts may start immediately with the claim.
 - Use as many paragraphs as the idea needs. A complete post may be one compact block, two short paragraphs, several standalone lines, a walkthrough, or a longer explanation.
-- Do not add paragraphs merely to make the post appear complete.
 - Use a concrete example, failure mode, implementation detail, or hypothetical only when it materially improves the argument.
 - When an example is useful, state it directly and integrate it into the reasoning instead of introducing a separate generic scenario.
-- A post may end when its reasoning, solution, or implication is complete. Do not append a recap, takeaway, CTA, or question by default.
-- When ending style is natural, do not append a stock closing sentence beginning with "Remember", "Ultimately", "In conclusion", "In summary", "In short", "The key is", or "By prioritizing".
-- Do not end with motivational advice about laying a foundation, future growth, success, trust, resilience, or user experience after the technical point is already complete.
 
 Additional rules: - Use bullets only for genuine checklists, actions, or comparisons.
  - Use no more than four bullets unless the assigned layout requires ordered steps.
  - Do not use engagement bait.
  - Do not use phrases such as "In today's world", "game changer", or "unlock your potential".
  - Do not begin with broad phrases such as "When building a SaaS platform".
- - If the post has an explicit ending, do not restate the headline or add a generic conclusion about importance, security, growth, or success.
  - Use qualified technical language where appropriate: can, may, often, depending on, in some systems.
  - The body should complement the accompanying image rather than paraphrase it.   
 
@@ -97,6 +90,16 @@ export const HASHTAG_RULES = `HASHTAG RULES:
 
 export const LANGUAGE_RULES = `LANGUAGE RULE:
 - English only unless the author configuration explicitly requests another language.`;
+
+export const DEFAULT_EDITORIAL_RULES = `EDITORIAL AUTHORITY — FINAL:
+- The selected Expression Mode and explicit user structure remain authoritative. A Walkthrough, listicle, checklist, or requested sequence may enumerate intentionally.
+- Do not prove depth by listing every reasonable cause, benefit, drawback, example, or recommendation.
+- Choose the strongest two or three observations, group symptoms that share one cause, then explain what they reveal.
+- Evidence says what happens. Cause explains why. Interpretation explains what it reveals. Consequence explains why it matters. Do not treat synonyms for one effect as separate insights.
+- A new paragraph should normally perform a different argumentative function: claim, evidence, observation, cause, mechanism, interpretation, contrast, qualification, consequence, application, supported personal shift, or resolution.
+- A strong LinkedIn post develops a thought; it does not exhaust a topic. Once the reader understands a point, move deeper instead of explaining it again.
+- Prefer a declarative claim, specific observation, pattern, or counterintuitive statement over a generic curiosity question unless the user's style genuinely favors questions.
+- End by sharpening, reframing, resolving, exposing a tension, or stopping. Do not summarize the opening thesis or append a generic recommendation.`;
 
 export const GHOSTWRITER_SYSTEM = `You are a ghostwriter for this author, not a news summarizer.
 
@@ -125,7 +128,7 @@ Internally distinguish verified author facts, source facts, general technical kn
 
 ${TECHNICAL_DISTINCTIONS}`;
 
-export function buildAuthorBlock(author: AuthorContext): string {
+export function buildAuthorBlock(author: AuthorContext, options: { includeQualityContext?: boolean } = {}): string {
   const niches = (author.niches ?? []).join(', ') || 'general technology';
   const audience = (author.targetAudience ?? []).join(', ') || 'builders and operators';
   const strategy = author.strategy;
@@ -161,7 +164,7 @@ NICHES: ${niches}
 AUDIENCE: ${audience}
 TONE: ${author.tone}
 ${strategyBlock}
-${POST_QUALITY_CONTEXT}
+${options.includeQualityContext === false ? '' : POST_QUALITY_CONTEXT}
 `;
 }
 
@@ -259,11 +262,10 @@ Rules:
 
 export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null, recentPosts: string[] = [], author?: AuthorContext): string {
   const centralClaim = plan.centralClaim ?? plan.coreClaim ?? plan.sourceTopic ?? 'Develop one narrow claim from the source topic.';
+  const depth = plan.depthPlan;
   return `
 ${buildSourceEvidenceBlock(trend)}
 ${buildAngleSpecificityBlock(plan)}
-${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author?.strategy)}
-
 ASSIGNED BATCH PLAN:
 - CENTRAL CLAIM (fixed): ${centralClaim}
 - Angle: ${plan.angle}
@@ -274,13 +276,24 @@ ASSIGNED BATCH PLAN:
 - Rationale: ${plan.rationale}
 ${sourceLink ? `- Reference link (do not summarize unless directly relevant): ${sourceLink}` : ''}
 
+DEPTH PLAN — use as intellectual backbone, not a mandatory section template:
+- Strongest observations (maximum three): ${depth?.strongestObservations.join(' | ') || '(none planned)'}
+- Cause/mechanism: ${depth?.underlyingCauseOrMechanism ?? '(not planned)'}
+- Deeper interpretation: ${depth?.deeperInterpretation ?? '(not planned)'}
+- Consequence: ${depth?.meaningfulConsequence ?? '(not planned)'}
+- Tension/qualification: ${depth?.usefulTensionOrQualification ?? '(not planned)'}
+- Supported personal shift: ${depth?.personalPerspective.supported ? depth.personalPerspective.insight : '(unsupported; do not invent)'}
+- Ending insight: ${depth?.endingInsight ?? '(natural stop allowed)'}
+- Avoid ideas: ${depth?.avoidIdeas.join(' | ') || '(none listed)'}
+
 The source is inspiration only. Transform it into an author-relevant ${plan.angle.replace(/_/g, ' ')} post.
 Develop the fixed CENTRAL CLAIM above. Do not broaden it, replace it with a general topic summary, or introduce a second thesis.
 This post exists to develop that claim, not to cover the broader category.
 Every major paragraph must support, explain, challenge, illustrate, qualify, or apply it.
-Do not turn it into a checklist of adjacent benefits, risks, best practices, or subtopics. Depth on one relevant point is better than breadth.
+Do not turn it into a checklist of adjacent benefits, risks, best practices, or subtopics unless the selected angle, layout, or Expression Mode explicitly calls for a list or walkthrough. Depth on one relevant point is better than breadth.
 Avoid category-introduction openings such as "When it comes to...", "X plays a crucial role", or "The importance of X cannot be overstated." Open from the claim, an observation, distinction, outcome, behavior, problem, or direct position as the Expression Mode requires.
 Do NOT write a headline summary of the trend.
+Interpret, do not enumerate: choose the strongest observations, group related symptoms, and explain what they reveal. Do not independently redesign the argument when the Depth Plan already supplies its backbone.
 `;
 }
 
@@ -311,9 +324,9 @@ export function buildRepairPrompt(
       ? { code: i, severity: 'error' as const, instruction: `Fix issue: ${i}` }
       : i,
   );
+  const isShortLengthRepair = structured.some((issue) => issue.code === 'generated_post_too_short');
 
-  return `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+  return `${buildAuthorBlock(author)}
 ${plan ? buildPlanBlock(plan) : ''}
 
 Repair the post as a clean final draft while preserving its successful rhetorical shape.
@@ -342,6 +355,9 @@ Specifically:
 ISSUES:
 ${formatStructuredIssues(structured)}
 
+${isShortLengthRepair && plan ? `LENGTH REPAIR DEPTH CHECK:
+Use the approved Depth Plan above. Identify which useful planned dimension is missing or underdeveloped, then add only that material. Do not invent a new adjacent argument or expand an idea that is already clear.` : ''}
+
 ORIGINAL POST:
 ${post.body}
 
@@ -360,9 +376,11 @@ Output valid JSON:
 ${SPECIFICITY_RULES}
 ${LINKEDIN_LINE_FORMAT_RULES}
 
-FINAL REPAIR AUTHORITY:
+REPAIR SCOPE:
 Fix only the identified issue. Preserve the rhetorical movement and stopping behavior of the selected Expression Mode. Do not add an example, action step, consequence, positive-outcome paragraph, or conclusion unless it is the specific missing element.
-${plan ? buildExpressionModePromptBlock(plan.expressionMode, []) : ''}`;
+${plan ? buildExpressionModePromptBlock(plan.expressionMode, []) : ''}
+
+${DEFAULT_EDITORIAL_RULES}`;
 }
 
 export function buildExpandSpecificityPrompt(
@@ -371,8 +389,7 @@ export function buildExpandSpecificityPrompt(
   author: AuthorContext,
   plan: BatchPostPlan,
 ): string {
-  return `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+  return `${buildAuthorBlock(author)}
 ${buildPlanBlock(plan, undefined)}
 ${SPECIFICITY_RULES}
 ${LINKEDIN_LINE_FORMAT_RULES}

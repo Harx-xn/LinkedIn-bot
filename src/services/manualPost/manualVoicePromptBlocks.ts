@@ -9,26 +9,12 @@ export function buildManualVoiceContextBlocks(voiceContext?: ManualVoiceContext)
   const { explicitPreferences, learnedVoiceProfile, selectedWritingSamples } = voiceContext;
   const blocks: string[] = [];
 
-  blocks.push(`AUTHOR IDENTITY
+  blocks.push(`VOICE CONTEXT — AUTHORITATIVE
 - Tone: ${explicitPreferences.tone}
-- Description: ${explicitPreferences.description || 'Not provided'}
-- Niches: ${explicitPreferences.niches.join(', ') || 'none'}`);
-
-  blocks.push(`EXPLICIT PREFERENCES
-- Include contact info in final formatting: ${explicitPreferences.includeContactInfo ? 'yes' : 'no'}
-- Include website link in final formatting: ${explicitPreferences.includeWebsiteLink ? 'yes' : 'no'}
-- BotConfig description is the authoritative voice profile for manual posts.`);
-
-  if (learnedVoiceProfile) {
-    blocks.push(`VOICE PROFILE (from BotConfig)
-- Author description:
-${explicitPreferences.description.trim()}
-- Tone: ${explicitPreferences.tone}
-- Niches: ${explicitPreferences.niches.join(', ') || 'none'}`);
-  } else {
-    blocks.push(`VOICE PROFILE
-- BotConfig description is missing. Complete your ghostwriter profile before generating posts.`);
-  }
+- Profile: ${explicitPreferences.description || (learnedVoiceProfile ? 'Use the saved BotConfig voice profile.' : 'No detailed voice profile supplied.')}
+- Niches: ${explicitPreferences.niches.join(', ') || 'none; do not force niche references'}
+- Niche references and hashtags are conditional: use them only when they sharpen the actual reasoning.
+- Contact info: ${explicitPreferences.includeContactInfo ? 'enabled' : 'disabled'}; website: ${explicitPreferences.includeWebsiteLink ? 'enabled' : 'disabled'} (final formatting owns these controls).`);
 
   if (selectedWritingSamples.length > 0) {
     const references = selectedWritingSamples

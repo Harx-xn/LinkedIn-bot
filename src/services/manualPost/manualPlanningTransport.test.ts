@@ -21,7 +21,7 @@ function planningResponse(coreClaim: string, title = 'Focused angle'): string {
 function draft(coreClaim: string): ManualGeneratedPost {
   return {
     contentPlan: { angle: 'Focused angle', coreClaim, audience: 'Professional operators', structure: 'claim -> support', hookType: 'specific_observation', evidenceType: 'reasoned_observation', ctaType: 'none' },
-    hook: '', body: `${coreClaim} The supporting explanation stays within that relationship and does not introduce another thesis.`,
+    hook: '', body: `${coreClaim}\n\n${'x'.repeat(1650)}`,
     closingLine: '', hashtags: [], sourceTopic: 'test topic',
   };
 }

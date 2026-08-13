@@ -158,13 +158,12 @@ export async function hasDashboardAccess(userId: string): Promise<boolean> {
 
   if (status === BillingAccessStatus.TRIALING || status === BillingAccessStatus.ACTIVE) {
     if (!sub) return false;
-    if (
-      (sub.providerSubscriptionId || sub.stripeSubscriptionId) &&
-      !(sub.providerPaymentMethodPresent || sub.stripeDefaultPaymentMethodId)
-    ) {
-      return false;
-    }
-    return true;
+    return subscriptionAllowsConfirmedAccess({
+      provider: sub.provider,
+      status: sub.status,
+      providerSubscriptionId: sub.providerSubscriptionId ?? sub.stripeSubscriptionId,
+      paymentMethodPresent: Boolean(sub.providerPaymentMethodPresent || sub.stripeDefaultPaymentMethodId),
+    });
   }
 
   if (status === BillingAccessStatus.PAST_DUE && user.regionId) {
@@ -188,6 +187,18 @@ export async function hasDashboardAccess(userId: string): Promise<boolean> {
   }
 
   return false;
+}
+
+export function subscriptionAllowsConfirmedAccess(subscription: {
+  provider: string;
+  status: string;
+  providerSubscriptionId: string | null;
+  paymentMethodPresent: boolean;
+}) {
+  if (!['TRIALING', 'ACTIVE'].includes(subscription.status)) return false;
+  if (!subscription.providerSubscriptionId && subscription.provider !== 'MANUAL') return false;
+  if (subscription.provider === 'STRIPE' && !subscription.paymentMethodPresent) return false;
+  return true;
 }
 
 export function requiresBillingOnlyAccess(status: BillingAccessStatus): boolean {

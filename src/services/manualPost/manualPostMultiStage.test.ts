@@ -12,11 +12,13 @@ import {
 } from './manualPostCritic';
 import {
   createFallbackManualPlan,
+  evaluateDepthPlanQuality,
   scoreAngle,
   scoreHook,
   selectManualPlan,
 } from './manualPostPlanning';
 import { runManualGenerationMultiStage } from './manualPostMultiStage';
+import { assembleManualPostBody, normalizeManualHashtags } from './manualPostFormatting';
 import type { ManualGeneratedPost, ManualPlanningResult } from './manualPostTypes';
 import { createManualProviderCallBudget } from './manualPostTypes';
 
@@ -68,6 +70,13 @@ function validDraft(overrides: Partial<ManualGeneratedPost> = {}): ManualGenerat
     sourceTopic: 'Tenant authorization',
     ...overrides,
   };
+}
+
+function longValidDraft(overrides: Partial<ManualGeneratedPost> = {}): ManualGeneratedPost {
+  return validDraft({
+    body: `Tenant authorization works best because scope is resolved from the authenticated request and carried into every query boundary. ${'x'.repeat(1750)}`,
+    ...overrides,
+  });
 }
 
 function planningJson(): string {
@@ -187,8 +196,8 @@ function createMockContentService(handlers: {
 }
 
 describe('manual multi-stage provider call limits', () => {
-  it('uses at most two provider calls on the normal path', async () => {
-    const service = createMockContentService({});
+  it('uses exactly one planning and one writing call for a good normal draft', async () => {
+    const service = createMockContentService({ draft: () => JSON.stringify(longValidDraft()) });
     const budget = createManualProviderCallBudget();
     const result = await runManualGenerationMultiStage(
       service,
@@ -205,12 +214,14 @@ describe('manual multi-stage provider call limits', () => {
     assert.equal(service.planningCalls(), 1);
     assert.equal(service.generationCalls(), 1);
     assert.equal(service.rewriteCalls(), 0);
+    assert.deepEqual(budget.callsByKind(), { plannerCalls: 1, writerCalls: 1, repairCalls: 0 });
   });
 
-  it('uses at most three provider calls on the quality-repair path', async () => {
+  it('adds one combined targeted repair when deterministic checks fail', async () => {
     const service = createMockContentService({
-      draft: () => genericDraftJson(),
-      critic: () => criticReviseJson(),
+      draft: (prompt) => prompt.includes('Repair this draft once')
+        ? JSON.stringify(longValidDraft())
+        : genericDraftJson(),
     });
     const budget = createManualProviderCallBudget();
     const result = await runManualGenerationMultiStage(
@@ -226,17 +237,20 @@ describe('manual multi-stage provider call limits', () => {
     assert.equal(result.providerCalls, 3);
     assert.equal(result.usedQualityRepair, true);
     assert.equal(service.planningCalls(), 1);
-    assert.equal(service.generationCalls(), 1);
-    assert.equal(service.rewriteCalls(), 1);
+    assert.equal(service.generationCalls(), 2);
+    assert.equal(service.rewriteCalls(), 0);
+    assert.deepEqual(budget.callsByKind(), { plannerCalls: 1, writerCalls: 1, repairCalls: 1 });
   });
 
-  it('runs at most one critic revision call', async () => {
-    let criticCalls = 0;
+  it('runs at most one targeted repair call', async () => {
+    let repairCalls = 0;
     const service = createMockContentService({
-      draft: () => genericDraftJson(),
-      critic: async () => {
-        criticCalls += 1;
-        return criticReviseJson();
+      draft: (prompt) => {
+        if (prompt.includes('Repair this draft once')) {
+          repairCalls += 1;
+          return JSON.stringify(longValidDraft());
+        }
+        return genericDraftJson();
       },
     });
 
@@ -250,8 +264,232 @@ describe('manual multi-stage provider call limits', () => {
       createManualProviderCallBudget(),
     );
 
-    assert.equal(criticCalls, 1);
-    assert.equal(service.rewriteCalls(), 1);
+    assert.equal(repairCalls, 1);
+    assert.equal(service.rewriteCalls(), 0);
+  });
+});
+
+describe('manual deterministic planning retry', () => {
+  it('retries one shallow Depth Plan before drafting and accepts the deeper plan', async () => {
+    let planningCall = 0;
+    const angle = (depthPlan: Record<string, unknown>) => ({
+      title: 'Automation trust boundary',
+      coreClaim: String(depthPlan.centralClaim),
+      audience: 'Operations leaders',
+      structure: 'observation -> interpretation',
+      evidenceMode: 'reasoned_observation',
+      specificity: 9, novelty: 9, audienceFit: 9, voiceFit: 9, evidenceAvailability: 9,
+      hookCandidates: [],
+      depthPlan,
+    });
+    const shallow = {
+      centralClaim: 'Trust matters for automation adoption', whyThisClaimIsInteresting: null,
+      strongestObservations: ['Trust improves adoption'], underlyingCauseOrMechanism: null,
+      deeperInterpretation: 'Trust makes adoption easier', meaningfulConsequence: 'Without trust adoption suffers',
+      usefulTensionOrQualification: null, personalPerspective: { supported: false, insight: null },
+      endingInsight: null, avoidIdeas: [],
+    };
+    const deep = {
+      centralClaim: 'Trust is the main automation barrier because teams resist transferring control',
+      whyThisClaimIsInteresting: 'Technical success can coexist with adoption failure',
+      strongestObservations: ['Teams keep duplicate manual checks', 'Approvals become slower'],
+      underlyingCauseOrMechanism: 'People resist transferring control to an opaque system',
+      deeperInterpretation: 'The resistance is organizational rather than technical',
+      meaningfulConsequence: 'A technically successful automation can still fail adoption',
+      usefulTensionOrQualification: null, personalPerspective: { supported: false, insight: null },
+      endingInsight: 'The transfer of control was the real implementation risk', avoidIdeas: ['trust matters'],
+    };
+    const service = createMockContentService({
+      planning: () => JSON.stringify({ angles: [angle(++planningCall === 1 ? shallow : deep)] }),
+      draft: () => JSON.stringify(longValidDraft()),
+    });
+    const budget = createManualProviderCallBudget();
+    const result = await runManualGenerationMultiStage(service, {
+      topic: 'Automation trust', author: { description: 'Operations leader', tone: 'Direct' },
+    }, 'OPENAI', budget);
+    assert.equal(service.planningCalls(), 2);
+    assert.equal(service.generationCalls(), 1);
+    assert.equal(result.selectedPlan.depthPlan.deeperInterpretation, deep.deeperInterpretation);
+    assert.deepEqual(budget.callsByKind(), { plannerCalls: 2, writerCalls: 1, repairCalls: 0 });
+  });
+
+  it('accepts distinct concepts for the exact automation/trust topic despite shared domain words', async () => {
+    const topic = 'The primary obstacle to automation in most organizations is not poor code quality or outdated technology. It is a lack of trust.';
+    const depthPlan = {
+      centralClaim: 'Trust is often the actual barrier to automation adoption.',
+      whyThisClaimIsInteresting: 'Technical readiness does not guarantee operational adoption.',
+      strongestObservations: [
+        'Teams continue using manual checks even after automation exists.',
+        'Approvals remain slow because people verify automated results before acting.',
+      ],
+      underlyingCauseOrMechanism: 'People are reluctant to transfer control to systems they do not understand.',
+      deeperInterpretation: 'What looks like resistance to technology is often organizational risk management.',
+      meaningfulConsequence: 'A technically correct automation can fail operationally without failing technically.',
+      usefulTensionOrQualification: null,
+      personalPerspective: { supported: false, insight: null },
+      endingInsight: 'The implementation risk is the transfer of control.',
+      avoidIdeas: ['Trust matters', 'Automation is important'],
+    };
+    const service = createMockContentService({
+      planning: () => JSON.stringify({
+        angles: [{
+          title: 'Trust controls adoption', coreClaim: depthPlan.centralClaim, audience: 'Operations leaders',
+          structure: 'claim -> manifestation -> interpretation -> consequence', evidenceMode: 'reasoned_observation',
+          specificity: 9, novelty: 9, audienceFit: 9, voiceFit: 9, evidenceAvailability: 9,
+          hookCandidates: [], depthPlan,
+        }],
+      }),
+      draft: () => JSON.stringify(longValidDraft()),
+    });
+
+    const result = await runManualGenerationMultiStage(service, {
+      topic, author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
+    }, 'OPENAI', createManualProviderCallBudget());
+
+    assert.equal(evaluateDepthPlanQuality(depthPlan, { topic }).passed, true);
+    assert.equal(service.planningCalls(), 1);
+    assert.equal(result.plannerFallbackUsed, false);
+    assert.equal(result.plannerValidationFailureReason, null);
+    assert.equal(result.selectedPlan.depthPlan.meaningfulConsequence, depthPlan.meaningfulConsequence);
+  });
+});
+
+describe('minimum-length repair postconditions', () => {
+  const shortDraft = (length: number) => {
+    const hook = 'Trust is usually the real automation barrier.';
+    const prefix = 'Teams keep a manual check after the automated path is available. ';
+    const closingLine = 'The remaining constraint is confidence in the transfer of control.';
+    const sourceTopic = 'Automation adoption depends on trust';
+    let fillerLength = Math.max(0, length - hook.length - prefix.length - closingLine.length - 4);
+    let draft = validDraft({ hook, body: `${prefix}${'x'.repeat(fillerLength)}`, closingLine, hashtags: [], sourceTopic });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const assembled = assembleManualPostBody(draft);
+      const hashtags = normalizeManualHashtags([], assembled, sourceTopic);
+      const actualLength = `${assembled}${hashtags ? `\n\n${hashtags}` : ''}`.length;
+      const delta = length - actualLength;
+      if (delta === 0) break;
+      fillerLength = Math.max(0, fillerLength + delta);
+      draft = validDraft({ hook, body: `${prefix}${'x'.repeat(fillerLength)}`, closingLine, hashtags: [], sourceTopic });
+    }
+    return draft;
+  };
+
+  it('rejects a 671-character repair for a 747-character short draft and invokes bounded recovery', async () => {
+    let generationCall = 0;
+    const service = createMockContentService({
+      draft: () => {
+        generationCall += 1;
+        if (generationCall === 1) return JSON.stringify(shortDraft(747));
+        if (generationCall === 2) return JSON.stringify(shortDraft(671));
+        return JSON.stringify(longValidDraft({
+          hook: 'Trust is usually the real automation barrier.',
+          body: `Teams retain manual checks because deploying a system is not the same as transferring authority to it. ${'cause interpretation consequence '.repeat(58)}`,
+          closingLine: 'The technical launch happens before the operational transfer of control.',
+        }));
+      },
+    });
+
+    const result = await runManualGenerationMultiStage(service, {
+      topic: 'Automation adoption depends on trust',
+      author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
+    }, 'OPENAI', createManualProviderCallBudget());
+
+    assert.equal(result.repairOutcome.inputLength, 747);
+    assert.equal(result.repairOutcome.outputLength, 671);
+    assert.equal(result.repairOutcome.accepted, false);
+    assert.equal(result.repairOutcome.rejected, true);
+    assert.equal(result.repairOutcome.recoveryAttempted, true);
+    assert.equal(result.repairOutcome.recoveryAccepted, true);
+    assert.ok(result.repairOutcome.recoveryOutputLength! >= 1600);
+    assert.notEqual(result.post.body, shortDraft(671).body);
+  });
+
+  it('invokes one final recovery when the first repair remains below minimum', async () => {
+    let generationCall = 0;
+    const prompts: string[] = [];
+    const service = createMockContentService({
+      draft: (prompt) => {
+        prompts.push(prompt);
+        generationCall += 1;
+        if (generationCall === 1) return JSON.stringify(shortDraft(1240));
+        if (generationCall === 2) return JSON.stringify(shortDraft(1450));
+        return JSON.stringify(longValidDraft({ body: `The missing mechanism is reluctance to hand authority to a system whose decisions are hard to inspect. ${'interpretation consequence control boundary '.repeat(50)}` }));
+      },
+    });
+
+    const budget = createManualProviderCallBudget();
+    const result = await runManualGenerationMultiStage(service, {
+      topic: 'Automation adoption depends on trust', author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
+    }, 'OPENAI', budget);
+
+    assert.equal(result.repairOutcome.accepted, false);
+    assert.equal(result.repairOutcome.reason, 'REPAIR_DID_NOT_SATISFY_MINIMUM_LENGTH');
+    assert.equal(result.repairOutcome.recoveryAttempted, true);
+    assert.equal(result.repairOutcome.recoveryAccepted, true);
+    assert.equal(budget.callsByKind().repairCalls, 2);
+    assert.match(prompts.at(-1) ?? '', /FINAL BOUNDED RECOVERY/);
+  });
+
+  it('develops unused plan roles jointly when repairing stagnation and minimum length', async () => {
+    const topic = 'The primary obstacle to automation in most organizations is not poor code quality or outdated technology. It is a lack of trust.';
+    let repairPrompt = '';
+    const stagnant = validDraft({
+      hook: 'Trust is the barrier to automation.',
+      body: 'Trust blocks automation adoption.\n\nTrust prevents teams from adopting automation.\n\nWithout trust, automation adoption remains blocked.',
+      closingLine: 'Trust is the biggest automation barrier.',
+    });
+    const repaired = longValidDraft({
+      hook: 'Trust is usually the real automation barrier.',
+      body: `Teams keep duplicate checks after the automated path is live. Approvals still pause for a person to compare the result with the old process. The legacy workflow remains available, not because the software is broken, but because nobody is ready to let it become the only path.
+
+That behavior reveals a boundary the deployment plan did not address. Shipping code changes how work can move. It does not automatically change who is accountable when the system makes a decision that someone later questions. Until that ownership is clear, verification feels safer than delegation.
+
+The underlying mechanism is a reluctance to transfer control to a process whose reasoning, exceptions, or escalation path are difficult to inspect. A person who can explain a manual judgment still feels easier to challenge than an automated result distributed across rules, integrations, and data. The duplicate check is therefore a control mechanism, not simple resistance.
+
+This changes the interpretation of slow adoption. What appears to be opposition to technology is often organizational risk management. Teams are protecting decision authority because the automation project defined execution but left confidence, accountability, and exception handling unresolved.
+
+The consequence is easy to miss in technical reporting. Reliability dashboards can look healthy while cycle time barely changes, because the automated path and manual assurance path are both running. The system succeeds as software while failing to become the operating model.
+
+A stronger rollout treats trust as implementation work. It makes ownership visible, explains how decisions can be inspected, and establishes what happens when the automated path is wrong. Those moves do not add another feature. They make it possible for people to stop carrying the old process as insurance.`,
+      closingLine: 'Deployment moves code. Adoption moves authority.',
+    });
+    const service = createMockContentService({
+      planning: () => JSON.stringify({ angles: [{
+        title: 'Trust controls adoption', coreClaim: 'Trust is often the actual barrier to automation adoption.', audience: 'Operations leaders',
+        structure: 'claim -> manifestation -> interpretation -> consequence', evidenceMode: 'reasoned_observation',
+        specificity: 9, novelty: 9, audienceFit: 9, voiceFit: 9, evidenceAvailability: 9, hookCandidates: [],
+        depthPlan: {
+          centralClaim: 'Trust is often the actual barrier to automation adoption.', whyThisClaimIsInteresting: null,
+          strongestObservations: ['Teams keep duplicate manual checks after automation is live.'],
+          underlyingCauseOrMechanism: 'People hesitate to transfer control to systems whose decisions are hard to inspect.',
+          deeperInterpretation: 'Resistance to automation is often organizational risk management rather than resistance to technology.',
+          meaningfulConsequence: 'Technical deployment can succeed while operational adoption fails.', usefulTensionOrQualification: null,
+          personalPerspective: { supported: false, insight: null }, endingInsight: 'The transfer of control is the implementation risk.', avoidIdeas: ['Trust matters'],
+        },
+      }] }),
+      draft: (prompt) => {
+        if (prompt.includes('DETECTED ISSUES:')) repairPrompt = prompt;
+        return prompt.includes('DETECTED ISSUES:') ? JSON.stringify(repaired) : JSON.stringify(stagnant);
+      },
+    });
+
+    const result = await runManualGenerationMultiStage(service, {
+      topic, author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
+    }, 'OPENAI', createManualProviderCallBudget());
+
+    assert.match(repairPrompt, /unused Depth Plan dimensions/i);
+    assert.match(repairPrompt, /underlying cause or mechanism/i);
+    assert.match(repairPrompt, /Replace repetitive reasoning with one or two unused Depth Plan dimensions AND expand/i);
+    assert.equal(result.repairOutcome.accepted, true);
+    assert.ok(result.repairOutcome.outputLength! >= 1600);
+  });
+
+  it('fails through the technical error path rather than returning a short post after both bounded attempts fail', async () => {
+    const service = createMockContentService({ draft: () => JSON.stringify(shortDraft(900)) });
+    await assert.rejects(() => runManualGenerationMultiStage(service, {
+      topic: 'Automation adoption depends on trust', author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
+    }, 'OPENAI', createManualProviderCallBudget()), /length contract after bounded recovery/);
+    assert.equal(service.generationCalls(), 3);
   });
 });
 
@@ -347,27 +585,29 @@ describe('manual voice validation integration', () => {
 describe('manual expression mode integration', () => {
   it('passes the selected mode and recent posts directly to the drafting prompt', async () => {
     let draftPrompt = '';
-    const service = createMockContentService({ draft: (prompt) => { draftPrompt = prompt; return JSON.stringify(validDraft()); } });
+    const service = createMockContentService({ draft: (prompt) => {
+      if (!prompt.includes('Repair this draft once')) draftPrompt = prompt;
+      return JSON.stringify(longValidDraft());
+    } });
     await runManualGenerationMultiStage(service, {
       topic: 'API design', author: { description: 'Backend engineer', tone: 'Conversational' },
       expressionMode: 'direct', recentPosts: ['Ultimately, API design matters. What do you think?'],
     }, 'OPENAI', createManualProviderCallBudget());
     assert.match(draftPrompt, /EXPRESSION MODE: DIRECT/);
-    assert.match(draftPrompt, /RECENT STYLE CONTEXT/);
+    assert.match(draftPrompt, /RECENT RHETORICAL FINGERPRINTS/);
     assert.match(draftPrompt, /Ultimately, API design matters/);
-    assert.match(draftPrompt, /Do not solve repetition by substituting synonyms/);
+    assert.match(draftPrompt, /Change the thought ordering, not merely synonyms/);
   });
 
-  it('passes the explicit Expression Mode contract into critic repair', async () => {
+  it('passes the explicit Expression Mode contract into targeted repair', async () => {
     const prompts: string[] = [];
     const service = createMockContentService({
-      draft: () => genericDraftJson(),
-      critic: (prompt: string) => {
-        prompts.push(prompt);
-        return JSON.stringify({
-        scores: { hook: 8, specificity: 8, voiceMatch: 8, focus: 8, credibility: 8, originality: 8, audienceFit: 8, conversationPotential: 8, dwellQuality: 8, readability: 8, genericAiRisk: 1 },
-        issues: [], decision: 'PASS', revised: {},
-        });
+      draft: (prompt: string) => {
+        if (prompt.includes('Repair this draft once')) {
+          prompts.push(prompt);
+          return JSON.stringify(longValidDraft());
+        }
+        return genericDraftJson();
       },
     });
     await runManualGenerationMultiStage(service as never, {
@@ -376,8 +616,8 @@ describe('manual expression mode integration', () => {
     }, 'OPENAI');
     assert.equal(prompts.length, 1);
     assert.match(prompts[0], /EXPRESSION MODE: REFLECTIVE/);
-    assert.match(prompts[0], /Fix only the identified issue/);
-    assert.match(prompts[0], /Do not add an example, consequence, recommendation/);
+    assert.match(prompts[0], /Repair only these problems/);
+    assert.match(prompts[0], /Do not rewrite the post unnecessarily/);
   });
 
   it('preserves provider failure behavior when no draft is produced', async () => {
@@ -394,6 +634,7 @@ describe('manual multi-stage fallbacks', () => {
       planning: async () => {
         throw new Error('planning provider failed');
       },
+      draft: () => JSON.stringify(longValidDraft()),
     });
 
     const result = await runManualGenerationMultiStage(
@@ -411,11 +652,11 @@ describe('manual multi-stage fallbacks', () => {
     assert.equal(result.post.contentPlan.coreClaim, result.selectedPlan.coreClaim);
   });
 
-  it('returns the best usable draft when critic fails', async () => {
+  it('returns the best usable draft when targeted repair fails', async () => {
     const service = createMockContentService({
-      draft: () => genericDraftJson(),
-      critic: async () => {
-        throw new Error('critic failed');
+      draft: (prompt) => {
+        if (prompt.includes('DETECTED ISSUES:')) throw new Error('repair failed');
+        return JSON.stringify(longValidDraft({ hook: 'In today\'s rapidly evolving landscape, tenant scope is easy to overlook.' }));
       },
     });
 
@@ -434,26 +675,9 @@ describe('manual multi-stage fallbacks', () => {
 
   it('returns the pre-revision draft when revision output is rejected', async () => {
     const service = createMockContentService({
-      draft: () => JSON.stringify(validDraft({
-        body: 'Acme Corp reduced cross-tenant leaks by enforcing request-scoped tenant guards.',
-      })),
-      critic: () => JSON.stringify({
-        scores: {
-          hook: 5,
-          specificity: 5,
-          voiceMatch: 7,
-          focus: 6,
-          credibility: 6,
-          originality: 6,
-          readability: 7,
-          genericAiRisk: 7,
-        },
-        issues: ['needs tighter specificity'],
-        decision: 'REVISE',
-        revised: {
-          body: 'Teams should improve collaboration without mentioning Acme Corp at all.',
-        },
-      }),
+      draft: (prompt) => prompt.includes('Repair this draft once')
+        ? JSON.stringify(longValidDraft({ body: 'Teams should improve collaboration without mentioning Acme Corp at all.' }))
+        : JSON.stringify(longValidDraft({ body: `Acme Corp reduced cross-tenant leaks by enforcing request-scoped tenant guards. ${'x'.repeat(1700)}` })),
     });
 
     const result = await runManualGenerationMultiStage(

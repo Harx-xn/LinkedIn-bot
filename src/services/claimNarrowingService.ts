@@ -10,7 +10,7 @@ const GENERIC_CLAIM_PATTERNS = [
   /\b(?:strong foundation|game[- ]changer|clear takeaway|practical,? focused perspective)\b/i,
 ];
 
-const CLAIM_RELATIONSHIP = /\b(?:because|when|whenever|if|unless|while|before|after|rather than|instead of|depends? on|leads? to|causes?|prevents?|hides?|reveals?|lowers?|raises?|increases?|reduces?|becomes?|fails?|works? only|matters? most)\b/i;
+const CLAIM_RELATIONSHIP = /\b(?:because|when|whenever|if|unless|while|before|after|rather than|instead of|depends? on|leads? to|causes?|prevents?|hides?|reveals?|lowers?|raises?|increases?|reduces?|becomes?|fails?|works? only|matters? most)\b|\b(?:is|are)\s+not\b[^.!?]{0,160}(?:\bbut\b|[.!?]\s*(?:it|they|this)\s+(?:is|are)\b)/i;
 
 export function isObviouslyGenericClaim(value: string): boolean {
   const claim = value.trim();

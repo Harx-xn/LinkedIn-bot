@@ -415,6 +415,19 @@ export type PostLayout =
   | 'comparison'
   | 'technical_walkthrough';
 
+export type PostDepthPlan = {
+  centralClaim: string;
+  whyThisClaimIsInteresting: string | null;
+  strongestObservations: string[];
+  underlyingCauseOrMechanism: string | null;
+  deeperInterpretation: string | null;
+  meaningfulConsequence: string | null;
+  usefulTensionOrQualification: string | null;
+  personalPerspective: { supported: boolean; insight: string | null };
+  endingInsight: string | null;
+  avoidIdeas: string[];
+};
+
 export type BatchPostPlan = {
   trendIndex: number | null;
   sourceTopic: string | null;
@@ -433,6 +446,7 @@ export type BatchPostPlan = {
   suggestedAngle?: string;
   audienceRelevance?: string;
   expressionMode?: ExpressionMode;
+  depthPlan?: PostDepthPlan;
 };
 
 export type ImageContentMode =

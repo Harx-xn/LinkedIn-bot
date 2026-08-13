@@ -22,6 +22,7 @@ export interface ProviderCheckoutInput {
   planId: string;
   promoCode?: string;
   inviteCode?: string;
+  retryIncomplete?: boolean;
   mode: 'trial' | 'paid';
 }
 
@@ -37,4 +38,3 @@ export interface PaymentProvider {
   validateConfiguration(regionId: string): Promise<void>;
   createCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult>;
 }
-

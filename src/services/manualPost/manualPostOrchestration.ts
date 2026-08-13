@@ -29,6 +29,13 @@ import { createManualProviderCallBudget } from './manualPostTypes';
 import { getManualVoiceContext } from './manualVoiceProfileService';
 import { getRecentManualFingerprints } from './manualPostFingerprintService';
 import { RECENT_STYLE_POST_LIMIT, selectManualExpressionMode } from '../expressionModeService';
+import {
+  buildLengthRepairInstruction,
+  evaluateGeneratedPostLength,
+  isExplicitShorteningInstruction,
+} from '../generatedPostLength';
+import type { ManualGeneratedPost } from './manualPostTypes';
+import { evaluateSemanticProgression } from '../semanticProgression';
 
 function deriveTopicFromContent(content: string): string {
   const line = content
@@ -51,6 +58,142 @@ function toAuthorContext(voice: Awaited<ReturnType<typeof getBotVoice>>) {
       : undefined,
     strategy: voice.strategy,
   };
+}
+
+async function repairManualPostLength(params: {
+  generated: ManualGeneratedPost;
+  fallbackContent: string;
+  topic: string;
+  additionalContext?: string;
+  suggestions?: string;
+  voice: Awaited<ReturnType<typeof getBotVoice>>;
+  voiceContext: Awaited<ReturnType<typeof getManualVoiceContext>>;
+  contentService: Awaited<ReturnType<typeof resolveManualContentService>>;
+  provider: ReturnType<typeof parseContentProvider>;
+  generationType: string;
+}) {
+  let generated = params.generated;
+  let finalized = finalizeManualGeneratedPostV2(generated, params.fallbackContent, {
+    topic: params.topic,
+    voice: params.voice,
+  }, false);
+  const initialLength = finalized.content.length;
+  const status = evaluateGeneratedPostLength(finalized.content);
+  const repairedFor = status === 'TOO_SHORT' || status === 'TOO_LONG' ? status : null;
+  const minimumExempt = isExplicitShorteningInstruction(params.suggestions);
+  let repairAttempts = 0;
+  let repairAccepted = false;
+  let repairRejected = false;
+  let repairInputLength: number | null = null;
+  let repairOutputLength: number | null = null;
+  const progression = evaluateSemanticProgression(finalized.content, {
+    allowEnumeration: /\b(?:listicle|checklist|steps|how-to|how to)\b/i.test(params.suggestions ?? ''),
+  });
+  const lengthNeedsRepair = status === 'TOO_LONG' || (status === 'TOO_SHORT' && !minimumExempt);
+  const progressionNeedsRepair = !progression.passed && !minimumExempt;
+  if (lengthNeedsRepair || progressionNeedsRepair) {
+    repairAttempts = 1;
+    repairInputLength = finalized.content.length;
+    const repairInstructions = [
+      lengthNeedsRepair ? buildLengthRepairInstruction(status as 'TOO_SHORT' | 'TOO_LONG') : '',
+      progressionNeedsRepair
+        ? `Repair only these argument-progression issues:\n${progression.issues.map((issue) => `- ${issue}`).join('\n')}\nReplace redundant material with a genuinely missing dimension; do not synonym-swap or append a second conclusion.`
+        : '',
+      params.additionalContext ?? '',
+    ].filter(Boolean).join('\n\n');
+    const prompt = buildManualRewritePromptV2({
+      currentContent: finalized.content,
+      suggestions: repairInstructions,
+      author: toAuthorContext(params.voice),
+      voiceContext: params.voiceContext,
+    });
+    try {
+      const repaired = await invokeManualRewritePrompt(params.contentService, prompt, params.provider);
+      const candidate = finalizeManualGeneratedPostV2(repaired, finalized.content, {
+        topic: params.topic,
+        voice: params.voice,
+      }, false);
+      repairOutputLength = candidate.content.length;
+      const candidateLength = evaluateGeneratedPostLength(candidate.content);
+      const candidateProgression = evaluateSemanticProgression(candidate.content, {
+        allowEnumeration: /\b(?:listicle|checklist|steps|how-to|how to)\b/i.test(params.suggestions ?? ''),
+      });
+      const lengthObjectiveMet = candidateLength !== 'TOO_LONG'
+        && (minimumExempt || candidateLength !== 'TOO_SHORT');
+      const progressionObjectiveMet = !progressionNeedsRepair || candidateProgression.passed;
+      if (lengthObjectiveMet && progressionObjectiveMet) {
+        finalized = candidate;
+        repairAccepted = true;
+      } else {
+        repairRejected = true;
+      }
+    } catch (error) {
+      repairRejected = true;
+      console.warn('[generated-post-quality] combined rewrite repair failed; returning coherent draft', {
+        generationType: params.generationType,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (!minimumExempt && evaluateGeneratedPostLength(finalized.content) === 'TOO_SHORT') {
+    repairAttempts += 1;
+    const recoveryPrompt = buildManualRewritePromptV2({
+      currentContent: finalized.content,
+      suggestions: `FINAL BOUNDED LENGTH RECOVERY:
+The current rewrite is below 1,600 visible characters and the previous repair did not satisfy the contract.
+Develop one or two substantive dimensions already supported by the current claim: its mechanism, interpretation, consequence, or useful qualification.
+Return 1,600-3,000 characters. Preserve credible facts and the central claim. Do not pad, repeat, fabricate evidence, or add a generic conclusion.`,
+      author: toAuthorContext(params.voice),
+      voiceContext: params.voiceContext,
+    });
+    try {
+      const recovered = await invokeManualRewritePrompt(params.contentService, recoveryPrompt, params.provider);
+      const candidate = finalizeManualGeneratedPostV2(recovered, finalized.content, {
+        topic: params.topic,
+        voice: params.voice,
+      }, false);
+      repairOutputLength = candidate.content.length;
+      const candidateStatus = evaluateGeneratedPostLength(candidate.content);
+      const candidateProgression = evaluateSemanticProgression(candidate.content, {
+        allowEnumeration: /\b(?:listicle|checklist|steps|how-to|how to)\b/i.test(params.suggestions ?? ''),
+      });
+      if (candidateStatus !== 'TOO_SHORT' && candidateStatus !== 'TOO_LONG' && candidateProgression.passed) {
+        finalized = candidate;
+        repairAccepted = true;
+      } else {
+        repairRejected = true;
+      }
+    } catch (error) {
+      repairRejected = true;
+      console.warn('[generated-post-quality] final bounded rewrite recovery failed', {
+        generationType: params.generationType,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const finalStatus = evaluateGeneratedPostLength(finalized.content);
+  if (finalStatus === 'TOO_LONG' || (!minimumExempt && finalStatus === 'TOO_SHORT')) {
+    throw new ManualPostError(502, 'AI provider could not satisfy the generated post length contract after bounded recovery');
+  }
+
+  console.info('[generated-post-length]', {
+    generationType: params.generationType,
+    initialLength,
+    finalLength: finalized.content.length,
+    lengthStatus: evaluateGeneratedPostLength(finalized.content),
+    repairAttempts,
+    repairInputLength,
+    repairOutputLength,
+    repairAccepted,
+    repairRejected,
+    repairedFor,
+    minimumExempt,
+    semanticProgressionRepairTriggered: progressionNeedsRepair,
+    minimumLengthSatisfied: minimumExempt || finalized.content.length >= 1600,
+  });
+  return finalized;
 }
 
 export async function generateManualPostV2(
@@ -122,10 +265,13 @@ export async function generateManualPostV2(
     throw new ManualPostError(502, 'Failed to generate post content');
   }
 
-  const normalized = finalizeManualGeneratedPostV2(generated, topic, {
-    topic,
-    voice,
-  });
+  // Length and quality issues are combined into the multi-stage pipeline's
+  // single targeted repair. Finalization performs the final safety/max check.
+  const normalized = finalizeManualGeneratedPostV2(generated, topic, { topic, voice });
+  const normalizedStatus = evaluateGeneratedPostLength(normalized.content);
+  if (normalizedStatus === 'TOO_SHORT' || normalizedStatus === 'TOO_LONG') {
+    throw new ManualPostError(502, 'AI provider could not satisfy the final generated post length invariant');
+  }
 
   await recordManualAiOperation(userId, 'generate');
 
@@ -182,9 +328,17 @@ export async function rewriteUnsavedManualPostV2(
     throw new ManualPostError(502, 'Failed to rewrite post content');
   }
 
-  const normalized = finalizeManualGeneratedPostV2(generated, content, {
+  const normalized = await repairManualPostLength({
+    generated,
+    fallbackContent: content,
     topic,
+    suggestions,
+    additionalContext: suggestions,
     voice,
+    voiceContext,
+    contentService,
+    provider,
+    generationType: 'manual_rewrite_unsaved',
   });
 
   await recordManualAiOperation(userId, 'rewrite_unsaved');
@@ -253,9 +407,17 @@ export async function rewriteSavedManualPostV2(
     throw new ManualPostError(502, 'Failed to rewrite post content');
   }
 
-  const normalized = finalizeManualGeneratedPostV2(generated, post.content, {
+  const normalized = await repairManualPostLength({
+    generated,
+    fallbackContent: post.content,
     topic,
+    suggestions,
+    additionalContext: suggestions,
     voice,
+    voiceContext,
+    contentService,
+    provider,
+    generationType: 'manual_rewrite_saved',
   });
 
   const updated = await prisma.post.update({

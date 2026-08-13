@@ -91,7 +91,7 @@ describe('unsupported experience prevention in prompts', () => {
     });
     assert.ok(prompt.includes('labeled hypothetical'));
     assert.ok(prompt.includes('No personal experience claims'));
-    assert.ok(prompt.includes('Topic clarity'));
+    assert.ok(prompt.includes('One central argument'));
     assert.ok(prompt.includes('saved short/medium/long preference'));
     assert.ok(!prompt.includes('2,000 to 2,800 characters'));
     assert.ok(prompt.includes('Do not include **'));

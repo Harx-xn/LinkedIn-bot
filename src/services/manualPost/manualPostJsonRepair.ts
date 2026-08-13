@@ -1,9 +1,9 @@
 import type { ContentService } from '../contentService';
 import type { ContentProvider } from '../manualPostAiService';
 import { parseManualJsonDetailed } from './manualPostJsonParser';
-import type { ManualGeneratedPost, ManualJsonParseResult } from './manualPostTypes';
+import type { ManualGeneratedPost, ManualJsonParseResult, ManualProviderCallBudget } from './manualPostTypes';
 
-const MAX_MANUAL_JSON_REPAIRS = 2;
+const MAX_MANUAL_JSON_REPAIRS = 1;
 
 export function buildManualJsonRepairPrompt(params: {
   repairContext: string;
@@ -62,6 +62,7 @@ export async function parseManualProviderOutputWithRepair(
   raw: string,
   provider: ContentProvider,
   repairContext: string,
+  budget?: ManualProviderCallBudget,
 ): Promise<ManualGeneratedPost> {
   let result = parseManualJsonDetailed(raw);
   if (result.ok) return result.data;
@@ -78,6 +79,7 @@ export async function parseManualProviderOutputWithRepair(
       issues: lastFailure.issues,
       invalidOutput: lastRaw,
     });
+    budget?.recordProviderCall('repair', repairPrompt);
     const repairedRaw = await contentService.fetchComposerRepairRaw(repairPrompt, provider);
     result = parseManualJsonDetailed(repairedRaw);
     if (result.ok) return result.data;

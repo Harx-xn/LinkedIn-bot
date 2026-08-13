@@ -18,13 +18,15 @@ test('manual mode follows the topic while avoiding an obvious recent mode', () =
   assert.notEqual(mode, 'analytical');
 });
 
-test('generation block contains direct recent posts and prompt-level anti-repetition rules', () => {
-  const block = buildExpressionModePromptBlock('direct', ["It's crucial to inspect the API. Ultimately, verify the contract."], undefined);
+test('generation block contains compact recent-post fingerprints, not full post bodies', () => {
+  const omittedTail = 'CUSTOMER_BODY_TAIL_SHOULD_NOT_BE_SENT';
+  const block = buildExpressionModePromptBlock('direct', [`It's crucial to inspect the API. ${'Context '.repeat(20)}${omittedTail}`], undefined);
   assert.match(block, /EXPRESSION MODE: DIRECT/);
-  assert.match(block, /RECENT POST 1/);
+  assert.match(block, /topicHint=/);
   assert.match(block, /It's crucial to inspect the API/);
-  assert.match(block, /Do not solve repetition by substituting synonyms/);
-  assert.match(block, /Let idea complexity and the saved short\/medium\/long preference determine length/);
+  assert.doesNotMatch(block, new RegExp(omittedTail));
+  assert.match(block, /Change the thought ordering, not merely synonyms/);
+  assert.match(block, /medium preferred length/);
 });
 
 test('expression modes provide distinct rhetorical structures and ending behavior', () => {

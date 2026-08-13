@@ -82,6 +82,19 @@ export const technicalReviewSchema = z.object({
   ),
 });
 
+export const postDepthPlanSchema = z.object({
+  centralClaim: z.string().min(1),
+  whyThisClaimIsInteresting: z.string().nullable(),
+  strongestObservations: z.array(z.string()).max(3),
+  underlyingCauseOrMechanism: z.string().nullable(),
+  deeperInterpretation: z.string().nullable(),
+  meaningfulConsequence: z.string().nullable(),
+  usefulTensionOrQualification: z.string().nullable(),
+  personalPerspective: z.object({ supported: z.boolean(), insight: z.string().nullable() }),
+  endingInsight: z.string().nullable(),
+  avoidIdeas: z.array(z.string()).max(5),
+});
+
 export const batchPlanItemSchema = z.object({
   trendIndex: z.number().nullable(),
   sourceTopic: z.string().nullable(),
@@ -115,6 +128,7 @@ export const batchPlanItemSchema = z.object({
   ]).optional(),
   rationale: z.string(),
   centralClaim: z.string().min(1).optional(),
+  depthPlan: postDepthPlanSchema,
 });
 
 export const batchPlanSchema = z.array(batchPlanItemSchema);

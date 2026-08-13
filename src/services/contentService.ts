@@ -6,6 +6,7 @@ import type {
   BatchPostPlan,
   GeneratedPostContent,
   ImageContent,
+  PostDepthPlan,
   PostLayout,
   QualityIssue,
   TechnicalReviewIssue,
@@ -14,6 +15,7 @@ import type {
 } from './generationTypes';
 import {
   GHOSTWRITER_SYSTEM,
+  DEFAULT_EDITORIAL_RULES,
   HASHTAG_RULES,
   LANGUAGE_RULES,
   SPECIFICITY_RULES,
@@ -35,6 +37,7 @@ import {
   batchPlanSchema,
   GENERATED_POST_OPENAI_JSON_SCHEMA,
   imageContentSchema,
+  postDepthPlanSchema,
   technicalReviewSchema,
 } from './ghostwriterSchemas';
 import type { SpecificityResult } from './generationTypes';
@@ -52,6 +55,7 @@ const OPENAI_PLAN_TEMPERATURE = Number(process.env.OPENAI_PLAN_TEMPERATURE ?? 0.
 const OPENAI_WRITE_TEMPERATURE = Number(process.env.OPENAI_WRITE_TEMPERATURE ?? 0.65);
 const OPENAI_REPAIR_TEMPERATURE = Number(process.env.OPENAI_REPAIR_TEMPERATURE ?? 0.25);
 const POST_MAX_OUTPUT_TOKENS = Number(process.env.POST_MAX_OUTPUT_TOKENS ?? 2200);
+const PLAN_MAX_OUTPUT_TOKENS = Number(process.env.PLAN_MAX_OUTPUT_TOKENS ?? 3200);
 const REVIEW_MAX_OUTPUT_TOKENS = Number(process.env.REVIEW_MAX_OUTPUT_TOKENS ?? 700);
 const IMAGE_COPY_MAX_OUTPUT_TOKENS = Number(process.env.IMAGE_COPY_MAX_OUTPUT_TOKENS ?? 500);
 const MAX_JSON_REPAIRS = 2;
@@ -78,10 +82,10 @@ export class ContentService {
     if (openaiKey) this.openai = new OpenAI({ apiKey: openaiKey });
   }
 
-  private getGeminiModel() {
+  private getGeminiModel(systemInstruction = GHOSTWRITER_SYSTEM) {
     const key = this.geminiKeys[this.currentKeyIndex] || 'dummy_key';
     const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({ model: GEMINI_CONTENT_MODEL });
+    return genAI.getGenerativeModel({ model: GEMINI_CONTENT_MODEL, systemInstruction });
   }
 
   private async generateWithFallback(
@@ -185,8 +189,7 @@ export class ContentService {
   ): Promise<BatchPostPlan[]> {
     const deterministic = buildDeterministicBatchPlan(trends.slice(0, count), count);
 
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+    const prompt = `${buildAuthorBlock(author)}
 
 Create a batch plan for ${count} LinkedIn posts.
 
@@ -198,6 +201,8 @@ Rules:
 - Prefer a natural ending that stops when the argument is complete. Use a question, takeaway, action, or summary only when intentionally useful.
 - No hook style repeated more than twice
 - Do not repeat source topics unless necessary
+- Build a compact Depth Plan that distinguishes observations, cause or mechanism, interpretation, consequence, qualification, supported personal shift, and ending insight.
+- Prefer at most three strong observations followed by interpretation. Do not enumerate every plausible reason, benefit, or risk.
 - For every post, narrow the topic into one arguable centralClaim. It must name a relationship, condition, mechanism, trade-off, or decision—not merely say the topic is important or beneficial.
 
 Output JSON array only:
@@ -210,12 +215,24 @@ Output JSON array only:
     "endingStyle": "natural",
     "layout": "problem_mechanism_fix",
     "centralClaim": "A specific, debatable claim that the draft must preserve",
+    "depthPlan": {
+      "centralClaim": "same fixed claim",
+      "whyThisClaimIsInteresting": "string or null",
+      "strongestObservations": ["maximum three"],
+      "underlyingCauseOrMechanism": "string or null",
+      "deeperInterpretation": "string or null",
+      "meaningfulConsequence": "string or null",
+      "usefulTensionOrQualification": "string or null",
+      "personalPerspective": { "supported": false, "insight": null },
+      "endingInsight": "string or null",
+      "avoidIdeas": ["redundant or obvious points"]
+    },
     "rationale": "..."
   }
 ]`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, 1400);
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS);
       const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const json = JSON.parse(cleaned);
       const validated = batchPlanSchema.safeParse(json);
@@ -237,18 +254,23 @@ Output JSON array only:
     author: AuthorContext,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<BatchPostPlan[]> {
-    const fallback = () => plans.map((plan, index) => ({
+    const applyClaim = (plan: BatchPostPlan, centralClaim: string, depthPlan?: PostDepthPlan): BatchPostPlan => ({
       ...plan,
-      centralClaim: deriveNarrowCentralClaim({
+      centralClaim,
+      depthPlan: depthPlan
+        ? { ...depthPlan, centralClaim }
+        : plan.depthPlan
+          ? { ...plan.depthPlan, centralClaim }
+          : undefined,
+    });
+    const fallback = () => plans.map((plan, index) => applyClaim(plan, deriveNarrowCentralClaim({
         topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic',
         candidateClaim: plan.centralClaim ?? plan.coreClaim,
         angle: plan.angle,
         expressionMode: plan.expressionMode,
         author,
-      }),
-    }));
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+      })));
+    const prompt = `${buildAuthorBlock(author)}
 
 Narrow each broad topic below into ONE concise, domain-appropriate central claim before drafting.
 The topic is territory; the claim is the specific assertion one post will develop.
@@ -269,13 +291,17 @@ Rules:
 - Do not force software or technical vocabulary onto non-technical domains.
 - Do not invent personal experience, outcomes, statistics, medical/financial/legal facts, or named results. Use conditional framing where evidence is limited.
 - Make claims in this batch meaningfully different in their underlying argument, not just their nouns.
+- For each claim, return a compact Depth Plan that distinguishes concrete observations, cause/mechanism, interpretation, consequence, qualification, and ending insight. Use at most three observations.
+- Attempt one useful interpretation beyond surface advice, but do not manufacture complexity when a simple mechanism is enough.
+- Set personalPerspective.supported to true only when the supplied author profile or source evidence directly supports that intellectual shift; otherwise return false and null.
+- Put obvious restatements, exhaustive adjacent points, and generic recommendations in avoidIdeas.
 - Return exactly one claim per indexed topic.
 
 Output one JSON object only:
-{"claims":[{"index":0,"centralClaim":"One concise sentence."}]}`;
+{"claims":[{"index":0,"centralClaim":"One concise sentence.","depthPlan":{"centralClaim":"same concise sentence","whyThisClaimIsInteresting":"string or null","strongestObservations":["maximum three"],"underlyingCauseOrMechanism":"string or null","deeperInterpretation":"string or null","meaningfulConsequence":"string or null","usefulTensionOrQualification":"string or null","personalPerspective":{"supported":false,"insight":null},"endingInsight":"string or null","avoidIdeas":["obvious or redundant ideas"]}}]}`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, 1400);
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS);
       const parsed = JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim());
       const items = Array.isArray(parsed)
         ? parsed
@@ -288,12 +314,11 @@ Output one JSON object only:
       return plans.map((plan, index) => {
         const item = items.find((candidate: unknown) => Number((candidate as { index?: unknown })?.index) === index);
         const candidate = typeof item?.centralClaim === 'string' ? item.centralClaim.trim() : '';
-        return {
-          ...plan,
-          centralClaim: candidate && !isObviouslyGenericClaim(candidate)
+        const centralClaim = candidate && !isObviouslyGenericClaim(candidate)
             ? candidate
-            : deriveNarrowCentralClaim({ topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic', candidateClaim: candidate, angle: plan.angle, expressionMode: plan.expressionMode, author }),
-        };
+            : deriveNarrowCentralClaim({ topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic', candidateClaim: candidate, angle: plan.angle, expressionMode: plan.expressionMode, author });
+        const parsedDepthPlan = postDepthPlanSchema.safeParse(item?.depthPlan);
+        return applyClaim(plan, centralClaim, parsedDepthPlan.success ? parsedDepthPlan.data : undefined);
       });
     } catch (error) {
       console.warn('[ghostwriter] central claim planning failed; using non-blocking fallback', { message: error instanceof Error ? error.message : String(error) });
@@ -309,8 +334,7 @@ Output one JSON object only:
     trend?: TrendCandidate | null,
     recentPosts: string[] = [],
   ): Promise<GeneratedPostContent> {
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+    const prompt = `${buildAuthorBlock(author)}
 ${buildPlanBlock(plan, sourceLink, trend, recentPosts, author)}
 
 ${SPECIFICITY_RULES}
@@ -318,9 +342,11 @@ ${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
 ${LANGUAGE_RULES}
 
-FINAL RHETORICAL AUTHORITY:
-The fixed CENTRAL CLAIM controls what the post argues. The following Expression Mode contract controls how the thought unfolds and overrides earlier generic presentation guidance when it conflicts.
+EXPRESSION MODE:
+The fixed CENTRAL CLAIM controls what the post argues. The following mode contract controls how the thought unfolds when it does not conflict with explicit user controls.
 ${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author.strategy)}
+
+${DEFAULT_EDITORIAL_RULES}
 
 Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic, angle, layout.`;
 
@@ -388,8 +414,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
       ? `\nAdditional user instructions:\n${input.additionalInstructions.trim()}`
       : '';
 
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+    const prompt = `${buildAuthorBlock(author)}
 
 Write an original LinkedIn post for the manual composer based on this topic or instruction:
 ${input.topic.trim()}
@@ -404,7 +429,8 @@ Requirements:
 - Avoid repetitive generic AI phrasing.
 - Let the complexity of the idea determine the natural length. Do not pad the post.
 - Do not use Markdown bold markers or double asterisks.
-- Keep the final formatted post within LinkedIn's 3,000-character limit.
+- Target approximately 1,800–2,500 characters. The completed post should normally contain at least 1,600 characters and must remain below LinkedIn's 3,000-character limit.
+- Add length only through useful reasoning, examples, specificity, contrast, practical implications, or narrative development. Do not pad with repetition, filler, redundant conclusions, or generic advice.
 - Use hashtags only when they add value.
 
 ${SPECIFICITY_RULES}
@@ -473,8 +499,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
     };
 
     const links = trends.map((t) => `- ${t.topic}: ${t.link}`).join('\n');
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+    const prompt = `${buildAuthorBlock(author)}
 ${buildPlanBlock(plan)}
 
 Only combine these topics because: ${combine.connection}
@@ -590,13 +615,13 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
   ): Promise<string> {
     try {
       if (provider === 'OPENAI') return await this.generateOpenAiManualPlanning(prompt);
-      return await this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, 1800);
+      return await this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, PLAN_MAX_OUTPUT_TOKENS);
     } catch (error) {
       console.warn(`[manual-post-v2] Primary planning provider ${provider} failed, attempting fallback`, {
         message: error instanceof Error ? error.message : String(error),
       });
       if (provider === 'OPENAI' && this.geminiKeys.length > 0) {
-        return this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, 1800);
+        return this.generateGeminiPost(prompt, OPENAI_PLAN_TEMPERATURE, 0, PLAN_MAX_OUTPUT_TOKENS);
       }
       if (provider === 'GEMINI' && this.openai) {
         return this.generateOpenAiManualPlanning(prompt);
@@ -701,8 +726,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
   ): Promise<GeneratedPostContent> {
     const author: AuthorContext = { description, tone, strategy };
     console.log("rewriting post")
-    const prompt = `${GHOSTWRITER_SYSTEM}
-${buildAuthorBlock(author)}
+    const prompt = `${buildAuthorBlock(author)}
 
 CURRENT POST:
 ${currentContent}
@@ -761,7 +785,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     const response = await this.openai.chat.completions.create({
       model: OPENAI_CONTENT_MODEL,
       temperature: OPENAI_PLAN_TEMPERATURE,
-      max_completion_tokens: 1800,
+      max_completion_tokens: PLAN_MAX_OUTPUT_TOKENS,
       response_format: {
         type: 'json_schema',
         json_schema: {

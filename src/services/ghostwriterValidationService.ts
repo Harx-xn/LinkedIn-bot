@@ -23,7 +23,9 @@ import { endsWithQuestion, isGenericEnding, jaccardSimilarity, tokenSet } from '
 import type { TopicFingerprint } from './generationTypes';
 import { fingerprintFromBody } from './topicFingerprintService';
 import { evaluateBatchTopicSimilarity, evaluateHistoricalPostSimilarity } from './topicNoveltyService';
+import { evaluateSemanticProgression } from './semanticProgression';
 import type { TopicHistoryRow } from './topicHistoryService';
+import { buildLengthRepairInstruction, evaluateGeneratedPostLength } from './generatedPostLength';
 
 const VERIFIED_IDENTITY_PATTERNS = [
   /\bI am a\b/i,
@@ -317,11 +319,21 @@ export function runDeterministicValidation(
     sourceTitle?: string;
     batchFingerprints?: TopicFingerprint[];
     history?: TopicHistoryRow[];
+    enforceLength?: boolean;
   },
 ): DeterministicValidationResult {
   const issues: QualityIssue[] = [];
   let score = 100;
   const body = post.body || '';
+  const lengthStatus = evaluateGeneratedPostLength(`${body}${post.hashtags ? `\n\n${post.hashtags}` : ''}`);
+  if (topicContext?.enforceLength && (lengthStatus === 'TOO_SHORT' || lengthStatus === 'TOO_LONG')) {
+    issues.push({
+      code: `generated_post_${lengthStatus.toLowerCase()}`,
+      severity: 'error',
+      instruction: buildLengthRepairInstruction(lengthStatus),
+    });
+    score -= 15;
+  }
 
   const fpEvidence = detectUnsupportedFirstPersonClaims(body, author.description);
   if (fpEvidence.length) {
@@ -349,6 +361,20 @@ export function runDeterministicValidation(
   }
 
   issues.push(...validateAngleContent(body, plan));
+
+  const progression = evaluateSemanticProgression(body, {
+    allowEnumeration: plan.angle === 'practical_tutorial' || plan.layout === 'mini_checklist' || plan.expressionMode === 'walkthrough',
+  });
+  if (!progression.passed) {
+    const progressionCodes = progression.codes.length ? progression.codes : ['ARGUMENT_STAGNATION'];
+    issues.push(...progressionCodes.map((code) => ({
+      code,
+      severity: 'error',
+      evidence: progression.issues,
+      instruction: 'Remove or replace redundant paragraphs with one genuinely missing argumentative dimension. Do not synonym-swap. Ensure the ending does not restate the opening.',
+    } as QualityIssue)));
+    score -= 20;
+  }
 
   if (isGenericEnding(body)) {
     issues.push({ code: 'generic_ending', severity: 'error', instruction: 'Replace generic engagement-bait ending.' });
