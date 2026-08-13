@@ -6,25 +6,47 @@ import { recordSafepayTransaction, syncSafepaySubscription } from '../services/b
 import { retrieveSafepaySubscription } from '../services/billing/providers/safepay/safepayClient';
 
 export function extractSafepayWebhookResource(eventType: string, body: Record<string, any>) {
+  const normalizedType = eventType.toLowerCase();
+  const isSubscriptionEvent = normalizedType.startsWith('subscription.');
   const data = body.data && typeof body.data === 'object' ? body.data : {};
-  const transaction = data.transaction && typeof data.transaction === 'object' ? data.transaction : data;
-  const subscription = data.subscription && typeof data.subscription === 'object'
-    ? data.subscription
-    : transaction.subscription && typeof transaction.subscription === 'object'
-      ? transaction.subscription
+  const isPaymentEvent = normalizedType.includes('payment.') || normalizedType.startsWith('payment.');
+  const transaction = data.transaction && typeof data.transaction === 'object'
+    ? data.transaction
+    : isPaymentEvent && (data.subscription_id || data.transaction_id ||
+        (typeof data.id === 'string' && (data.id.startsWith('txn_') || data.id.startsWith('track_'))))
+      ? data
       : null;
-  const subscriptionId = subscription?.token ?? subscription?.id ?? transaction.subscription_id ?? transaction.subscription_token;
-  const reference = subscription?.reference ?? transaction.reference ?? data.reference ?? subscription?.metadata?.reference;
-  const planId = subscription?.plan_id ?? transaction.plan_id ?? data.plan_id;
-  const transactionId = transaction.token ?? transaction.id ?? transaction.transaction_id ?? transaction.tracker;
+  let subscription: Record<string, any> | null = null;
+  if (data.subscription && typeof data.subscription === 'object') {
+    subscription = data.subscription;
+  } else if (transaction?.subscription && typeof transaction.subscription === 'object') {
+    subscription = transaction.subscription;
+  } else if (isSubscriptionEvent &&
+      ((typeof data.id === 'string' && data.id.startsWith('sub_')) ||
+       (typeof data.token === 'string' && data.token.startsWith('sub_')))) {
+    // Safepay webhook v2.0.0 lifecycle events put the subscription directly in body.data.
+    subscription = data;
+  }
+  const subscriptionId = subscription?.id ?? subscription?.token ?? transaction?.subscription_id ?? transaction?.subscription_token;
+  const reference = subscription?.reference ?? transaction?.reference ?? data.reference ?? subscription?.metadata?.reference;
+  const planId = subscription?.plan_id ?? transaction?.plan_id ?? data.plan_id;
+  const transactionId = transaction?.token ?? transaction?.id ?? transaction?.transaction_id ?? transaction?.tracker;
   return {
-    eventType: eventType.toLowerCase(), data, transaction, subscription,
+    eventType: normalizedType, data, transaction, subscription,
     subscriptionId: subscriptionId ? String(subscriptionId) : null,
     reference: reference ? String(reference) : null,
     planId: planId ? String(planId) : null,
     transactionId: transactionId ? String(transactionId) : null,
     status: subscription?.status ?? data.status ?? null,
   };
+}
+
+export function extractSafepayEventId(
+  body: Record<string, any>,
+  headers: Record<string, unknown>,
+  signatureFallback: string,
+) {
+  return String(body.token ?? body.id ?? body.event_id ?? headers['x-sfpy-event-id'] ?? signatureFallback);
 }
 
 function safeEqualHex(expected: string, supplied: string) {
@@ -68,7 +90,7 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
   if (!verifySafepayWebhookSignature(body, signature as string, secret)) return res.status(400).send('Webhook signature verification failed');
   console.info('[SAFEPAY-WEBHOOK-VERIFIED]', { regionId });
 
-  const eventId = String(body.id ?? body.event_id ?? req.headers['x-sfpy-event-id'] ?? expected);
+  const eventId = extractSafepayEventId(body, req.headers, expected);
   const eventType = String(body.type ?? body.event ?? req.headers['x-sfpy-event-type'] ?? 'unknown');
   const existing = await prisma.paymentEvent.findUnique({ where: { eventId } });
   if (existing?.status === 'PROCESSED') return res.json({ received: true, duplicate: true });
@@ -88,6 +110,7 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
       eventType,
       localSubscriptionId: resources.reference,
       checkoutReference: resources.reference,
+      reference: resources.reference,
       providerSubscriptionId: resources.subscriptionId,
       planId: resources.planId,
       providerStatus: resources.status ? String(resources.status) : null,
@@ -99,12 +122,14 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
     let synced: any = null;
     let transaction: Awaited<ReturnType<typeof recordSafepayTransaction>> = null;
 
-    if (resources.subscriptionId && (isPaymentEvent ||
-        (isSubscriptionEvent && !normalizedType.startsWith('subscription.payment.')))) {
+    if (isSubscriptionEvent && !normalizedType.startsWith('subscription.payment.')) {
+      if (!resources.subscription) throw new Error('Missing Safepay subscription resource');
+      // A verified lifecycle event already contains the authoritative resource.
+      // Avoid making acknowledgement depend on another Safepay network request.
+      synced = await syncSafepaySubscription(regionId, resources.subscription);
+    } else if (isPaymentEvent && resources.subscriptionId) {
       const remote = await retrieveSafepaySubscription(regionId, resources.subscriptionId);
       synced = await syncSafepaySubscription(regionId, { ...remote, ...(resources.reference ? { reference: resources.reference } : {}) });
-    } else if (isSubscriptionEvent && resources.data?.plan_id) {
-      synced = await syncSafepaySubscription(regionId, resources.data);
     }
 
     if (isPaymentEvent) {

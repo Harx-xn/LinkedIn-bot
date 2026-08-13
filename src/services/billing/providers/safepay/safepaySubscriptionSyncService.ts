@@ -4,6 +4,10 @@ import { hasDashboardAccess, setUserBillingAccess } from '../../billingAccessSer
 import { loadSafepayConfiguration, retrieveSafepaySubscription } from './safepayClient';
 
 const asDate = (value: unknown): Date | null => {
+  if (value && typeof value === 'object' && 'seconds' in value) {
+    const seconds = Number((value as { seconds: unknown }).seconds);
+    if (Number.isFinite(seconds)) return new Date(seconds * 1000);
+  }
   if (typeof value !== 'string' || !value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
@@ -37,7 +41,7 @@ function billingAccessFor(status: string): BillingAccessStatus {
 }
 
 export async function syncSafepaySubscription(regionId: string, raw: Record<string, any>) {
-  const providerSubscriptionId = raw.token ?? raw.id ?? raw.subscription_id;
+  const providerSubscriptionId = raw.id ?? raw.token ?? raw.subscription_id ?? raw.subscription_token;
   const reference = raw.reference ?? raw.metadata?.reference;
   if (!providerSubscriptionId) throw new Error('Safepay subscription ID missing');
 
@@ -90,8 +94,9 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
   // Safepay timestamps and our Prisma updatedAt are different clocks and cannot
   // safely be compared. Only suppress a transient provider downgrade that would
   // move an already-confirmed subscription back to setup-incomplete.
-  const staleEvent = ['TRIALING', 'ACTIVE'].includes(existing.status) && mappedStatus === 'INCOMPLETE';
-  const status = staleEvent ? existing.status : mappedStatus;
+  const previousStatus = existing.status;
+  const staleEvent = ['TRIALING', 'ACTIVE'].includes(previousStatus) && mappedStatus === 'INCOMPLETE';
+  const status = staleEvent ? previousStatus : mappedStatus;
   const accessBefore = await hasDashboardAccess(existing.userId);
   console.info('[SAFEPAY-CORRELATION-SUCCESS]', {
     regionId,
@@ -114,8 +119,8 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
     provider: 'SAFEPAY', regionId, providerSubscriptionId: String(providerSubscriptionId),
     localSubscriptionId: existing.id, userId: existing.userId,
   });
-  const trialStart = asDate(raw.trial_start_date);
-  const trialEnd = asDate(raw.trial_end_date);
+  const trialStart = asDate(raw.trial_started_at ?? raw.trial_start_date);
+  const trialEnd = asDate(raw.trial_ends_at ?? raw.trial_end_date);
   const periodStart = asDate(raw.current_period_start_date);
   const periodEnd = asDate(raw.current_period_end_date);
   const paymentMethodPresent = Boolean(raw.instrument_id);
@@ -150,6 +155,7 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
     providerSubscriptionId: String(providerSubscriptionId),
     planId: existing.planId,
     providerStatus: raw.status ? String(raw.status) : null,
+    previousStatus,
     normalizedStatus: status,
   });
   console.info('[SAFEPAY-ACCESS-RESULT]', {
@@ -164,7 +170,7 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
   console.info('[billing-subscription-sync]', {
     provider: 'SAFEPAY', regionId, providerSubscriptionId: String(providerSubscriptionId),
     localSubscriptionId: existing.id, userId: existing.userId,
-    previousStatus: existing.status, providerStatus: raw.status ? String(raw.status) : null,
+    previousStatus, providerStatus: raw.status ? String(raw.status) : null,
     normalizedStatus: status, staleEvent, accessBefore, accessAfter,
   });
   console.info('[billing-webhook-subscription-synced]', {
@@ -189,7 +195,7 @@ export async function reconcileSafepaySubscription(regionId: string, localSubscr
 
 export async function recordSafepayTransaction(regionId: string, raw: Record<string, any>, outcome: 'SUCCEEDED' | 'FAILED' | 'REFUNDED' | 'DISPUTED') {
   const transactionId = raw.token ?? raw.id ?? raw.transaction_id ?? raw.tracker;
-  const subscriptionId = raw.subscription_id ?? raw.subscription?.token;
+  const subscriptionId = raw.subscription_id ?? raw.subscription_token ?? raw.subscription?.id ?? raw.subscription?.token;
   if (!transactionId || !subscriptionId) return null;
   const sub = await prisma.subscription.findFirst({ where: { provider: 'SAFEPAY', providerSubscriptionId: String(subscriptionId), regionId } });
   if (!sub) throw new Error('Safepay transaction does not belong to this region');

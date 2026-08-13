@@ -70,7 +70,7 @@ describe('Safepay normalization and security', () => {
   it('does not compare Safepay provider timestamps with local database timestamps', () => {
     const sync = readFileSync(join(process.cwd(), 'src/services/billing/providers/safepay/safepaySubscriptionSyncService.ts'), 'utf8');
     assert.ok(!sync.includes('providerUpdatedAt.getTime() < existing.updatedAt.getTime()'));
-    assert.ok(sync.includes("['TRIALING', 'ACTIVE'].includes(existing.status) && mappedStatus === 'INCOMPLETE'"));
+    assert.ok(sync.includes("['TRIALING', 'ACTIVE'].includes(previousStatus) && mappedStatus === 'INCOMPLETE'"));
   });
   it('encrypts Safepay credentials using the shared secret format', () => {
     const previous = process.env.SECRETS_ENCRYPTION_KEY;
@@ -155,6 +155,12 @@ describe('Safepay normalization and security', () => {
     });
     assert.equal(payment.subscriptionId, 'sub_123');
     assert.equal(payment.transactionId, 'txn_123');
+  });
+  it('never uses Safepay customer_email for Veyrais ownership', () => {
+    const webhook = readFileSync(join(process.cwd(), 'src/routes/safepayWebhook.ts'), 'utf8');
+    const sync = readFileSync(join(process.cwd(), 'src/services/billing/providers/safepay/safepaySubscriptionSyncService.ts'), 'utf8');
+    assert.ok(!webhook.includes('customer_email'));
+    assert.ok(!sync.includes('customer_email'));
   });
   it('emits every safe webhook pipeline diagnostic stage', () => {
     const route = readFileSync(join(process.cwd(), 'src/routes/safepayWebhook.ts'), 'utf8');
