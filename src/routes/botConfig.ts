@@ -11,6 +11,7 @@ import { NicheExpansionService, normalizeNicheKey } from '../services/nicheExpan
 import { decryptSecret } from '../services/secretCrypto';
 import {
   parseBotImageModeInput,
+  parseBotImageStyleInput,
   resolveBotImageMode,
 } from '../services/botImageModeService';
 import { getOwnedBrandLogoKey, normalizeBrandLogoPosition } from '../services/brandLogoService';
@@ -26,9 +27,6 @@ import {
 } from '../services/botStrategyService';
 
 const router = Router();
-const VALID_IMAGE_STYLES = new Set([
-  'professional', 'modern', 'minimal', 'bold', 'corporate', 'abstract',
-]);
 const VALID_IMAGE_ASPECT_RATIOS = new Set(['1:1', '4:5', '16:9']);
 const TIME_SLOT_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -113,14 +111,10 @@ router.put('/config', requireAuth, async (req: Request, res: any) => {
 
   let imageStyleUpdate: string | undefined;
   if (hasOwn(body, 'imageStyle')) {
-    if (body.imageStyle !== null && body.imageStyle !== '') {
-      if (typeof body.imageStyle !== 'string') {
-        return res.status(400).json({ error: 'Invalid imageStyle' });
-      }
-      imageStyleUpdate = body.imageStyle.trim().toLowerCase();
-    }
-    if (imageStyleUpdate && !VALID_IMAGE_STYLES.has(imageStyleUpdate)) {
-      return res.status(400).json({ error: 'Invalid imageStyle' });
+    try {
+      imageStyleUpdate = parseBotImageStyleInput(body.imageStyle);
+    } catch (err) {
+      return res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid imageStyle' });
     }
   }
 

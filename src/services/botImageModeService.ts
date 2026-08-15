@@ -21,6 +21,18 @@ const VALID_IMAGE_MODES = new Set<BotImageMode>([
   'aiGenerated',
 ]);
 
+const VALID_IMAGE_STYLES = new Set([
+  'auto', 'professional', 'modern', 'minimal', 'bold', 'corporate', 'abstract',
+]);
+
+export function parseBotImageStyleInput(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string') throw new Error('Invalid imageStyle');
+  const value = raw.trim().toLowerCase();
+  if (!VALID_IMAGE_STYLES.has(value)) throw new Error('Invalid imageStyle');
+  return value;
+}
+
 export function parseBotImageModeInput(raw: unknown): BotImageMode | null | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || raw === '') return null;

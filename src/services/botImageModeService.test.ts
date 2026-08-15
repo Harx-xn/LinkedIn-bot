@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildBatchGenerativeImageInput,
   parseBotImageModeInput,
+  parseBotImageStyleInput,
   resolveBotImageMode,
 } from './botImageModeService';
 
@@ -35,6 +36,12 @@ describe('bot image mode', () => {
   it('parses valid imageMode input', () => {
     assert.equal(parseBotImageModeInput('aiGenerated'), 'aiGenerated');
     assert.throws(() => parseBotImageModeInput('invalid'));
+  });
+
+  it('accepts the UI default image style when image mode is none', () => {
+    assert.equal(parseBotImageStyleInput('auto'), 'auto');
+    assert.equal(parseBotImageStyleInput(''), undefined);
+    assert.throws(() => parseBotImageStyleInput('not-a-style'), /Invalid imageStyle/);
   });
 
   it('forwards saved batch image personalization to Gemini input', () => {
