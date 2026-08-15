@@ -36,6 +36,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
       themePreference: true,
       hasCompletedOnboardingTour: true,
       hasCompletedProfileOnboarding: true,
+      needsIdentityOnboarding: true,
       isBillingExempt: true,
       botConfigs: { select: { description: true, niches: true } },
 
@@ -116,6 +117,7 @@ router.get("/me", requireAuth, async (req: Request, res: any) => {
     hasCompletedOnboardingTour: user.hasCompletedOnboardingTour,
     hasCompletedProfileOnboarding:
       user.hasCompletedProfileOnboarding || hasMeaningfulGhostwriterProfile(user.botConfigs),
+    needsIdentityOnboarding: user.needsIdentityOnboarding,
 
     regionId: user.regionId,
     region: user.region

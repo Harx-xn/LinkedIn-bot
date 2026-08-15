@@ -7,6 +7,7 @@ import { hasBlockingSubscription, isTrialEligible, setUserBillingAccess } from '
 import type { ProviderCheckoutInput, ProviderCheckoutResult } from '../types';
 import { getSafepayClient } from './safepayClient';
 import { resolveSafepayPlanMapping } from './safepayPlanService';
+import { reconcileSafepaySubscription } from './safepaySubscriptionSyncService';
 
 export async function createSafepayCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult> {
   const user = await prisma.user.findUnique({ where: { id: input.userId }, select: { id: true, email: true, regionId: true } });
@@ -21,6 +22,23 @@ export async function createSafepayCheckout(input: ProviderCheckoutInput): Promi
     },
     select: { id: true, planId: true, providerSubscriptionId: true },
   });
+  if (pending?.providerSubscriptionId) {
+    try {
+      const reconciled = await reconcileSafepaySubscription(user.regionId, pending.id);
+      if (reconciled && ['TRIALING', 'ACTIVE'].includes(reconciled.status)) {
+        return {
+          url: `${config.frontendUrl}/billing?checkout=success&provider=SAFEPAY&session_id=${encodeURIComponent(pending.id)}`,
+          sessionId: pending.id,
+          provider: 'SAFEPAY',
+        };
+      }
+    } catch (error) {
+      console.warn('[SAFEPAY-CHECKOUT-RECOVERY]', {
+        regionId: user.regionId, userId: user.id, localSubscriptionId: pending.id,
+        result: 'not-confirmed', message: sanitizeExternalError(error),
+      });
+    }
+  }
   if (pending && !input.retryIncomplete) throw new BillingError(409, 'SUBSCRIPTION_ALREADY_EXISTS', 'A subscription checkout is already in progress.');
   if (pending && (pending.planId !== input.planId || pending.providerSubscriptionId)) {
     throw new BillingError(409, 'SUBSCRIPTION_ALREADY_EXISTS', 'Your existing subscription is still being confirmed. Refresh billing before retrying.');

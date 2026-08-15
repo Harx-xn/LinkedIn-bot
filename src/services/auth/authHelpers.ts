@@ -16,10 +16,12 @@ const USER_SELECT = {
   email: true,
   username: true,
   role: true,
+  isActive: true,
   regionId: true,
   trialEndsAt: true,
   isBillingExempt: true,
   hasCompletedProfileOnboarding: true,
+  needsIdentityOnboarding: true,
   botConfigs: { select: { description: true, niches: true } },
   region: {
     select: {
@@ -40,6 +42,7 @@ export type AuthUserResponse = {
   trialEndsAt?: Date | null;
   isBillingExempt: boolean;
   hasCompletedProfileOnboarding: boolean;
+  needsIdentityOnboarding: boolean;
   effectiveAccess: {
     hasAccess: boolean;
     unlimited: boolean;
@@ -80,6 +83,7 @@ export function buildAuthUserResponse(user: {
   isBillingExempt: boolean;
   region: AuthUserResponse['region'];
   hasCompletedProfileOnboarding: boolean;
+  needsIdentityOnboarding: boolean;
   botConfigs?: { description?: string | null; niches?: string | null } | null;
 }): AuthUserResponse {
   const meaningfulProfile = Boolean(
@@ -95,6 +99,7 @@ export function buildAuthUserResponse(user: {
     trialEndsAt: user.trialEndsAt ?? null,
     isBillingExempt: user.isBillingExempt,
     hasCompletedProfileOnboarding: user.hasCompletedProfileOnboarding || meaningfulProfile,
+    needsIdentityOnboarding: user.needsIdentityOnboarding,
     effectiveAccess: user.isBillingExempt
       ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
       : {
@@ -257,7 +262,7 @@ export async function validateRegistrationContext(
 export async function createSocialUser(params: {
   email: string;
   username?: string;
-  regionId: string;
+  regionId?: string | null;
   invite: Awaited<ReturnType<typeof findValidInvite>>;
 }): Promise<AuthUserResponse> {
   const existingEmail = await prisma.user.findUnique({ where: { email: params.email } });
@@ -283,6 +288,7 @@ export async function createSocialUser(params: {
       username,
       passwordHash: null,
       regionId: params.regionId,
+      needsIdentityOnboarding: true,
       role: params.invite?.roleToAssign || undefined,
       billingAccessStatus: BillingAccessStatus.BILLING_REQUIRED,
     },
@@ -327,7 +333,9 @@ export async function findUserForAuthResponse(userId: string): Promise<AuthUserR
     where: { id: userId },
     select: USER_SELECT,
   });
-  return user ? buildAuthUserResponse(user) : null;
+  if (!user) return null;
+  if (!user.isActive) throw new AuthValidationError('Account inactive or not found');
+  return buildAuthUserResponse(user);
 }
 
 export { USER_SELECT };

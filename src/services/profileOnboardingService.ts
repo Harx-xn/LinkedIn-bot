@@ -5,6 +5,8 @@ import { buildEffectiveBotStrategy, syncPrimaryPillarsToNiches } from './botStra
 import { checkSafeForWorkText } from '../utils/contentSafety';
 import OpenAI from 'openai';
 import { decryptSecret } from './secretCrypto';
+import { AuthValidationError, isValidUsername, validateRegistrationContext } from './auth/authHelpers';
+import { redeemInvite } from './inviteService';
 
 export const PROFILE_GOALS = [
   'Build authority', 'Generate leads', 'Educate my audience',
@@ -13,6 +15,10 @@ export const PROFILE_GOALS = [
 ] as const;
 
 export interface ProfileOnboardingPayload {
+  username?: string;
+  regionId?: string;
+  inviteCode?: string;
+  promoCode?: string;
   description: string;
   goals: string[];
   customGoal?: string;
@@ -77,9 +83,42 @@ const GOAL_MAP: Record<string, string> = {
 
 export async function saveProfileOnboarding(userId: string, raw: unknown) {
   const payload = validateProfileOnboarding(raw);
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { role: true, regionId: true } });
+  const body = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, regionId: true, username: true, email: true, needsIdentityOnboarding: true },
+  });
   if (!user) throw new ProfileOnboardingError(404, 'USER_NOT_FOUND', {});
   if (user.role !== UserRole.USER) throw new ProfileOnboardingError(403, 'PROFILE_ONBOARDING_NOT_AVAILABLE', {});
+  let identity: { username: string; regionId: string; inviteId?: string } | null = null;
+  if (user.needsIdentityOnboarding) {
+    const username = text(body.username);
+    const requestedRegionId = text(body.regionId);
+    const inviteCode = text(body.inviteCode);
+    const promoCode = text(body.promoCode);
+    const fields: Record<string, string> = {};
+    if (!username || !isValidUsername(username)) fields.username = 'Choose a valid username using 3–20 allowed characters.';
+    if (!user.regionId && !requestedRegionId && !inviteCode) fields.regionId = 'Select your billing region.';
+    if (Object.keys(fields).length) throw new ProfileOnboardingError(400, 'INVALID_ONBOARDING_IDENTITY', fields);
+    try {
+      const registration = await validateRegistrationContext({
+        username: username !== user.username ? username : undefined,
+        regionId: user.regionId ?? requestedRegionId,
+        inviteCode: user.regionId ? undefined : inviteCode || undefined,
+        promoCode: promoCode || undefined,
+        requireUsername: false,
+        providerEmail: user.email,
+        promoOrder: 'social',
+      });
+      identity = { username, regionId: registration.region.id, inviteId: registration.invite?.id };
+    } catch (error) {
+      if (error instanceof AuthValidationError) {
+        const field = error.message.toLowerCase().includes('username') ? 'username' : 'regionId';
+        throw new ProfileOnboardingError(400, 'INVALID_ONBOARDING_IDENTITY', { [field]: error.message });
+      }
+      throw error;
+    }
+  }
   const dashboardAccess = await hasDashboardAccess(userId);
 
   await prisma.$transaction(async (tx) => {
@@ -89,7 +128,7 @@ export async function saveProfileOnboarding(userId: string, raw: unknown) {
     const primaryGoal = (GOAL_MAP[payload.goals[0]] ?? 'authority') as any;
     const pillars = syncPrimaryPillarsToNiches(effective.contentPillars, payload.niches);
     const configData = {
-      regionId: user.regionId,
+      regionId: identity?.regionId ?? user.regionId,
       description: payload.description,
       niches: JSON.stringify(payload.niches),
       sources: '["automatic"]',
@@ -122,8 +161,15 @@ export async function saveProfileOnboarding(userId: string, raw: unknown) {
       },
       update: configData,
     });
-    await tx.user.update({ where: { id: userId }, data: { hasCompletedProfileOnboarding: true } });
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        hasCompletedProfileOnboarding: true,
+        ...(identity ? { username: identity.username, regionId: identity.regionId, needsIdentityOnboarding: false } : {}),
+      },
+    });
   });
+  if (identity?.inviteId) await redeemInvite(identity.inviteId, userId);
   return {
     success: true,
     hasCompletedProfileOnboarding: true,

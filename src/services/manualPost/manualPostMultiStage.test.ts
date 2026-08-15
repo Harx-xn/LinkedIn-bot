@@ -17,7 +17,7 @@ import {
   scoreHook,
   selectManualPlan,
 } from './manualPostPlanning';
-import { runManualGenerationMultiStage } from './manualPostMultiStage';
+import { runManualGenerationMultiStage, selectBestUsableManualCandidate } from './manualPostMultiStage';
 import { assembleManualPostBody, normalizeManualHashtags } from './manualPostFormatting';
 import type { ManualGeneratedPost, ManualPlanningResult } from './manualPostTypes';
 import { createManualProviderCallBudget } from './manualPostTypes';
@@ -355,6 +355,17 @@ describe('manual deterministic planning retry', () => {
 });
 
 describe('minimum-length repair postconditions', () => {
+  it('selects the 1,915-character recovery from the reported stagnation scenario', () => {
+    const selected = selectBestUsableManualCandidate([
+      { source: 'initial' as const, length: 1461, qualityWarnings: ['POSSIBLE_SEMANTIC_STAGNATION'] },
+      { source: 'repair' as const, length: 1808, qualityWarnings: ['POSSIBLE_SEMANTIC_STAGNATION'] },
+      { source: 'recovery' as const, length: 1915, qualityWarnings: ['POSSIBLE_SEMANTIC_STAGNATION'] },
+    ]);
+
+    assert.equal(selected?.source, 'recovery');
+    assert.equal(selected?.length, 1915);
+  });
+
   const shortDraft = (length: number) => {
     const hook = 'Trust is usually the real automation barrier.';
     const prefix = 'Teams keep a manual check after the automated path is available. ';
@@ -484,11 +495,14 @@ A stronger rollout treats trust as implementation work. It makes ownership visib
     assert.ok(result.repairOutcome.outputLength! >= 1600);
   });
 
-  it('fails through the technical error path rather than returning a short post after both bounded attempts fail', async () => {
+  it('returns the best short candidate with a soft warning after both bounded attempts miss the preferred minimum', async () => {
     const service = createMockContentService({ draft: () => JSON.stringify(shortDraft(900)) });
-    await assert.rejects(() => runManualGenerationMultiStage(service, {
+    const result = await runManualGenerationMultiStage(service, {
       topic: 'Automation adoption depends on trust', author: { description: 'Operations leader', tone: 'Direct' }, expressionMode: 'direct',
-    }, 'OPENAI', createManualProviderCallBudget()), /length contract after bounded recovery/);
+    }, 'OPENAI', createManualProviderCallBudget());
+    assert.ok(assembleManualPostBody(result.post).length > 0);
+    assert.ok(assembleManualPostBody(result.post).length < 1600);
+    assert.equal(result.repairOutcome.recoveryAttempted, true);
     assert.equal(service.generationCalls(), 3);
   });
 });
@@ -625,6 +639,24 @@ describe('manual expression mode integration', () => {
     await assert.rejects(() => runManualGenerationMultiStage(service, {
       topic: 'API design', author: { description: 'Backend engineer', tone: 'Conversational' }, expressionMode: 'direct',
     }, 'OPENAI', createManualProviderCallBudget()), /Failed to generate post content/);
+    assert.equal(service.generationCalls(), 2);
+  });
+
+  it('returns a bounded emergency writer result when the primary writer fails', async () => {
+    let call = 0;
+    const service = createMockContentService({
+      draft: () => {
+        call += 1;
+        if (call === 1) throw new Error('primary timeout');
+        return JSON.stringify(longValidDraft({ hook: 'The fallback writer still returns a complete post.' }));
+      },
+    });
+    const result = await runManualGenerationMultiStage(service, {
+      topic: 'Tenant authorization', author: { description: 'Engineer', tone: 'Professional' },
+    }, 'OPENAI', createManualProviderCallBudget());
+
+    assert.match(result.post.hook, /fallback writer/i);
+    assert.equal(service.generationCalls(), 2);
   });
 });
 

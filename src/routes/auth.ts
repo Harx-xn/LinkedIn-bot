@@ -162,6 +162,7 @@ router.post('/login', async (req, res) => {
       hasCompletedProfileOnboarding:
         user.hasCompletedProfileOnboarding ||
         Boolean(user.botConfigs && (user.botConfigs.description?.trim().length ?? 0) >= 20 && user.botConfigs.niches !== '[]'),
+      needsIdentityOnboarding: user.needsIdentityOnboarding,
       effectiveAccess: user.isBillingExempt
         ? { hasAccess: true, unlimited: true, billingExempt: true, accessSource: 'BILLING_EXEMPT' }
         : { hasAccess: user.role !== 'USER', unlimited: user.role !== 'USER', billingExempt: false, accessSource: user.role !== 'USER' ? 'PRIVILEGED_ROLE' : 'STANDARD' },

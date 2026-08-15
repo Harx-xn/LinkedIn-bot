@@ -113,11 +113,13 @@ function installPrismaFakes(state: MutableState) {
 }
 
 function requestFor(payload: typeof observedPayload): Request {
-  const signature = computeSafepayWebhookSignature(payload.data, WEBHOOK_SECRET);
+  const rawBody = Buffer.from(JSON.stringify(payload));
+  const signature = computeSafepayWebhookSignature(rawBody, WEBHOOK_SECRET);
   return {
     params: { regionId: REGION_ID },
-    headers: { 'x-sfpy-signature': signature },
-    body: Buffer.from(JSON.stringify(payload)),
+    method: 'POST',
+    headers: { 'x-sfpy-signature': signature, 'content-type': 'application/json' },
+    body: rawBody,
   } as unknown as Request;
 }
 
@@ -169,6 +171,29 @@ describe('Safepay webhook v2.0.0 subscription.created regression', () => {
     assert.equal(duplicate.result.statusCode, 200);
     assert.deepEqual(duplicate.result.body, { received: true, duplicate: true });
     assert.equal(state.subscriptionUpdates, 1);
+  });
+
+  it('rejects an invalid signature before persisting or parsing the event', async () => {
+    const state = makeState();
+    installPrismaFakes(state);
+    const request = requestFor(observedPayload);
+    request.headers['x-sfpy-signature'] = '0'.repeat(128);
+    const response = responseRecorder();
+
+    await handleSafepayWebhook(request, response.response);
+
+    assert.equal(response.result.statusCode, 400);
+    assert.equal(state.events.size, 0);
+    assert.equal(state.subscriptionUpdates, 0);
+  });
+
+  it('signs the exact raw webhook bytes, including insignificant JSON whitespace', () => {
+    const compact = Buffer.from(JSON.stringify(observedPayload));
+    const spaced = Buffer.from(JSON.stringify(observedPayload, null, 2));
+    assert.notEqual(
+      computeSafepayWebhookSignature(compact, WEBHOOK_SECRET),
+      computeSafepayWebhookSignature(spaced, WEBHOOK_SECRET),
+    );
   });
 
   it('persists FAILED and returns non-2xx when the reference cannot correlate', async () => {

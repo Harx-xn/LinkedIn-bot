@@ -49,10 +49,52 @@ export type ManualGenerationStageResult = {
 
 type DepthDimension = { label: string; value: string };
 
+export type ManualCandidateSource = 'initial' | 'repair' | 'recovery' | 'emergency';
+
+type UsableManualCandidate = {
+  post: ManualGeneratedPost;
+  source: ManualCandidateSource;
+  length: number;
+  qualityWarnings: string[];
+};
+
 function postLength(post: ManualGeneratedPost): number {
   const body = assembleManualPostBody(post);
   const hashtags = normalizeManualHashtags(post.hashtags, body, post.sourceTopic);
   return `${body}${hashtags ? `\n\n${hashtags}` : ''}`.length;
+}
+
+function candidateScore(candidate: { length: number; qualityWarnings: string[] }): number {
+  const preferredLength = candidate.length >= 1600 && candidate.length <= 3000;
+  // Preferred length and fewer deterministic warnings dominate. Within an
+  // otherwise equal tier, retain the more developed draft up to 2,200 chars.
+  return (preferredLength ? 10_000 : 0)
+    - (candidate.qualityWarnings.length * 100)
+    + Math.min(candidate.length, 2200) / 10;
+}
+
+function buildEmergencyWriterPrompt(input: ManualGenerationStageInput): string {
+  return `Write one complete, coherent, useful LinkedIn post about: ${input.topic}
+Audience/profile: ${input.author.targetAudience?.join(', ') || input.author.description || 'professional audience'}
+Tone: ${input.author.tone || 'professional'}
+Expression mode: ${input.expressionMode || 'natural'}
+${input.additionalInstructions ? `User instructions: ${input.additionalInstructions}` : ''}
+
+Return strict JSON only with: contentPlan (angle, coreClaim, audience, structure, hookType, evidenceType, ctaType), hook, body, closingLine, hashtags, and sourceTopic. Do not invent facts or sources.`;
+}
+
+export function selectBestUsableManualCandidate<T extends {
+  source: ManualCandidateSource;
+  length: number;
+  qualityWarnings: string[];
+}>(candidates: T[]): T | null {
+  return candidates.reduce<T | null>((best, candidate) => {
+    if (candidate.length <= 0 || candidate.length > 3000) return best;
+    if (!best || candidateScore(candidate) > candidateScore(best)) {
+      return candidate;
+    }
+    return best;
+  }, null);
 }
 
 const USAGE_STOP_WORDS = new Set(
@@ -219,11 +261,22 @@ export async function runManualGenerationMultiStage(
 
   const draftPrompt = buildManualDraftPrompt({ ...input, selectedPlan });
   let draft: ManualGeneratedPost;
+  let initialCandidateSource: ManualCandidateSource = 'initial';
   try {
     draft = await invokeManualDraftPrompt(contentService, draftPrompt, provider, budget);
   } catch (error) {
-    console.error('[manual-post-v2] draft generation failed', { message: error instanceof Error ? error.message : String(error) });
-    throw new ManualPostError(502, 'Failed to generate post content');
+    console.warn('[manual-post-v2] primary draft generation failed; attempting bounded emergency writer', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      draft = await invokeManualDraftPrompt(contentService, buildEmergencyWriterPrompt(input), provider, budget);
+      initialCandidateSource = 'emergency';
+    } catch (fallbackError) {
+      console.error('[manual-post-v2] primary and emergency draft generation failed', {
+        message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      });
+      throw new ManualPostError(502, 'Failed to generate post content');
+    }
   }
 
   draft = normalizeCandidate(draft, draft, input, selectedPlan);
@@ -243,6 +296,9 @@ export async function runManualGenerationMultiStage(
   detectedIssues.push(...uniqueRepairIssues.filter((issue) => !detectedIssues.includes(issue)));
 
   let finalPost = draft;
+  const candidates: UsableManualCandidate[] = initialLength <= 3000
+    ? [{ post: draft, source: initialCandidateSource, length: initialLength, qualityWarnings: quality.detectedIssues }]
+    : [];
   const repairOutcome: ManualRepairOutcome = {
     attempted: false,
     accepted: false,
@@ -288,6 +344,14 @@ export async function runManualGenerationMultiStage(
       repairOutcome.accepted = validation.accepted;
       repairOutcome.rejected = !validation.accepted;
       repairOutcome.reason = validation.reason;
+      if (validation.length <= 3000 && preservedFactsSurviveRevision(draft, repaired)) {
+        candidates.push({
+          post: repaired,
+          source: 'repair',
+          length: validation.length,
+          qualityWarnings: evaluateDeterministicDraftQuality(assembleManualPostBody(repaired), { allowEnumeration }).detectedIssues,
+        });
+      }
       if (validation.accepted) finalPost = repaired;
     } catch (error) {
       repairOutcome.rejected = true;
@@ -325,6 +389,14 @@ export async function runManualGenerationMultiStage(
       const validation = validateRepairCandidate({ before: draft, candidate: recovered, requestedIssues: recoveryIssues, allowEnumeration });
       repairOutcome.recoveryOutputLength = validation.length;
       repairOutcome.recoveryAccepted = validation.accepted;
+      if (validation.length <= 3000 && preservedFactsSurviveRevision(draft, recovered)) {
+        candidates.push({
+          post: recovered,
+          source: 'recovery',
+          length: validation.length,
+          qualityWarnings: evaluateDeterministicDraftQuality(assembleManualPostBody(recovered), { allowEnumeration }).detectedIssues,
+        });
+      }
       if (validation.accepted) {
         finalPost = recovered;
       } else {
@@ -334,6 +406,12 @@ export async function runManualGenerationMultiStage(
       repairOutcome.reason = `RECOVERY_PROVIDER_FAILURE: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
+
+  const selectedCandidate = selectBestUsableManualCandidate(candidates);
+  if (!selectedCandidate) {
+    throw new ManualPostError(502, 'AI provider did not produce a usable generated post');
+  }
+  finalPost = selectedCandidate.post;
 
   const finalLength = postLength(finalPost);
   const finalLengthStatus = evaluateGeneratedPostLength('x'.repeat(finalLength));
@@ -361,18 +439,25 @@ export async function runManualGenerationMultiStage(
     recoveryTriggered: repairOutcome.recoveryAttempted,
     recoveryAccepted: repairOutcome.recoveryAccepted,
     minimumLengthSatisfied: finalLength >= 1600 && finalLength <= 3000,
+    selectedCandidateSource: selectedCandidate.source,
+    selectedCandidateReason: `highest deterministic score among ${candidates.length} hard-usable candidate(s)`,
+    returnedWithQualityWarnings: selectedCandidate.qualityWarnings.length > 0 || finalLength < 1600,
+    finalQualityWarnings: [
+      ...selectedCandidate.qualityWarnings,
+      ...(finalLength < 1600 ? ['POST_BELOW_MINIMUM_LENGTH'] : []),
+    ],
     plannerFallbackUsed,
     plannerValidationFailureReason,
   });
 
-  if (finalLengthStatus === 'TOO_SHORT' || finalLengthStatus === 'TOO_LONG') {
+  if (finalLengthStatus === 'TOO_LONG') {
     throw new ManualPostError(502, 'AI provider could not satisfy the generated post length contract after bounded recovery');
   }
 
   return {
     post: finalPost,
     providerCalls: budget.totalCalls(),
-    usedQualityRepair: repairOutcome.accepted || repairOutcome.recoveryAccepted,
+    usedQualityRepair: selectedCandidate.source === 'repair' || selectedCandidate.source === 'recovery',
     selectedPlan,
     repairOutcome,
     plannerFallbackUsed,

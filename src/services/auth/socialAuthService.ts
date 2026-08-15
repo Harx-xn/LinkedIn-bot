@@ -226,26 +226,33 @@ export async function completeSocialAuth(
     };
   }
 
-  if (state.mode === 'login') {
-    throw new AuthValidationError('No account found for this social login. Please sign up first.');
+  // Google login and signup intentionally share account-creation semantics.
+  // Without an invite, identity details are completed after OAuth in onboarding.
+  const registration = state.inviteCode
+    ? await validateRegistrationContext({
+        inviteCode: state.inviteCode,
+        promoCode: state.promoCode,
+        providerEmail: profile.email,
+        requireUsername: false,
+        promoOrder: 'social',
+      })
+    : null;
+
+  let user: AuthUserResponse;
+  try {
+    user = await createSocialUser({
+      email: profile.email,
+      regionId: registration?.region.id ?? null,
+      invite: registration?.invite ?? null,
+    });
+  } catch (error) {
+    const prismaError = error as { code?: string };
+    if (prismaError.code !== 'P2002' && !(error instanceof AuthValidationError && error.message === 'Email already in use')) throw error;
+    const raced = await prisma.user.findUnique({ where: { email: profile.email }, select: { id: true } });
+    if (!raced) throw error;
+    user = await linkProviderToExistingUser(provider, profile, raced.id);
+    return { token: issueJwt(user.id), user, isNewUser: false, redirectTo: state.redirectTo };
   }
-
-  const registration = await validateRegistrationContext({
-    username: state.username,
-    regionId: state.regionId,
-    inviteCode: state.inviteCode,
-    promoCode: state.promoCode,
-    providerEmail: profile.email,
-    requireUsername: false,
-    promoOrder: 'social',
-  });
-
-  const user = await createSocialUser({
-    email: profile.email,
-    username: registration.username,
-    regionId: registration.region.id,
-    invite: registration.invite,
-  });
 
   await linkAuthProviderAccount({
     userId: user.id,
@@ -258,7 +265,7 @@ export async function completeSocialAuth(
     token: issueJwt(user.id),
     user,
     isNewUser: true,
-    effectivePromoCode: registration.effectivePromoCode,
+    effectivePromoCode: registration?.effectivePromoCode ?? state.promoCode,
     inviteCode: state.inviteCode,
     redirectTo: state.redirectTo,
   };

@@ -269,7 +269,7 @@ export async function generateManualPostV2(
   // single targeted repair. Finalization performs the final safety/max check.
   const normalized = finalizeManualGeneratedPostV2(generated, topic, { topic, voice });
   const normalizedStatus = evaluateGeneratedPostLength(normalized.content);
-  if (normalizedStatus === 'TOO_SHORT' || normalizedStatus === 'TOO_LONG') {
+  if (normalizedStatus === 'TOO_LONG') {
     throw new ManualPostError(502, 'AI provider could not satisfy the final generated post length invariant');
   }
 

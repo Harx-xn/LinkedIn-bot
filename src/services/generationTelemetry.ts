@@ -33,6 +33,10 @@ export type GenerationTelemetry = {
   recoveryTriggered?: boolean;
   recoveryAccepted?: boolean;
   minimumLengthSatisfied: boolean;
+  selectedCandidateSource?: 'initial' | 'repair' | 'recovery' | 'emergency';
+  selectedCandidateReason?: string;
+  returnedWithQualityWarnings?: boolean;
+  finalQualityWarnings?: string[];
   plannerFallbackUsed: boolean;
   plannerValidationFailureReason: string | null;
 };

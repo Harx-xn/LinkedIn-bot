@@ -131,10 +131,11 @@ describe('Safepay normalization and security', () => {
   });
   it('matches the official SDK HMAC-SHA512 webhook scheme', () => {
     const body = { data: { subscription: { token: 'sub_123', status: 'ACTIVE' } } };
-    const signature = computeSafepayWebhookSignature(body.data, 'webhook-secret');
+    const rawBody = Buffer.from(JSON.stringify(body));
+    const signature = computeSafepayWebhookSignature(rawBody, 'webhook-secret');
     assert.match(signature, /^[0-9a-f]{128}$/);
-    assert.equal(verifySafepayWebhookSignature(body, signature, 'webhook-secret'), true);
-    assert.equal(verifySafepayWebhookSignature(body, '0'.repeat(128), 'webhook-secret'), false);
+    assert.equal(verifySafepayWebhookSignature(rawBody, signature, 'webhook-secret'), true);
+    assert.equal(verifySafepayWebhookSignature(rawBody, '0'.repeat(128), 'webhook-secret'), false);
   });
   it('rejects missing signatures and parsed/non-buffer webhook bodies', () => {
     assert.equal(validateSafepayWebhookEnvelope(Buffer.from('{}'), undefined), 'Missing Safepay signature');
@@ -165,7 +166,7 @@ describe('Safepay normalization and security', () => {
   it('emits every safe webhook pipeline diagnostic stage', () => {
     const route = readFileSync(join(process.cwd(), 'src/routes/safepayWebhook.ts'), 'utf8');
     for (const stage of [
-      'SAFEPAY-WEBHOOK-RECEIVED', 'SAFEPAY-WEBHOOK-VERIFIED',
+      'SAFEPAY-WEBHOOK-RECEIVED', 'SAFEPAY-WEBHOOK-SIGNATURE-VALID',
       'SAFEPAY-WEBHOOK-RESOURCE', 'billing-webhook-event-persisted',
       'billing-webhook-transaction-recorded', 'billing-webhook-processed',
     ]) assert.ok(route.includes(stage), `missing ${stage}`);

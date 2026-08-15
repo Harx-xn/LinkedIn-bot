@@ -55,12 +55,12 @@ function safeEqualHex(expected: string, supplied: string) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-export function computeSafepayWebhookSignature(data: unknown, secret: string) {
-  return crypto.createHmac('sha512', secret).update(Buffer.from(JSON.stringify(data))).digest('hex');
+export function computeSafepayWebhookSignature(rawBody: Buffer | string, secret: string) {
+  return crypto.createHmac('sha512', secret).update(rawBody).digest('hex');
 }
 
-export function verifySafepayWebhookSignature(body: Record<string, any>, signature: string, secret: string) {
-  return safeEqualHex(computeSafepayWebhookSignature(body.data, secret), signature);
+export function verifySafepayWebhookSignature(rawBody: Buffer, signature: string, secret: string) {
+  return safeEqualHex(computeSafepayWebhookSignature(rawBody, secret), signature);
 }
 
 export function validateSafepayWebhookEnvelope(rawBody: unknown, signature: unknown) {
@@ -73,32 +73,58 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
   const { regionId } = req.params;
   const signature = req.headers['x-sfpy-signature'];
   console.info('[SAFEPAY-WEBHOOK-RECEIVED]', {
-    provider: 'SAFEPAY', regionId,
+    provider: 'SAFEPAY', regionId, method: req.method,
+    contentType: req.headers['content-type'] ?? null,
     rawBodyPresent: Buffer.isBuffer(req.body),
     signaturePresent: typeof signature === 'string',
+    rawBodyLength: Buffer.isBuffer(req.body) ? req.body.length : null,
   });
   const envelopeError = validateSafepayWebhookEnvelope(req.body, signature);
-  if (envelopeError) return res.status(400).send('Invalid webhook request');
-  const config = await prisma.paymentConfig.findUnique({ where: { regionId } });
-  const secret = decryptSecret(config?.safepayWebhookSecret);
-  if (!secret) return res.status(400).send('Webhook is not configured');
+  if (envelopeError) {
+    console.warn('[SAFEPAY-WEBHOOK-FAILED]', { regionId, stage: typeof signature === 'string' ? 'RAW_BODY_INVALID' : 'SIGNATURE_MISSING' });
+    return res.status(400).send('Invalid webhook request');
+  }
+  let secret: string | null;
+  try {
+    const config = await prisma.paymentConfig.findUnique({ where: { regionId } });
+    secret = decryptSecret(config?.safepayWebhookSecret);
+  } catch (error) {
+    console.error('[SAFEPAY-WEBHOOK-FAILED]', { regionId, stage: 'REGION_CONFIG_ERROR', message: error instanceof Error ? error.message : 'unknown' });
+    return res.status(500).send('Webhook configuration failed');
+  }
+  if (!secret) {
+    console.warn('[SAFEPAY-WEBHOOK-FAILED]', { regionId, stage: 'REGION_CONFIG_ERROR' });
+    return res.status(400).send('Webhook is not configured');
+  }
+
+  const rawBody = req.body as Buffer;
+  const expected = computeSafepayWebhookSignature(rawBody, secret);
+  if (!verifySafepayWebhookSignature(rawBody, signature as string, secret)) {
+    console.warn('[SAFEPAY-WEBHOOK-FAILED]', { regionId, stage: 'SIGNATURE_INVALID' });
+    return res.status(400).send('Webhook signature verification failed');
+  }
+  console.info('[SAFEPAY-WEBHOOK-SIGNATURE-VALID]', { regionId });
 
   let body: Record<string, any>;
-  try { body = JSON.parse(req.body.toString('utf8')); } catch { return res.status(400).send('Invalid webhook payload'); }
-  // Safepay's official SDK signs JSON.stringify(body.data) using HMAC-SHA512.
-  const expected = computeSafepayWebhookSignature(body.data, secret);
-  if (!verifySafepayWebhookSignature(body, signature as string, secret)) return res.status(400).send('Webhook signature verification failed');
-  console.info('[SAFEPAY-WEBHOOK-VERIFIED]', { regionId });
+  try { body = JSON.parse(rawBody.toString('utf8')); } catch {
+    console.warn('[SAFEPAY-WEBHOOK-FAILED]', { regionId, stage: 'EVENT_PARSE_ERROR' });
+    return res.status(400).send('Invalid webhook payload');
+  }
 
   const eventId = extractSafepayEventId(body, req.headers, expected);
   const eventType = String(body.type ?? body.event ?? req.headers['x-sfpy-event-type'] ?? 'unknown');
   const existing = await prisma.paymentEvent.findUnique({ where: { eventId } });
   if (existing?.status === 'PROCESSED') return res.json({ received: true, duplicate: true });
-  await prisma.paymentEvent.upsert({
-    where: { eventId },
-    create: { provider: 'SAFEPAY', eventId, type: eventType, regionId, payload: body, attempts: 1 },
-    update: { attempts: { increment: 1 }, status: 'RECEIVED', errorMessage: null },
-  });
+  try {
+    await prisma.paymentEvent.upsert({
+      where: { eventId },
+      create: { provider: 'SAFEPAY', eventId, type: eventType, regionId, payload: body, attempts: 1 },
+      update: { attempts: { increment: 1 }, status: 'RECEIVED', errorMessage: null },
+    });
+  } catch (error) {
+    console.error('[SAFEPAY-WEBHOOK-FAILED]', { regionId, eventId, stage: 'EVENT_PERSIST_FAILED', message: error instanceof Error ? error.message : 'unknown' });
+    return res.status(500).json({ error: 'Webhook processing failed' });
+  }
   console.info('[billing-webhook-event-persisted]', { provider: 'SAFEPAY', regionId, eventId, eventType });
 
   try {
@@ -163,7 +189,11 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
     return res.json({ received: true });
   } catch (error) {
     await prisma.paymentEvent.update({ where: { eventId }, data: { status: 'FAILED', errorMessage: error instanceof Error ? error.message.slice(0, 500) : 'Processing failed' } });
-    console.error('[billing-webhook]', { provider: 'SAFEPAY', regionId, eventId, eventType, message: error instanceof Error ? error.message : 'unknown' });
+    const message = error instanceof Error ? error.message : 'unknown';
+    const stage = message.includes('matched provider reference') || message.includes('matched Safepay subscription')
+      ? 'SUBSCRIPTION_CORRELATION_FAILED'
+      : message.includes('plan mapping') ? 'PLAN_MAPPING_MISMATCH' : 'SUBSCRIPTION_SYNC_FAILED';
+    console.error('[SAFEPAY-WEBHOOK-FAILED]', { provider: 'SAFEPAY', regionId, eventId, eventType, stage, message });
     return res.status(500).json({ error: 'Webhook processing failed' });
   }
 }
