@@ -164,6 +164,7 @@ model User {
   supportRequests            SupportRequest[]
   linkedinAnalyticsImports   LinkedInAnalyticsImport[]
   linkedinProfileSnapshots   LinkedInProfileSnapshot[]
+  subscriptionEmailDeliveries SubscriptionEmailDelivery[]
 
   @@index([regionId])
   @@index([role])
@@ -736,12 +737,34 @@ model Subscription {
   plan                 Plan                  @relation(fields: [planId], references: [id], onDelete: Restrict)
   promotionRedemptions PromotionRedemption[]
   billingTransactions  BillingTransaction[]
+  emailDeliveries      SubscriptionEmailDelivery[]
 
   @@unique([provider, providerSubscriptionId])
   @@index([userId])
   @@index([regionId])
   @@index([planId])
   @@index([provider, providerCustomerId])
+}
+
+model SubscriptionEmailDelivery {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  userId         String
+  eventType      String
+  status         String   @default("PENDING") // PENDING | SENT | FAILED
+  messageId      String?
+  sentAt         DateTime?
+  failedAt       DateTime?
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, eventType])
+  @@index([userId, createdAt])
+  @@index([status])
 }
 
 model PlatformSetting {

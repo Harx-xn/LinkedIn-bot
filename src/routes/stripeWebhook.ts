@@ -21,6 +21,7 @@ import type {
   StripePaymentMethodLike,
   StripeSubscriptionFull,
 } from '../services/billing/stripeTypes';
+import { safelySendConfirmedSubscriptionEmail } from '../services/billing/subscriptionEmailNotificationService';
 
 type StripeClient = InstanceType<typeof Stripe>;
 
@@ -114,12 +115,13 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case 'checkout.session.completed':
       case 'checkout.session.async_payment_succeeded': {
         const session = event.data.object as StripeCheckoutSessionLike;
-        await handleCheckoutSessionCompleted({
+        const subscription = await handleCheckoutSessionCompleted({
           stripe,
           session,
           expectedRegionId: regionId,
           sourceEvent,
         });
+        await safelySendConfirmedSubscriptionEmail(subscription);
         break;
       }
       case 'checkout.session.async_payment_failed': {
@@ -133,12 +135,13 @@ export async function handleStripeWebhook(req: Request, res: Response) {
         const stripeSub = event.data.object as StripeSubscriptionFull;
         const metaRegion = stripeSub.metadata?.regionId;
         if (metaRegion && metaRegion !== regionId) break;
-        await syncSubscriptionFromStripe({
+        const subscription = await syncSubscriptionFromStripe({
           stripe,
           stripeSubscription: stripeSub,
           expectedRegionId: regionId,
           sourceEvent,
         });
+        await safelySendConfirmedSubscriptionEmail(subscription);
         break;
       }
       case 'customer.subscription.trial_will_end': {
@@ -155,13 +158,14 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case 'invoice.payment_failed':
       case 'invoice.payment_action_required': {
         const invoice = event.data.object as StripeInvoiceLike;
-        await handleInvoiceEvent({
+        const subscription = await handleInvoiceEvent({
           stripe,
           invoice,
           expectedRegionId: regionId,
           eventType: event.type,
           sourceEvent,
         });
+        await safelySendConfirmedSubscriptionEmail(subscription);
         break;
       }
       case 'payment_method.attached': {

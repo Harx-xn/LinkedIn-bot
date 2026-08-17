@@ -4,6 +4,7 @@ import { prisma } from '../prismaClient';
 import { decryptSecret } from '../services/secretCrypto';
 import { recordSafepayTransaction, syncSafepaySubscription } from '../services/billing/providers/safepay/safepaySubscriptionSyncService';
 import { retrieveSafepaySubscription } from '../services/billing/providers/safepay/safepayClient';
+import { safelySendConfirmedSubscriptionEmail } from '../services/billing/subscriptionEmailNotificationService';
 
 export function extractSafepayWebhookResource(eventType: string, body: Record<string, any>) {
   const normalizedType = eventType.toLowerCase();
@@ -172,6 +173,7 @@ export async function handleSafepayWebhook(req: Request, res: Response) {
       });
     }
     if (!synced && isSubscriptionEvent && !normalizedType.startsWith('subscription.payment.')) throw new Error('Missing Safepay subscription ID or resource');
+    await safelySendConfirmedSubscriptionEmail(synced);
     await prisma.paymentEvent.update({ where: { eventId }, data: { status: 'PROCESSED', processedAt: new Date() } });
     console.info('[billing-webhook-sync]', {
       provider: 'SAFEPAY', regionId, eventId, eventType,
