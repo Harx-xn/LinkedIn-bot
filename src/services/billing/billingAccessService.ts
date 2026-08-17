@@ -180,8 +180,9 @@ export async function hasDashboardAccess(userId: string): Promise<boolean> {
     const sub = await prisma.subscription.findFirst({
       where: { userId },
       orderBy: { updatedAt: 'desc' },
-      select: { currentPeriodEnd: true, trialEnd: true },
+      select: { currentPeriodEnd: true, trialEnd: true, canceledDuringTrial: true },
     });
+    if (sub?.canceledDuringTrial) return false;
     const accessEnd = sub?.currentPeriodEnd ?? sub?.trialEnd ?? user.trialEndsAt;
     return !!accessEnd && accessEnd.getTime() > Date.now();
   }

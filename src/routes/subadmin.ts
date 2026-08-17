@@ -606,6 +606,7 @@ router.put("/plans/:planId/provider-mappings/safepay", async (req, res) => {
     const regionId = getRegion(req);
     const { planId } = req.params;
     const providerPlanId = String(req.body?.providerPlanId ?? "").trim();
+    const providerPaidPlanId = String(req.body?.providerPaidPlanId ?? "").trim() || null;
     const environment = String(req.body?.environment ?? "SANDBOX").toUpperCase();
     if (!providerPlanId) return res.status(400).json({ message: "Safepay plan ID is required" });
     if (!["SANDBOX", "LIVE"].includes(environment)) return res.status(400).json({ message: "Invalid Safepay environment" });
@@ -613,8 +614,8 @@ router.put("/plans/:planId/provider-mappings/safepay", async (req, res) => {
     if (!plan) return res.status(404).json({ message: "Plan not found in your region" });
     const mapping = await prisma.planProviderMapping.upsert({
       where: { planId_provider_environment: { planId, provider: "SAFEPAY", environment } },
-      create: { planId, provider: "SAFEPAY", environment, providerPlanId },
-      update: { providerPlanId },
+      create: { planId, provider: "SAFEPAY", environment, providerPlanId, providerPaidPlanId },
+      update: { providerPlanId, providerPaidPlanId },
     });
     return res.json(mapping);
   } catch (error: any) {

@@ -6,7 +6,7 @@ import { BillingError, sanitizeExternalError } from '../../billingError';
 import { hasBlockingSubscription, isTrialEligible, setUserBillingAccess } from '../../billingAccessService';
 import type { ProviderCheckoutInput, ProviderCheckoutResult } from '../types';
 import { getSafepayClient } from './safepayClient';
-import { resolveSafepayPlanMapping } from './safepayPlanService';
+import { resolveSafepayCheckoutPlanId, resolveSafepayPlanMapping } from './safepayPlanService';
 import { reconcileSafepaySubscription } from './safepaySubscriptionSyncService';
 
 export async function createSafepayCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult> {
@@ -47,11 +47,17 @@ export async function createSafepayCheckout(input: ProviderCheckoutInput): Promi
 
   const { client, config: providerConfig } = await getSafepayClient(user.regionId);
   const { plan, mapping } = await resolveSafepayPlanMapping(input.planId, user.regionId, providerConfig.environment);
+  const checkoutProviderPlanId = resolveSafepayCheckoutPlanId(mapping, input.mode);
+  if (!checkoutProviderPlanId) {
+    throw new BillingError(400, 'PLAN_NOT_ACTIVE', input.mode === 'paid'
+      ? 'This plan needs a separate Safepay plan with zero trial days before paid checkout can start.'
+      : 'This plan is not configured for trial checkout.');
+  }
   const pendingId = pending?.id ?? randomUUID();
   if (pending) {
     await prisma.subscription.update({
       where: { id: pending.id },
-      data: { providerStatus: 'CHECKOUT_PENDING', status: 'INCOMPLETE' },
+      data: { providerStatus: 'CHECKOUT_PENDING', status: 'INCOMPLETE', checkoutMode: input.mode.toUpperCase() },
     });
   } else {
     await prisma.subscription.create({
@@ -62,6 +68,7 @@ export async function createSafepayCheckout(input: ProviderCheckoutInput): Promi
       planId: plan.id,
       provider: 'SAFEPAY',
       providerStatus: 'CHECKOUT_PENDING',
+      checkoutMode: input.mode.toUpperCase(),
       status: 'INCOMPLETE',
       autoRenew: true,
       },
@@ -74,7 +81,7 @@ export async function createSafepayCheckout(input: ProviderCheckoutInput): Promi
     const url = await client.checkout.createSubscription({
       cancelUrl,
       redirectUrl,
-      planId: mapping.providerPlanId!,
+      planId: checkoutProviderPlanId,
       reference: pendingId,
     });
     if (typeof url !== 'string') throw new Error('Safepay did not return a checkout URL');
@@ -83,7 +90,8 @@ export async function createSafepayCheckout(input: ProviderCheckoutInput): Promi
       userId: user.id,
       localSubscriptionId: pendingId,
       checkoutReference: pendingId,
-      planId: mapping.providerPlanId,
+      planId: checkoutProviderPlanId,
+      checkoutMode: input.mode,
       environment: providerConfig.environment,
       apiBaseUrl: providerConfig.environment === 'SANDBOX'
         ? 'https://sandbox.api.getsafepay.com'

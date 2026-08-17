@@ -80,14 +80,17 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
           environment: providerConfig.environment,
         },
       },
-      select: { providerPlanId: true },
+      select: { providerPlanId: true, providerPaidPlanId: true },
     });
-    if (!mapping?.providerPlanId || mapping.providerPlanId !== String(raw.plan_id)) {
+    if (!mapping || ![mapping.providerPlanId, mapping.providerPaidPlanId].filter(Boolean).includes(String(raw.plan_id))) {
       throw new Error('Safepay plan mapping not found');
     }
   }
 
   const mappedStatus = mapSafepayStatusToLocal(raw.status);
+  if (existing.checkoutMode === 'PAID' && mappedStatus === 'TRIALING') {
+    throw new Error('Safepay paid checkout returned TRIALING; configure the paid provider plan with zero trial days');
+  }
   if (mappedStatus === 'INCOMPLETE' && !['INCOMPLETE', 'INCOMPLETE_EXPIRED'].includes(String(raw.status ?? '').trim().toUpperCase())) {
     throw new Error(`Unknown Safepay subscription status: ${String(raw.status ?? 'missing')}`);
   }
@@ -138,6 +141,7 @@ export async function syncSafepaySubscription(regionId: string, raw: Record<stri
       currentPeriodEnd: periodEnd,
       endsAt: periodEnd,
       cancelAtPeriodEnd: Boolean(raw.cancel_at_period_end),
+      canceledDuringTrial: existing.canceledDuringTrial || (previousStatus === 'TRIALING' && status === 'CANCELED'),
       canceledAt: asDate(raw.canceled_at),
       autoRenew: !raw.cancel_at_period_end && status !== 'CANCELED',
       paymentFailedAt: status === 'PAST_DUE' ? new Date() : null,

@@ -678,6 +678,7 @@ model PlanProviderMapping {
   provider          String
   environment       String   @default("LIVE")
   providerPlanId    String?
+  providerPaidPlanId String?
   providerProductId String?
   providerPriceId   String?
   metadata          Json?
@@ -688,6 +689,7 @@ model PlanProviderMapping {
 
   @@unique([planId, provider, environment])
   @@index([provider, providerPlanId])
+  @@index([provider, providerPaidPlanId])
   @@index([provider, providerPriceId])
 }
 
@@ -708,6 +710,7 @@ model Subscription {
   providerSubscriptionId       String?
   providerCustomerId           String?
   providerStatus               String?
+  checkoutMode                 String? // TRIAL | PAID
   providerPaymentMethodPresent Boolean @default(false)
 
   stripeCustomerId             String?
@@ -720,6 +723,7 @@ model Subscription {
   inviteCode                   String?
 
   cancelAtPeriodEnd        Boolean   @default(false)
+  canceledDuringTrial      Boolean   @default(false)
   canceledAt               DateTime?
   currentPeriodStart       DateTime?
   currentPeriodEnd         DateTime?

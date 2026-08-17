@@ -2,6 +2,13 @@ import { prisma } from '../../../../prismaClient';
 import { BillingError } from '../../billingError';
 import type { SafepayEnvironment } from './safepayClient';
 
+export function resolveSafepayCheckoutPlanId(
+  mapping: { providerPlanId: string | null; providerPaidPlanId: string | null },
+  mode: 'trial' | 'paid',
+) {
+  return mode === 'paid' ? mapping.providerPaidPlanId : mapping.providerPlanId;
+}
+
 export async function resolveSafepayPlanMapping(planId: string, regionId: string, environment: SafepayEnvironment) {
   const plan = await prisma.plan.findFirst({ where: { id: planId, regionId, isActive: true } });
   if (!plan) throw new BillingError(404, 'PLAN_NOT_FOUND', 'Plan not found');
@@ -13,4 +20,3 @@ export async function resolveSafepayPlanMapping(planId: string, regionId: string
   }
   return { plan, mapping };
 }
-

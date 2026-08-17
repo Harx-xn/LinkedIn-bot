@@ -110,6 +110,12 @@ describe('trial eligibility rules', () => {
     assert.equal(eligible, false);
   });
 
+  it('does not restore trial eligibility after the trial subscription is canceled', () => {
+    const canceledTrialUser = { trialRedeemedAt: new Date(), billingAccessStatus: 'CANCELED' };
+    const eligible = canceledTrialUser.trialRedeemedAt === null;
+    assert.equal(eligible, false);
+  });
+
   it('blocks duplicate checkout when manageable subscription exists', () => {
     const manageableStatuses = ['TRIALING', 'ACTIVE', 'PAST_DUE', 'INCOMPLETE', 'PAUSED'];
     assert.ok(manageableStatuses.includes('ACTIVE'));

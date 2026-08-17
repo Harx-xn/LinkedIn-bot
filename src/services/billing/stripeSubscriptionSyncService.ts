@@ -256,6 +256,7 @@ export async function syncSubscriptionFromStripe(params: SyncSubscriptionParams)
     ...(latestInvoiceId !== null ? { stripeLatestInvoiceId: latestInvoiceId } : {}),
     stripeDefaultPaymentMethodId: defaultPm,
     cancelAtPeriodEnd: stripeSub.cancel_at_period_end ?? false,
+    canceledDuringTrial: existing?.canceledDuringTrial || (existing?.status === 'TRIALING' && localStatus === 'CANCELED'),
     canceledAt,
     currentPeriodStart,
     currentPeriodEnd,

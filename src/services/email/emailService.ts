@@ -11,6 +11,13 @@ function smtpConfig() {
   const user = process.env.SMTP_USER?.trim();
   const pass = process.env.SMTP_PASSWORD;
   const fromEmail = process.env.SMTP_FROM_EMAIL?.trim();
+  console.log('[SMTP_CONFIG_CHECK]', {
+  SMTP_HOST: !!process.env.SMTP_HOST,
+  SMTP_PORT: process.env.SMTP_PORT,
+  SMTP_USER: !!process.env.SMTP_USER,
+  SMTP_PASSWORD: !!process.env.SMTP_PASSWORD,
+  SMTP_FROM_EMAIL: !!process.env.SMTP_FROM_EMAIL,
+});
   if (!host || !user || !pass || !fromEmail || !Number.isInteger(port)) {
     throw new Error('SMTP configuration is incomplete');
   }

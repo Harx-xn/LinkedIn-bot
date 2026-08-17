@@ -38,15 +38,20 @@ function mapSubStatus(status: string | null): SubscriptionDisplayStatus {
   return allowed.includes(status) ? (status as SubscriptionDisplayStatus) : null;
 }
 
-function planRelationship(
-  currentPrice: number,
+export function planRelationship(
+  currentPrice: number | null,
   targetPrice: number,
   isCurrent: boolean,
 ): PlanRelationship {
+  if (currentPrice === null) return 'AVAILABLE';
   if (isCurrent) return 'CURRENT';
   if (targetPrice > currentPrice) return 'UPGRADE';
   if (targetPrice < currentPrice) return 'DOWNGRADE';
   return 'AVAILABLE';
+}
+
+export function isBillingRequiredStatus(status: string) {
+  return ['BILLING_REQUIRED', 'TRIAL_PENDING', 'INCOMPLETE', 'CANCELED'].includes(status);
 }
 
 async function resolveStripeConfigured(regionId: string | null): Promise<boolean> {
@@ -146,10 +151,7 @@ export async function getBillingMe(userId: string) {
   let providerCapabilities = null;
   try { providerCapabilities = getPaymentProvider(sub?.provider ?? selectedProvider).capabilities; } catch { providerCapabilities = null; }
 
-  const billingRequired =
-    user.billingAccessStatus === 'BILLING_REQUIRED' ||
-    user.billingAccessStatus === 'TRIAL_PENDING' ||
-    user.billingAccessStatus === 'INCOMPLETE';
+  const billingRequired = isBillingRequiredStatus(user.billingAccessStatus);
 
   const trialActive =
     user.billingAccessStatus === 'TRIALING' &&
@@ -164,7 +166,7 @@ export async function getBillingMe(userId: string) {
       })
     : [];
 
-  const currentPrice = sub?.plan?.price ?? 0;
+  const currentPrice = sub?.plan?.price ?? null;
   const availablePlans = plans.map((p) => ({
     id: p.id,
     name: p.name,
@@ -177,6 +179,9 @@ export async function getBillingMe(userId: string) {
     providerPlanConfigured: selectedProvider === 'STRIPE'
       ? Boolean(p.stripePriceId || p.providerMappings.some((m) => m.provider === 'STRIPE'))
       : p.providerMappings.some((m) => m.provider === selectedProvider && m.environment === (paymentConfig?.safepayEnvironment ?? 'LIVE')),
+    paidProviderPlanConfigured: selectedProvider === 'SAFEPAY'
+      ? p.providerMappings.some((m) => m.provider === 'SAFEPAY' && m.environment === (paymentConfig?.safepayEnvironment ?? 'LIVE') && Boolean(m.providerPaidPlanId))
+      : true,
     fullDashboardUnlock: p.fullDashboardUnlock,
     convertPostToCarouselEnabled: p.convertPostToCarouselEnabled,
     maxRewritesPerPost: p.maxRewritesPerPost,
