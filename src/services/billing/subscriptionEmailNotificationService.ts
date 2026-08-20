@@ -6,7 +6,7 @@ import type { SubscriptionEmailEventType } from '../email/subscriptionEmailTempl
 type ConfirmedStatus = 'ACTIVE' | 'TRIALING';
 type SubscriptionForEmail = {
   id: string; userId: string; status: string; currentPeriodEnd: Date | null; trialEnd: Date | null;
-  user: { email: string; username: string };
+  user: { id?: string; email: string; username: string };
   plan: { name: string; price: number; currency: string; billingCycle: string };
 };
 
@@ -24,7 +24,7 @@ const defaultDependencies: SubscriptionEmailDependencies = {
     where: { id },
     select: {
       id: true, userId: true, status: true, currentPeriodEnd: true, trialEnd: true,
-      user: { select: { email: true, username: true } },
+      user: { select: { id: true, email: true, username: true } },
       plan: { select: { name: true, price: true, currency: true, billingCycle: true } },
     },
   }),
@@ -78,11 +78,19 @@ export async function sendConfirmedSubscriptionEmail(subscriptionId: string, dep
 
   console.info('[EMAIL_SEND_STARTED]', { deliveryId: delivery.id, subscriptionId: subscription.id, userId: subscription.userId, eventType });
   try {
+    const user = subscription.user;
+    console.log('[SUBSCRIPTION_EMAIL_RECIPIENT_CHECK]', {
+      subscriptionId: subscription.id,
+      subscriptionUserId: subscription.userId,
+      resolvedUserId: user.id,
+      resolvedUserEmail: user.email,
+      eventType,
+    });
     const sent = await dependencies.send({
       eventType,
-      to: subscription.user.email,
+      to: user.email,
       data: {
-        recipientName: subscription.user.username,
+        recipientName: user.username,
         planName: subscription.plan.name,
         amount: subscription.plan.price,
         currency: subscription.plan.currency,

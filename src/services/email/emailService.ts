@@ -53,6 +53,10 @@ export async function sendSubscriptionEmail(params: {
 }) {
   const config = smtpConfig();
   const content = buildSubscriptionEmail(params.eventType, { ...params.data, appUrl: params.data.appUrl ?? process.env.APP_URL });
+  console.log('[EMAIL_SEND_RECIPIENT_CHECK]', {
+    eventType: params.eventType,
+    to: params.to,
+  });
   const result = await getEmailTransporter().sendMail({
     from: { name: config.fromName, address: config.fromEmail },
     to: params.to,

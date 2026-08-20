@@ -6,6 +6,7 @@ import { redeemInvite } from '../services/inviteService';
 import {
   AuthValidationError,
   buildAuthUserResponse,
+  isValidUsername,
   issueJwt,
   USER_SELECT,
   validateRegistrationContext,
@@ -26,6 +27,24 @@ import {
 } from '../services/auth/socialAuthService';
 
 const router = Router();
+
+router.get('/username-availability', async (req, res) => {
+  const username = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+
+  if (!isValidUsername(username)) {
+    return res.status(400).json({
+      available: false,
+      error: 'Username must be 3–20 characters and use only allowed characters',
+    });
+  }
+
+  const existingUser = await prisma.user.findUnique({
+    where: { username },
+    select: { id: true },
+  });
+
+  return res.json({ available: !existingUser });
+});
 
 router.post('/register', async (req, res) => {
   const { email, password, username, regionId, inviteCode, promoCode } = req.body as {
