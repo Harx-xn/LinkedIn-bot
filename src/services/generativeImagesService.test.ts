@@ -6,6 +6,9 @@ import {
   GenerativeImageError,
   GenerativeImagesService,
   buildLinkedInImagePrompt,
+  buildImageTextCorrectionInstructions,
+  buildImageTextQualityPrompt,
+  parseImageTextQualityResult,
   resolveImageCreativeDirection,
 } from './generativeImagesService';
 
@@ -25,6 +28,35 @@ describe('GenerativeImagesService', () => {
     assert.match(prompt, /Never include hashtags or text beginning with # anywhere in the image/);
     assert.match(prompt, /Never render the creator's niche name/);
     assert.match(prompt, /VISUAL CONCEPT/);
+  });
+
+  it('asks visual QA to detect spelling, incomplete words, and cropped text', () => {
+    const prompt = buildImageTextQualityPrompt('A post about customer retention.');
+    assert.match(prompt, /Misspellings/);
+    assert.match(prompt, /Incomplete words/);
+    assert.match(prompt, /clipped, cropped/);
+    assert.match(prompt, /customer retention/);
+  });
+
+  it('parses image text defects and builds exact correction instructions', () => {
+    const result = parseImageTextQualityResult(JSON.stringify({
+      passed: false,
+      visibleText: ['Custmer Retent'],
+      spellingErrors: [{ rendered: 'Custmer', correction: 'Customer' }],
+      incompleteWords: ['Retent'],
+      cutOffText: ['Retent'],
+      issues: ['Final label touches the right edge.'],
+    }));
+    assert.equal(result.passed, false);
+    const correction = buildImageTextCorrectionInstructions(result);
+    assert.match(correction, /Replace "Custmer" with "Customer"/);
+    assert.match(correction, /incomplete word or fragment "Retent"/);
+    assert.match(correction, /fully inside the canvas/);
+  });
+
+  it('does not accept a contradictory QA pass when defect arrays are populated', () => {
+    const result = parseImageTextQualityResult('{"passed":true,"visibleText":["Wrng"],"spellingErrors":[{"rendered":"Wrng","correction":"Wrong"}],"incompleteWords":[],"cutOffText":[],"issues":[]}');
+    assert.equal(result.passed, false);
   });
 
   it('resolves creative direction from universal post structure', () => {

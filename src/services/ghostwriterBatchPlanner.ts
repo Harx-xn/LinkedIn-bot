@@ -10,6 +10,8 @@ import type {
 import { resolvePlanAngle } from './ghostwriterValidationService';
 import { selectBatchExpressionMode } from './expressionModeService';
 import type { WritingStyle } from './botStrategyService';
+import { withDerivedPostDepth } from './postDepth';
+import { resolveClaimSource } from './claimNarrowingService';
 
 const DEFAULT_ANGLE_SEQUENCE: PostAngle[] = [
   'technical_mistake',
@@ -81,6 +83,8 @@ export function buildDeterministicBatchPlan(
 
   for (let i = 0; i < count; i++) {
     const trend = trends[i] ?? null;
+    const claimSource = resolveClaimSource(trend);
+    const selectedCentralClaim = trend?.topic?.trim() || undefined;
     const requestedAngle = DEFAULT_ANGLE_SEQUENCE[i % DEFAULT_ANGLE_SEQUENCE.length];
     const topic = trend?.topic ?? '';
     const angle = topic ? resolvePlanAngle(topic, requestedAngle) : requestedAngle;
@@ -103,6 +107,9 @@ export function buildDeterministicBatchPlan(
         ? `Use trend as inspiration for a ${angle.replace(/_/g, ' ')} post`
         : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
       evergreen: !trend,
+      claimSource,
+      selectedCentralClaim,
+      centralClaim: claimSource === 'STRATEGY_SELECTED' ? selectedCentralClaim : undefined,
       depthPlan: {
         centralClaim: trend?.topic ?? 'Develop one narrow claim from author expertise.',
         whyThisClaimIsInteresting: trend?.suggestedAngle ?? null,
@@ -116,7 +123,10 @@ export function buildDeterministicBatchPlan(
         avoidIdeas: ['generic recommendation', 'summary that restates the central claim'],
       },
     };
-    plans.push({ ...basePlan, expressionMode: selectBatchExpressionMode(i, angle) });
+    plans.push(withDerivedPostDepth(
+      { ...basePlan, expressionMode: selectBatchExpressionMode(i, angle) },
+      trend,
+    ));
   }
 
   return plans;
@@ -128,11 +138,17 @@ export function assignTrendsToPlan(
 ): BatchPostPlan[] {
   return plan.map((p, i) => {
     const trend = trends[i] ?? null;
+    const claimSource = resolveClaimSource(trend);
     return {
       ...p,
       trendIndex: trend ? i : null,
       sourceTopic: trend?.topic ?? p.sourceTopic,
       evergreen: !trend,
+      claimSource,
+      selectedCentralClaim: trend?.topic?.trim() || p.selectedCentralClaim,
+      centralClaim: claimSource === 'STRATEGY_SELECTED'
+        ? trend?.topic?.trim() || p.centralClaim
+        : p.centralClaim,
     };
   });
 }
@@ -144,6 +160,8 @@ export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext)
     angles: plan.map((p) => p.angle),
     hooks: plan.map((p) => p.hookStyle),
     endings: plan.map((p) => p.endingStyle),
+    depthClasses: plan.map((p) => p.depthClass ?? null),
+    targetLengthRanges: plan.map((p) => p.targetLengthRange ?? null),
     evergreenCount: plan.filter((p) => p.evergreen).length,
     topicClusters: plan.map((p) => p.topicCluster ?? null),
     normalizedTopics: plan.map((p) => p.normalizedTopic ?? null),

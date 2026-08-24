@@ -71,6 +71,11 @@ export const imageContentSchema = z.object({
 export const technicalReviewSchema = z.object({
   passed: z.boolean(),
   confidence: z.number().min(0).max(1),
+  informationDensity: z.number().min(0).max(100),
+  progressionQuality: z.number().min(0).max(100),
+  redundancyRisk: z.number().min(0).max(100),
+  genericDiscourseRisk: z.number().min(0).max(100),
+  claimFidelity: z.number().min(0).max(100),
   issues: z.array(
     z.object({
       code: z.string(),
@@ -84,15 +89,17 @@ export const technicalReviewSchema = z.object({
 
 export const postDepthPlanSchema = z.object({
   centralClaim: z.string().min(1),
-  whyThisClaimIsInteresting: z.string().nullable(),
-  strongestObservations: z.array(z.string()).max(3),
-  underlyingCauseOrMechanism: z.string().nullable(),
-  deeperInterpretation: z.string().nullable(),
-  meaningfulConsequence: z.string().nullable(),
-  usefulTensionOrQualification: z.string().nullable(),
-  personalPerspective: z.object({ supported: z.boolean(), insight: z.string().nullable() }),
-  endingInsight: z.string().nullable(),
-  avoidIdeas: z.array(z.string()).max(5),
+  whyThisClaimIsInteresting: z.string().nullable().optional().default(null),
+  strongestObservations: z.array(z.string()).max(3).optional().default([]),
+  underlyingCauseOrMechanism: z.string().nullable().optional().default(null),
+  deeperInterpretation: z.string().nullable().optional().default(null),
+  meaningfulConsequence: z.string().nullable().optional().default(null),
+  usefulTensionOrQualification: z.string().nullable().optional().default(null),
+  personalPerspective: z.object({ supported: z.boolean(), insight: z.string().nullable() })
+    .optional()
+    .default({ supported: false, insight: null }),
+  endingInsight: z.string().nullable().optional().default(null),
+  avoidIdeas: z.array(z.string()).max(5).optional().default([]),
 });
 
 export const batchPlanItemSchema = z.object({
@@ -128,7 +135,13 @@ export const batchPlanItemSchema = z.object({
   ]).optional(),
   rationale: z.string(),
   centralClaim: z.string().min(1).optional(),
+  claimSource: z.enum(['STRATEGY_SELECTED', 'SEARCH_DISCOVERED', 'LEGACY_TOPIC', 'FALLBACK']).optional(),
+  selectedCentralClaim: z.string().min(1).optional(),
   depthPlan: postDepthPlanSchema,
+  depthClass: z.enum(['COMPACT', 'STANDARD', 'DEEP']).optional(),
+  targetLengthRange: z.object({ min: z.number().int().positive(), max: z.number().int().positive() })
+    .refine((range) => range.min <= range.max, 'targetLengthRange min must not exceed max')
+    .optional(),
 });
 
 export const batchPlanSchema = z.array(batchPlanItemSchema);

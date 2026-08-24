@@ -37,6 +37,11 @@ export type GenerationTelemetry = {
   selectedCandidateReason?: string;
   returnedWithQualityWarnings?: boolean;
   finalQualityWarnings?: string[];
+  candidateCount?: number;
+  candidateOrigins?: string[];
+  candidateIssueCounts?: Array<{ origin: string; count: number }>;
+  bestCandidateChanges?: Array<{ from: string | null; to: string; reason: string }>;
+  finalFallbackTier?: string | null;
   plannerFallbackUsed: boolean;
   plannerValidationFailureReason: string | null;
 };

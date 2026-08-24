@@ -26,6 +26,7 @@ import { evaluateBatchTopicSimilarity, evaluateHistoricalPostSimilarity } from '
 import { evaluateSemanticProgression } from './semanticProgression';
 import type { TopicHistoryRow } from './topicHistoryService';
 import { buildLengthRepairInstruction, evaluateGeneratedPostLength } from './generatedPostLength';
+import { resolvePostDepthMetadata } from './postDepth';
 
 const VERIFIED_IDENTITY_PATTERNS = [
   /\bI am a\b/i,
@@ -325,12 +326,15 @@ export function runDeterministicValidation(
   const issues: QualityIssue[] = [];
   let score = 100;
   const body = post.body || '';
-  const lengthStatus = evaluateGeneratedPostLength(`${body}${post.hashtags ? `\n\n${post.hashtags}` : ''}`);
+  const { depthClass, targetLengthRange, minimumCompleteLength } = resolvePostDepthMetadata(plan);
+  const visibleContent = `${body}${post.hashtags ? `\n\n${post.hashtags}` : ''}`;
+  const lengthStatus = evaluateGeneratedPostLength(visibleContent, targetLengthRange, minimumCompleteLength);
   if (topicContext?.enforceLength && (lengthStatus === 'TOO_SHORT' || lengthStatus === 'TOO_LONG')) {
     issues.push({
       code: `generated_post_${lengthStatus.toLowerCase()}`,
       severity: 'error',
-      instruction: buildLengthRepairInstruction(lengthStatus),
+      evidence: [`${visibleContent.length} characters for ${depthClass} plan (${targetLengthRange.min}–${targetLengthRange.max} soft range; ${minimumCompleteLength} completeness floor)`],
+      instruction: buildLengthRepairInstruction(lengthStatus, targetLengthRange),
     });
     score -= 15;
   }
@@ -573,6 +577,37 @@ const CRITICAL_BLOCKING_CODES = new Set([
   'generic_ending',
   'too_many_hashtags',
   'too_many_hashtags_after_format',
+  'guaranteed_outcome',
+  'compliance_overclaim',
+  'tenant_isolation_confusion',
+  'frontend_security_claim',
+  'idempotency_omitted',
+  'locking_overclaim',
+  'audit_trail_overclaim',
+  'token_auth_overclaim',
+  'auth_vs_authorization',
+  'atomic_usage_omitted',
+  'false_architecture_tradeoff',
+  'unsupported_personal_claim',
+]);
+
+const PERSISTENT_COMPLETENESS_CODES = new Set([
+  'generated_post_too_short',
+  'generated_post_too_long',
+  'SEMANTIC_REPETITION',
+  'ARGUMENT_STAGNATION',
+  'ENUMERATION_WITHOUT_INTERPRETATION',
+  'CONCLUSION_RESTATES_THESIS',
+  'FORCED_NICHE_PARAGRAPH',
+  'GENERIC_RECOMMENDATION_ENDING',
+  'REDUNDANT_EXPLANATION',
+  'LOW_INFORMATION_DENSITY',
+  'GENERIC_SCENARIO_STRUCTURE',
+  'GENERIC_CHECKLIST_EXPANSION',
+  'THESIS_RESTATEMENT',
+  'WEAK_ARGUMENT_PROGRESSION',
+  'GENERIC_ENGAGEMENT_ENDING',
+  'CLAIM_DRIFT',
 ]);
 
 const RELAXABLE_BLOCKING_CODES = new Set([
@@ -600,7 +635,7 @@ const RELAXABLE_BLOCKING_CODES = new Set([
 export function filterBlockingIssues(issues: QualityIssue[], attempt: number): QualityIssue[] {
   const errors = issues.filter((i) => i.severity === 'error');
   if (attempt >= 7) {
-    return errors.filter((i) => CRITICAL_BLOCKING_CODES.has(i.code));
+    return errors.filter((i) => CRITICAL_BLOCKING_CODES.has(i.code) || PERSISTENT_COMPLETENESS_CODES.has(i.code));
   }
   if (attempt >= 3) {
     return errors.filter((i) => !RELAXABLE_BLOCKING_CODES.has(i.code) || CRITICAL_BLOCKING_CODES.has(i.code));
@@ -611,4 +646,10 @@ export function filterBlockingIssues(issues: QualityIssue[], attempt: number): Q
 export function canForceAcceptBlockingCodes(codes: string[]): boolean {
   if (codes.length === 0) return true;
   return codes.every((code) => RELAXABLE_BLOCKING_CODES.has(code) && !CRITICAL_BLOCKING_CODES.has(code));
+}
+
+export function isCriticalCandidateIssueCode(code: string): boolean {
+  return CRITICAL_BLOCKING_CODES.has(code)
+    || code === 'body_above_linkedin_limit'
+    || code === 'generated_post_too_long';
 }

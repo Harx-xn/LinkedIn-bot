@@ -74,6 +74,7 @@ describe('editorial depth planning', () => {
     );
     assert.match(batchRepairPrompt, /LENGTH REPAIR DEPTH CHECK/);
     assert.match(batchRepairPrompt, /resistance protects an ownership boundary/);
+    assert.match(batchRepairPrompt, /do not inflate the draft to reach the soft range/);
   });
 
   it('deprioritizes generic question hooks while retaining question support', () => {
@@ -93,6 +94,8 @@ describe('editorial depth planning', () => {
     const [batchPlan] = buildDeterministicBatchPlan([{ topic: 'Automation trust', keyPoints: ['Delayed approvals', 'Duplicate checks'], summary: 'Control transfer shapes adoption.' }], 1);
     assert.deepEqual(batchPlan.depthPlan?.strongestObservations, ['Delayed approvals', 'Duplicate checks']);
     assert.equal(batchPlan.depthPlan?.deeperInterpretation, 'Control transfer shapes adoption.');
+    assert.ok(batchPlan.depthClass);
+    assert.ok(batchPlan.targetLengthRange);
   });
 
   it('reuses the existing batch claim-planning call to return the approved Depth Plan', async () => {

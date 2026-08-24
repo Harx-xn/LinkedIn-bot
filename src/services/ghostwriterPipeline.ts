@@ -6,11 +6,20 @@ import {
   generateSlotPost as generateSlotPostImpl,
   generateSlotPostUntilSuccess as generateSlotPostUntilSuccessImpl,
   type GeneratedSlotResult,
+  type SlotGenerationOptions,
 } from './ghostwriterGenerationService';
 import { TrendOrchestrationService } from './trendOrchestrationService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
 import { BatchScheduleError } from './batchScheduleService';
 import { combineFreshAndInventoryTopics, inventoryFingerprint, reserveValidInventoryTopics, storeQualifiedTopics, unselectedQualifiedTopics } from './topicInventoryService';
+import { getOrBuildContentIntelligence } from './contentIntelligenceService';
+import { buildStrategyIdeaCandidates, ideaToRankedCandidate, selectDiverseIdeas } from './contentIdeaService';
+import { loadRecentTopicHistory } from './topicHistoryService';
+import {
+  createRecentContentMemory,
+  loadRecentContentMemory,
+  selectRankedCandidatesWithMemory,
+} from './recentContentMemoryService';
 
 export type { GeneratedSlotResult };
 
@@ -117,9 +126,61 @@ export async function prepareBatchContextV2(params: {
   };
 
   const orchestrator = new TrendOrchestrationService(params.openaiApiKey);
+  let recentContentMemory = createRecentContentMemory();
+  try {
+    recentContentMemory = await loadRecentContentMemory(params.userId);
+  } catch (error) {
+    console.warn('[content-memory] recent fingerprint load failed; continuing without rich memory', {
+      userId: params.userId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 
-  // Preview pools remain cached for preview UX, but generation always performs
-  // a new provider search before history and novelty filtering.
+  // Strategy-derived evergreen ideas are the primary path. Search is reserved
+  // for shortages and candidates that explicitly require fresh evidence.
+  if (params.config.strategy) {
+    try {
+      const [intelligence, recentHistory] = await Promise.all([
+        getOrBuildContentIntelligence(params.userId, params.config.strategy, params.openaiApiKey),
+        loadRecentTopicHistory(params.userId),
+      ]);
+      const candidates = buildStrategyIdeaCandidates(intelligence.profile, params.config.strategy, recentHistory, params.slotCount);
+      const selectedIdeas = selectDiverseIdeas(
+        candidates,
+        params.slotCount,
+        createRecentContentMemory(recentContentMemory.fingerprints),
+      );
+      const selectedRanked = selectedIdeas.map(ideaToRankedCandidate);
+      author.contentIntelligence = intelligence.profile;
+      console.info('[content-ideas] selection', {
+        userId: params.userId,
+        intelligenceSource: intelligence.source,
+        candidateCount: candidates.length,
+        selected: selectedIdeas.map((idea) => ({
+          pillar: idea.pillar, territory: idea.territory, origin: idea.origin,
+          qualityScore: idea.score.composite, rejectedReasons: idea.rejectedReasons,
+          authorityMode: idea.authorityMode, searchUsed: idea.searchRequired,
+          saturationPenalty: idea.saturationPenalty, similarityPenalty: idea.score.recentSimilarityRisk,
+          contentMemoryPenalty: idea.memoryPenalty ?? 0, contentMemoryReasons: idea.memoryReasons ?? [],
+          coreClaim: idea.coreClaim, fallbackLevel: 1,
+        })),
+      });
+      if (selectedRanked.length >= params.slotCount) {
+        return requireCompleteTrendPool({
+          author,
+          eligible: selectedRanked.map((item) => item.trend),
+          ranked: selectedRanked,
+          stats: { rawCount: candidates.length, rejectedLowValue: candidates.filter((c) => c.rejectedReasons.length > 0).length, rejectedByExclusions: 0, exactDuplicatesRemoved: 0, nearDuplicatesRemoved: candidates.length - selectedRanked.length, historyMatchesRemoved: candidates.filter((c) => c.rejectedReasons.includes('recent_claim_or_mechanism_similarity')).length, fingerprinted: candidates.length, selected: selectedRanked.length, evergreenFilled: selectedRanked.length, openAiCalls: intelligence.source === 'rebuilt' ? 1 : 0 },
+        });
+      }
+      console.info('[content-ideas] insufficient strategy-derived ideas; using existing discovery fallback', { userId: params.userId, selected: selectedRanked.length, requested: params.slotCount, fallbackLevel: 4 });
+    } catch (error) {
+      console.warn('[content-ideas] primary idea path failed; using existing discovery fallback', { userId: params.userId, message: error instanceof Error ? error.message : String(error), fallbackLevel: 4 });
+    }
+  }
+
+  // Preview pools remain cached for preview UX. This legacy discovery path is
+  // now the bounded fallback when strategy-derived ideas cannot fill the batch.
   void params.previewId;
   void params.configHash;
 
@@ -133,7 +194,12 @@ export async function prepareBatchContextV2(params: {
     mode: 'generation',
   });
 
-  const freshSelected = pool.ranked;
+  const freshQualified = pool.qualifiedRanked ?? pool.ranked;
+  const freshSelected = selectRankedCandidatesWithMemory(
+    freshQualified.filter((candidate) => candidate.novelty.allowed),
+    params.slotCount,
+    recentContentMemory,
+  );
   const inventorySelected = freshSelected.length < params.slotCount
     ? await reserveValidInventoryTopics({
         userId: params.userId,
@@ -146,7 +212,6 @@ export async function prepareBatchContextV2(params: {
     : [];
   const combinedSelection = combineFreshAndInventoryTopics(freshSelected, inventorySelected, params.slotCount);
   const selected = combinedSelection.selected;
-  const freshQualified = pool.qualifiedRanked ?? [];
   const selectedFreshFingerprints = new Set(freshSelected.map((item) => inventoryFingerprint(item.fingerprint)));
   const excessFresh = unselectedQualifiedTopics(freshQualified, freshSelected);
   if (freshSelected.length > freshQualified.length) throw new Error('final_selection_invariant:fresh_selected_exceeds_qualified');
@@ -184,11 +249,7 @@ export async function generateSlotPost(
   config: GhostwriterBotConfig,
   acceptedBodies: string[],
   provider: 'OPENAI' | 'GEMINI' = 'OPENAI',
-  options?: {
-    batchFingerprints?: import('./generationTypes').TopicFingerprint[];
-    recentTopicHistory?: import('./topicHistoryService').TopicHistoryRow[];
-    recentPosts?: string[];
-  },
+  options?: SlotGenerationOptions,
 ): Promise<GeneratedSlotResult> {
   return generateSlotPostImpl(
     contentService,
@@ -210,11 +271,7 @@ export async function generateSlotPostUntilSuccess(
   config: GhostwriterBotConfig,
   acceptedBodies: string[],
   provider: 'OPENAI' | 'GEMINI' = 'OPENAI',
-  options?: {
-    batchFingerprints?: import('./generationTypes').TopicFingerprint[];
-    recentTopicHistory?: import('./topicHistoryService').TopicHistoryRow[];
-    recentPosts?: string[];
-  },
+  options?: SlotGenerationOptions,
 ) {
   return generateSlotPostUntilSuccessImpl(
     contentService,

@@ -29,6 +29,7 @@ import {
 } from "./trendPreviewPoolStore";
 import { createGeneratedTopicHistory, loadRecentTopicHistory } from "./topicHistoryService";
 import { fingerprintFromBody } from "./topicFingerprintService";
+import { classifyFinalPostFingerprint } from './finalPostFingerprintClassifier';
 import { jaccardSimilarity } from "./ghostwriterTextUtils";
 import {
   GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
@@ -515,7 +516,13 @@ export class TrendingBotService {
             botConfig,
             acceptedBodies,
             provider,
-            { batchFingerprints, recentTopicHistory: history, recentPosts: [...acceptedBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT) },
+            {
+              batchFingerprints,
+              recentTopicHistory: history,
+              recentPosts: [...acceptedBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT),
+              retainedCollisionCandidate: item.result,
+              originOverride: 'collision_regeneration',
+            },
           );
         }
         acceptedBodies.push(item.result.finalized.body);
@@ -538,8 +545,16 @@ export class TrendingBotService {
           {
             batchId: jobId,
             sourceTitle: trend?.topic ?? plan.sourceTopic ?? undefined,
+            sourceGrounded: !!trend?.link && trend?.sourceType !== 'strategy_derived',
             fingerprint: fingerprintFromBody(result.finalized.body, trend?.topic ?? plan.sourceTopic ?? undefined, plan.angle),
             angle: plan.angle,
+            pillar: trend?.matchedPillar ?? trend?.originNiche ?? trend?.niche,
+            territory: trend?.territory,
+            mechanism: trend?.fingerprint?.mechanisms?.[0],
+            perspective: trend?.audienceRelevance,
+            argumentPattern: plan.layout,
+            authorityMode: trend?.authorityMode,
+            contentIntent: trend?.ideaFamily ?? plan.angle,
           },
           );
           if (trend?.inventoryId) await consumeInventoryTopic(trend.inventoryId, inventoryJobId);
@@ -593,8 +608,16 @@ export class TrendingBotService {
     topicMeta?: {
       batchId?: string;
       sourceTitle?: string;
+      sourceGrounded?: boolean;
       fingerprint: TopicFingerprint;
       angle?: import('./generationTypes').PostAngle;
+      pillar?: string;
+      territory?: string;
+      mechanism?: string;
+      perspective?: string;
+      argumentPattern?: string;
+      authorityMode?: string;
+      contentIntent?: string;
     },
   ) {
     const mediaUrl = await generateBatchPostMediaUrl({
@@ -631,15 +654,44 @@ export class TrendingBotService {
     });
 
     if (topicMeta?.fingerprint) {
-      await createGeneratedTopicHistory({
-        userId,
-        postId: created.id,
-        batchId: topicMeta.batchId,
-        sourceTitle: topicMeta.sourceTitle,
-        fingerprint: topicMeta.fingerprint,
-        angle: topicMeta.angle,
-        knownNewPost: true,
+      const finalClassification = classifyFinalPostFingerprint(finalized.body, {
+        plannedMechanism: topicMeta.mechanism ?? topicMeta.fingerprint.mechanisms[0],
+        plannedIdeaFamily: topicMeta.contentIntent,
+        sourcePresent: !!topicMeta.sourceGrounded,
       });
+      await Promise.all([
+        createGeneratedTopicHistory({
+          userId,
+          postId: created.id,
+          batchId: topicMeta.batchId,
+          sourceTitle: topicMeta.sourceTitle,
+          fingerprint: topicMeta.fingerprint,
+          angle: topicMeta.angle,
+          knownNewPost: true,
+        }),
+        prisma.postContentFingerprint.create({ data: {
+          userId, postId: created.id,
+          primaryTopic: topicMeta.fingerprint.normalizedTopic,
+          subtopic: topicMeta.sourceTitle,
+          pillar: topicMeta.pillar,
+          territory: topicMeta.territory,
+          coreClaim: topicMeta.fingerprint.coreClaim,
+          mechanism: finalClassification.mechanism ?? topicMeta.mechanism ?? topicMeta.fingerprint.mechanisms[0],
+          perspective: finalClassification.perspective,
+          argumentPattern: finalClassification.argumentPattern,
+          structure: finalClassification.structure,
+          hookType: finalClassification.hookType,
+          evidenceType: topicMeta.sourceGrounded ? 'SOURCE_GROUNDED' : 'REASONED_ARGUMENT',
+          ctaType: finalClassification.ctaType,
+          authorityMode: finalClassification.authorityMode,
+          contentIntent: finalClassification.contentIntent,
+          keywords: {
+            entities: topicMeta.fingerprint.entities,
+            endingType: finalClassification.endingType,
+            ideaFamily: finalClassification.ideaFamily,
+          },
+        } }),
+      ]);
     }
 
     console.log(`Created review post with proposed slot ${scheduledAt.toISOString()}`);

@@ -1,4 +1,11 @@
-import type { AuthorContext, ExpressionMode, PostAngle } from './generationTypes';
+import type {
+  AuthorContext,
+  ClaimSource,
+  ExpressionMode,
+  PostAngle,
+  TrendCandidate,
+} from './generationTypes';
+import { detectDeterministicTechnicalIssues } from './ghostwriterValidationService';
 
 const GENERIC_CLAIM_PATTERNS = [
   /\b(?:is|are) (?:very )?(?:important|essential|critical|key|valuable)\b/i,
@@ -10,7 +17,32 @@ const GENERIC_CLAIM_PATTERNS = [
   /\b(?:strong foundation|game[- ]changer|clear takeaway|practical,? focused perspective)\b/i,
 ];
 
-const CLAIM_RELATIONSHIP = /\b(?:because|when|whenever|if|unless|while|before|after|rather than|instead of|depends? on|leads? to|causes?|prevents?|hides?|reveals?|lowers?|raises?|increases?|reduces?|becomes?|fails?|works? only|matters? most)\b|\b(?:is|are)\s+not\b[^.!?]{0,160}(?:\bbut\b|[.!?]\s*(?:it|they|this)\s+(?:is|are)\b)/i;
+const CLAIM_RELATIONSHIP = /\b(?:because|when|whenever|if|unless|until|while|before|after|rather than|instead of|depends? on|leads? to|causes?|prevents?|hides?|reveals?|removes?|lowers?|raises?|increases?|reduces?|becomes?|fails?|works? only|matters? most)\b|\b(?:is|are)\s+not\b[^.!?]{0,160}(?:\bbut\b|[.!?]\s*(?:it|they|this)\s+(?:is|are)\b)/i;
+
+const CLAIM_STOP_WORDS = new Set('a an and are as at be because been but by can do does for from had has have if in into is it its may more most not of on or our should so than that the their them then there these they this to under was we when where which while will with without'.split(' '));
+
+export type ClaimAssessment = {
+  usable: boolean;
+  reasons: string[];
+};
+
+export type ClaimFidelityResult = {
+  faithful: boolean;
+  reasons: string[];
+  selectedTokenCoverage: number;
+};
+
+export function resolveClaimSource(trend?: TrendCandidate | null): ClaimSource {
+  if (!trend) return 'FALLBACK';
+  if (trend.sourceType === 'strategy_derived') return 'STRATEGY_SELECTED';
+  if (
+    trend.sourceType === 'searched'
+    || trend.sourceType === 'source_derived_angle'
+    || trend.ideaOrigin === 'SEARCH_DISCOVERED'
+    || trend.ideaOrigin === 'RECENT_DEVELOPMENT'
+  ) return 'SEARCH_DISCOVERED';
+  return 'LEGACY_TOPIC';
+}
 
 export function isObviouslyGenericClaim(value: string): boolean {
   const claim = value.trim();
@@ -24,10 +56,89 @@ export function isAlreadySpecificClaim(value: string): boolean {
   return CLAIM_RELATIONSHIP.test(claim) || /\b(?:must|needs?|should|shouldn't|cannot|can\s+(?:hide|lower|raise|worsen|fail)|only)\b/i.test(claim);
 }
 
+function hasBalancedDelimiters(value: string): boolean {
+  const pairs: Array<[string, string]> = [['(', ')'], ['[', ']'], ['{', '}']];
+  return pairs.every(([open, close]) => value.split(open).length === value.split(close).length);
+}
+
+export function assessSelectedClaim(value: string): ClaimAssessment {
+  const claim = value.trim();
+  const reasons: string[] = [];
+  const wordCount = claim.split(/\s+/).filter(Boolean).length;
+  if (wordCount < 6 || claim.length < 28) reasons.push('too_vague_or_fragmentary');
+  if (wordCount > 55 || claim.length > 420) reasons.push('too_broad_or_unwieldy');
+  if (isObviouslyGenericClaim(claim)) reasons.push('generic_claim');
+  if (/\b(?:because|when|if|unless|until|while|and|or|to|of|for|with|by)\s*[.!?]*$/i.test(claim)) {
+    reasons.push('grammatically_incomplete');
+  }
+  if (!hasBalancedDelimiters(claim)) reasons.push('unbalanced_delimiters');
+  if (/\b(?:always|never)\b[^.!?]{0,120}\b(?:sometimes|may|might|can)\b/i.test(claim)) {
+    reasons.push('internally_contradictory');
+  }
+  if (detectDeterministicTechnicalIssues(claim).some((issue) => issue.severity === 'error')) {
+    reasons.push('factually_unsafe');
+  }
+  if (!isAlreadySpecificClaim(claim)) reasons.push('not_specific_claim');
+  return { usable: reasons.length === 0, reasons: [...new Set(reasons)] };
+}
+
+function semanticTokens(value: string): Set<string> {
+  return new Set((value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((token) => token.length > 2 && !CLAIM_STOP_WORDS.has(token)));
+}
+
+export function evaluateClaimSemanticFidelity(
+  selectedClaim: string,
+  plannedClaim: string,
+  expectedMechanisms: string[] = [],
+): ClaimFidelityResult {
+  const selected = selectedClaim.trim();
+  const planned = plannedClaim.trim();
+  const reasons: string[] = [];
+  if (!planned || isObviouslyGenericClaim(planned)) reasons.push('planned_claim_is_generic');
+  if (selected.toLowerCase() === planned.toLowerCase()) {
+    return { faithful: reasons.length === 0, reasons, selectedTokenCoverage: 1 };
+  }
+
+  const selectedTokens = semanticTokens(selected);
+  const plannedTokens = semanticTokens(planned);
+  const shared = [...selectedTokens].filter((token) => plannedTokens.has(token)).length;
+  const selectedTokenCoverage = selectedTokens.size ? shared / selectedTokens.size : 0;
+  if (selectedTokens.size >= 3 && selectedTokenCoverage < 0.55) reasons.push('different_subject_or_conclusion');
+
+  const mechanismTokens = semanticTokens(expectedMechanisms.join(' '));
+  if (mechanismTokens.size) {
+    const preservedMechanisms = [...mechanismTokens].filter((token) => plannedTokens.has(token)).length;
+    if (preservedMechanisms / mechanismTokens.size < 0.5) reasons.push('different_mechanism');
+  }
+
+  const selectedNegates = /\b(?:not|never|cannot|without|instead of|rather than)\b/i.test(selected);
+  const plannedNegates = /\b(?:not|never|cannot|without|instead of|rather than)\b/i.test(planned);
+  if (selectedNegates !== plannedNegates && selectedTokenCoverage < 0.8) reasons.push('changed_claim_direction');
+
+  return { faithful: reasons.length === 0, reasons, selectedTokenCoverage };
+}
+
+export function canLockSelectedClaim(
+  claim: string,
+  trend?: TrendCandidate | null,
+): boolean {
+  if (!assessSelectedClaim(claim).usable) return false;
+  if (trend?.searchRequired && !trend.summary?.trim() && !(trend.keyPoints?.length) && !trend.link) return false;
+  return true;
+}
+
 function normalizedTopic(value: string): string {
   const trimmed = (value.trim() || 'the topic').replace(/[.!?]+$/, '');
   const whyMatters = trimmed.match(/^why\s+(.+?)\s+matters(?:\s+for\s+.+)?$/i);
-  return (whyMatters?.[1] ?? trimmed).trim();
+  const normalized = (whyMatters?.[1] ?? trimmed).trim();
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (
+    words.length > 14
+    || /[;:]/.test(normalized)
+    || /\b(?:because|when|unless|until|rather than|instead of)\b/i.test(normalized)
+  ) return 'the selected approach';
+  return normalized;
 }
 
 function audienceHint(author?: AuthorContext): string {
@@ -43,8 +154,8 @@ export function deriveNarrowCentralClaim(input: {
   candidateClaim?: string | null;
 }): string {
   const candidate = input.candidateClaim?.trim() ?? '';
-  if (isAlreadySpecificClaim(candidate)) return candidate;
-  if (!candidate && isAlreadySpecificClaim(input.topic)) return input.topic.trim();
+  if (assessSelectedClaim(candidate).usable) return candidate;
+  if (!candidate && assessSelectedClaim(input.topic).usable) return input.topic.trim();
 
   const topic = normalizedTopic(input.topic);
   const audience = audienceHint(input.author);

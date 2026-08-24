@@ -117,6 +117,13 @@ export type TrendCandidate = {
   strategyRiskFlags?: string[];
   qualificationConfidence?: number;
   sourceType?: 'searched' | 'strategy_derived' | 'source_derived_angle';
+  ideaOrigin?: IdeaOrigin;
+  territory?: string;
+  ideaFamily?: string;
+  authorityMode?: import('./contentIntelligenceService').AuthorityMode;
+  searchRequired?: boolean;
+  ideaQualityScore?: number;
+  saturationPenalty?: number;
   selectionMode?: 'normal' | 'zero_result_fallback';
   discoveryIntent?: DiscoveryIntent;
   evidenceRole?: EvidenceRole;
@@ -131,6 +138,8 @@ export type TrendCandidate = {
   queryIntent?: DiscoveryIntent;
   originatingSource?: TrendSource;
 };
+
+export type IdeaOrigin = 'STRATEGY_DERIVED' | 'AUDIENCE_PROBLEM' | 'EVERGREEN' | 'SEARCH_DISCOVERED' | 'RECENT_DEVELOPMENT' | 'CROSS_PILLAR' | 'PERFORMANCE_DERIVED' | 'USER_REQUESTED';
 
 export type NormalizedContentPillar = {
   originalPillar: string;
@@ -382,6 +391,7 @@ export type AuthorContext = {
   niches?: string[];
   targetAudience?: string[];
   strategy?: import('./botStrategyService').EffectiveBotStrategy;
+  contentIntelligence?: import('./contentIntelligenceService').ContentIntelligenceProfile;
 };
 
 export type ExpressionMode = 'direct' | 'analytical' | 'diagnostic' | 'conversational' | 'opinionated' | 'walkthrough' | 'reflective';
@@ -428,6 +438,19 @@ export type PostDepthPlan = {
   avoidIdeas: string[];
 };
 
+export type PostDepth = 'COMPACT' | 'STANDARD' | 'DEEP';
+
+export type PostTargetLengthRange = {
+  min: number;
+  max: number;
+};
+
+export type ClaimSource =
+  | 'STRATEGY_SELECTED'
+  | 'SEARCH_DISCOVERED'
+  | 'LEGACY_TOPIC'
+  | 'FALLBACK';
+
 export type BatchPostPlan = {
   trendIndex: number | null;
   sourceTopic: string | null;
@@ -441,12 +464,20 @@ export type BatchPostPlan = {
   normalizedTopic?: string;
   coreClaim?: string;
   centralClaim?: string;
+  /** Where the pre-planning claim came from and therefore how strongly it should be preserved. */
+  claimSource?: ClaimSource;
+  /** Immutable semantic reference used to detect or restore planner drift. */
+  selectedCentralClaim?: string;
   mechanismFocus?: string[];
   matchedPillar?: string;
   suggestedAngle?: string;
   audienceRelevance?: string;
   expressionMode?: ExpressionMode;
   depthPlan?: PostDepthPlan;
+  /** Runtime-only execution metadata. It is derived from the idea/plan, not user configuration. */
+  depthClass?: PostDepth;
+  /** Soft drafting range. Only LinkedIn's 3,000-character maximum is a universal hard maximum. */
+  targetLengthRange?: PostTargetLengthRange;
 };
 
 export type ImageContentMode =
@@ -505,6 +536,14 @@ export type TechnicalReviewIssueCode =
   | 'background_job_overclaim'
   | 'guaranteed_outcome'
   | 'unsupported_personal_claim'
+  | 'REDUNDANT_EXPLANATION'
+  | 'LOW_INFORMATION_DENSITY'
+  | 'GENERIC_SCENARIO_STRUCTURE'
+  | 'GENERIC_CHECKLIST_EXPANSION'
+  | 'THESIS_RESTATEMENT'
+  | 'WEAK_ARGUMENT_PROGRESSION'
+  | 'GENERIC_ENGAGEMENT_ENDING'
+  | 'CLAIM_DRIFT'
   | 'other';
 
 export type TechnicalReviewIssue = {
@@ -516,8 +555,15 @@ export type TechnicalReviewIssue = {
 };
 
 export type TechnicalReviewResult = {
+  /** False means the model response could not be parsed; deterministic checks remain authoritative. */
+  available?: boolean;
   passed: boolean;
   confidence: number;
+  informationDensity?: number;
+  progressionQuality?: number;
+  redundancyRisk?: number;
+  genericDiscourseRisk?: number;
+  claimFidelity?: number;
   issues: TechnicalReviewIssue[];
 };
 

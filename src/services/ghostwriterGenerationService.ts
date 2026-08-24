@@ -16,7 +16,6 @@ import { finalizeGeneratedPostContent } from './postContentFormatting';
 import { normalizeLinkedInLineBody, validateLinkedInFormatting } from './linkedinLineFormatting';
 import {
   buildSafeFallbackImageContent,
-  canForceAcceptBlockingCodes,
   detectUnsupportedFirstPersonClaims,
   filterBlockingIssues,
   issuesToRepairInput,
@@ -28,6 +27,13 @@ import {
 import { normalizeHashtags } from './postContentFormatting';
 import type { GhostwriterBotConfig } from './ghostwriterPipeline';
 import { estimatePromptTokens, logGenerationTelemetry } from './generationTelemetry';
+import { evaluateGeneratedPostLength } from './generatedPostLength';
+import { resolvePostDepthMetadata } from './postDepth';
+import {
+  SlotCandidatePool,
+  type CandidateObservation,
+  type SlotCandidateOrigin,
+} from './ghostwriterCandidateSelection';
 
 export const MAX_FRESH_GENERATIONS = 3;
 export const MAX_TARGETED_REPAIRS_PER_GENERATION = 2;
@@ -62,6 +68,9 @@ export type SlotGenerationOptions = {
   batchFingerprints?: TopicFingerprint[];
   recentTopicHistory?: TopicHistoryRow[];
   recentPosts?: string[];
+  candidatePool?: SlotCandidatePool;
+  retainedCollisionCandidate?: Extract<GeneratedSlotResult, { ok: true }>;
+  originOverride?: SlotCandidateOrigin;
 };
 
 function mergeIssues(...groups: QualityIssue[][]): QualityIssue[] {
@@ -91,21 +100,55 @@ function isSpecificityOnlyBlocking(blocking: QualityIssue[]): boolean {
   return blocking.length > 0 && blocking.every((i) => i.code === 'insufficient_specificity');
 }
 
-function buildAcceptanceDecision(params: {
+export function buildAcceptanceDecision(params: {
   deterministic: ReturnType<typeof runDeterministicValidation>;
   technicalReview: TechnicalReviewResult;
   blocking: QualityIssue[];
   warnings: QualityIssue[];
 }): SlotAcceptanceDecision {
+  const reviewAvailable = params.technicalReview.available !== false;
+  const semanticQuality = reviewAvailable
+    ? Math.round((
+      (params.technicalReview.informationDensity ?? 100)
+      + (params.technicalReview.progressionQuality ?? 100)
+      + (100 - (params.technicalReview.redundancyRisk ?? 0))
+      + (100 - (params.technicalReview.genericDiscourseRisk ?? 0))
+      + (params.technicalReview.claimFidelity ?? 100)
+    ) / 5)
+    : params.deterministic.deterministicScore;
   return {
-    accepted: params.blocking.length === 0 && params.technicalReview.passed,
+    accepted: params.blocking.length === 0 && (!reviewAvailable || params.technicalReview.passed),
     deterministicScore: params.deterministic.deterministicScore,
     specificityScore: params.deterministic.specificity?.score ?? 0,
-    qualityScore: params.deterministic.deterministicScore,
-    technicalPassed: params.technicalReview.passed,
+    qualityScore: Math.min(params.deterministic.deterministicScore, semanticQuality),
+    technicalPassed: reviewAvailable && params.technicalReview.passed,
     blockingIssueCodes: params.blocking.map((i) => i.code),
     warningIssueCodes: params.warnings.map((i) => i.code),
   };
+}
+
+const REVIEWABLE_DETERMINISTIC_CODES = new Set([
+  'generated_post_too_short',
+  'generated_post_too_long',
+  'insufficient_specificity',
+  'SEMANTIC_REPETITION',
+  'ARGUMENT_STAGNATION',
+  'ENUMERATION_WITHOUT_INTERPRETATION',
+  'CONCLUSION_RESTATES_THESIS',
+  'FORCED_NICHE_PARAGRAPH',
+  'GENERIC_RECOMMENDATION_ENDING',
+  'GENERIC_SCENARIO_STRUCTURE',
+  'GENERIC_CHECKLIST_EXPANSION',
+  'GENERIC_ENGAGEMENT_ENDING',
+  'generic_ending',
+]);
+
+/** Semantic review remains reachable for repairable quality issues, but not unsafe or unusable drafts. */
+export function shouldRunTechnicalReview(
+  deterministic: ReturnType<typeof runDeterministicValidation>,
+): boolean {
+  const errors = deterministic.issues.filter((issue) => issue.severity === 'error');
+  return errors.length === 0 || errors.every((issue) => REVIEWABLE_DETERMINISTIC_CODES.has(issue.code));
 }
 
 async function runTechnicalReview(
@@ -198,8 +241,15 @@ function logSlotDecision(
 }
 
 type TryAcceptOutcome =
-  | { accepted: true; result: Extract<GeneratedSlotResult, { ok: true }> }
-  | { accepted: false; acceptance: SlotAcceptanceDecision };
+  | { accepted: true; result: Extract<GeneratedSlotResult, { ok: true }>; observation: Omit<CandidateObservation, 'origin'> }
+  | {
+      accepted: false;
+      acceptance: SlotAcceptanceDecision;
+      deterministic: ReturnType<typeof runDeterministicValidation>;
+      technicalReview: TechnicalReviewResult;
+      issues: QualityIssue[];
+      observation: Omit<CandidateObservation, 'origin'>;
+    };
 
 async function tryAcceptPost(
   contentService: ContentService,
@@ -219,19 +269,9 @@ async function tryAcceptPost(
     history: slotOptions?.recentTopicHistory,
     enforceLength: true,
   });
-  let technicalReview: TechnicalReviewResult = { passed: true, confidence: 1, issues: [] };
-  if (deterministic.passed) {
+  let technicalReview: TechnicalReviewResult = { available: false, passed: false, confidence: 0, issues: [] };
+  if (shouldRunTechnicalReview(deterministic)) {
     technicalReview = await runTechnicalReview(contentService, generated, author, plan, provider);
-  }
-
-  const allIssues = mergeIssues(deterministic.issues, technicalToQuality(technicalReview.issues));
-  const blocking = filterBlockingIssues(allIssues, slotAttemptIndex(counters));
-  const warnings = allIssues.filter((i) => i.severity === 'warning');
-  const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
-
-  if (blocking.length > 0) {
-    logSlotDecision(sourceTitle, plan, counters, acceptance);
-    return { accepted: false, acceptance };
   }
 
   const finalized = finalizeGeneratedPostContent(generated, sourceTitle, {
@@ -248,15 +288,32 @@ async function tryAcceptPost(
     includeContactInfo: !!config.includeContactInfo,
     includeWebsiteLink: !!config.includeWebsiteLink,
   }).filter((i) => i.severity === 'error');
+  const authorityIssues: QualityIssue[] = detectUnsupportedFirstPersonClaims(finalized.body, author.description).length
+    ? [{ code: 'unsupported_first_person_after_format', severity: 'error' }]
+    : [];
+  const linkedInIssues = validateLinkedInFormatting(finalized.body)
+    .filter((issue) => issue.severity === 'error')
+    .map((issue) => ({ code: issue.code, severity: 'error' as const }));
+  const allIssues = mergeIssues(
+    deterministic.issues,
+    technicalToQuality(technicalReview.issues),
+    formatIssues,
+    authorityIssues,
+    linkedInIssues,
+  );
+  const blocking = filterBlockingIssues(allIssues, slotAttemptIndex(counters));
+  const warnings = allIssues.filter((i) => i.severity === 'warning');
+  const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
+  const observation = { generated, finalized, acceptance, technicalReview, issues: allIssues, plan };
 
-  if (formatIssues.length || detectUnsupportedFirstPersonClaims(finalized.body, author.description).length) {
+  if (blocking.length > 0 || formatIssues.length || authorityIssues.length) {
     logSlotDecision(sourceTitle, plan, counters, acceptance);
-    return { accepted: false, acceptance };
+    return { accepted: false, acceptance, deterministic, technicalReview, issues: allIssues, observation };
   }
 
-  if (validateLinkedInFormatting(finalized.body).some((i) => i.severity === 'error')) {
+  if (linkedInIssues.length) {
     logSlotDecision(sourceTitle, plan, counters, acceptance);
-    return { accepted: false, acceptance };
+    return { accepted: false, acceptance, deterministic, technicalReview, issues: allIssues, observation };
   }
 
   const { imageContent, issues: imageIssues } = config.imageMode === 'providedBackground'
@@ -266,6 +323,7 @@ async function tryAcceptPost(
 
   return {
     accepted: true,
+    observation,
     result: {
       ok: true,
       finalized,
@@ -291,10 +349,28 @@ export async function generateSlotPost(
 ): Promise<GeneratedSlotResult> {
   const sourceTitle = trend?.topic ?? plan.sourceTopic ?? 'Author expertise';
   const sourceLink = trend?.link ?? '';
+  const candidatePool = slotOptions?.candidatePool ?? new SlotCandidatePool();
   let lastAcceptance: SlotAcceptanceDecision | undefined;
-  let lastCandidate: ReturnType<typeof finalizeGeneratedPostContent> | null = null;
-  let lastGenerated: GeneratedPostContent | null = null;
   let initialLength = 0;
+
+  if (slotOptions?.retainedCollisionCandidate) {
+    const retained = slotOptions.retainedCollisionCandidate;
+    candidatePool.add({
+      origin: 'collision_prior',
+      generated: {
+        headline: retained.finalized.headline,
+        subheadline: retained.finalized.subheadline,
+        bulletPoints: retained.finalized.bulletPoints,
+        body: retained.finalized.body,
+        hashtags: retained.finalized.hashtags,
+      },
+      finalized: retained.finalized,
+      acceptance: retained.acceptance,
+      technicalReview: { available: false, passed: false, confidence: 0, issues: [] },
+      issues: [{ code: 'batch_similarity', severity: 'error' }],
+      plan,
+    });
+  }
 
   for (let fresh = 1; fresh <= MAX_FRESH_GENERATIONS; fresh++) {
     const counters: AttemptCounters = {
@@ -321,7 +397,6 @@ export async function generateSlotPost(
       continue;
     }
 
-    lastGenerated = generated;
     if (initialLength === 0) {
       initialLength = finalizeGeneratedPostContent(generated, sourceTitle, {
         topic: sourceTitle,
@@ -333,7 +408,8 @@ export async function generateSlotPost(
       }).content.length;
     }
 
-    lastGenerated = generated;
+    let currentOrigin: SlotCandidateOrigin = slotOptions?.originOverride
+      ?? (fresh === 1 ? 'initial_draft' : 'fresh_regeneration');
 
     for (let repairRound = 0; repairRound <= MAX_TARGETED_REPAIRS_PER_GENERATION; repairRound++) {
       const attempt = await tryAcceptPost(
@@ -348,6 +424,10 @@ export async function generateSlotPost(
         { ...counters, contentRepairAttempt: repairRound },
         slotOptions,
       );
+      const observedOrigin = slotAttemptIndex({ ...counters, contentRepairAttempt: repairRound }) >= 7
+        ? 'late_retry'
+        : currentOrigin;
+      const rankedCandidate = candidatePool.add({ ...attempt.observation, origin: observedOrigin });
       lastAcceptance = attempt.accepted ? attempt.result.acceptance : attempt.acceptance;
       if (attempt.accepted) {
         console.log('[ghostwriter] post accepted', { sourceTitle: sourceTitle.slice(0, 60), angle: plan.angle, expressionMode: plan.expressionMode, freshGenerationAttempt: fresh, provider });
@@ -372,28 +452,33 @@ export async function generateSlotPost(
           repairTriggered: repairRound > 0,
           repairAccepted: repairRound > 0,
           repairRejected: false,
-          minimumLengthSatisfied: attempt.result.finalized.content.length >= 1600 && attempt.result.finalized.content.length <= 3000,
+          minimumLengthSatisfied: (() => {
+            const depth = resolvePostDepthMetadata(plan);
+            return !['TOO_SHORT', 'TOO_LONG'].includes(evaluateGeneratedPostLength(
+              attempt.result.finalized.content,
+              depth.targetLengthRange,
+              depth.minimumCompleteLength,
+            ));
+          })(),
           plannerFallbackUsed: false,
           plannerValidationFailureReason: null,
+          ...candidatePool.summary(),
         });
-        return attempt.result;
+        const best = candidatePool.best();
+        if (!best || best === rankedCandidate) return attempt.result;
+        return {
+          ...attempt.result,
+          finalized: best.finalized,
+          imageContent: buildSafeFallbackImageContent(best.finalized),
+          qualityScore: best.acceptance.qualityScore,
+          acceptance: best.acceptance,
+        };
       }
 
       if (repairRound >= MAX_TARGETED_REPAIRS_PER_GENERATION) break;
 
-      const deterministic = runDeterministicValidation(generated, author, plan, acceptedBodies, {
-        sourceTitle,
-        batchFingerprints: slotOptions?.batchFingerprints,
-        history: slotOptions?.recentTopicHistory,
-        enforceLength: true,
-      });
-      const blocking = deterministic.issues.filter((i) => i.severity === 'error');
-      lastAcceptance = buildAcceptanceDecision({
-        deterministic,
-        technicalReview: { passed: false, confidence: 0, issues: [] },
-        blocking,
-        warnings: deterministic.issues.filter((i) => i.severity === 'warning'),
-      });
+      const deterministic = attempt.deterministic;
+      const blocking = attempt.issues.filter((i) => i.severity === 'error');
 
       counters.contentRepairAttempt = repairRound + 1;
       try {
@@ -402,61 +487,43 @@ export async function generateSlotPost(
             await contentService.expandSpecificity(generated, deterministic.specificity, author, plan, provider),
             sourceTitle,
           );
+          currentOrigin = 'specificity_expansion';
         } else {
-          const technicalReview = deterministic.passed
-            ? await runTechnicalReview(contentService, generated, author, plan, provider)
-            : { passed: false, confidence: 0, issues: [] as TechnicalReviewResult['issues'] };
           generated = applyLinkedInFormatting(
             await contentService.repairPost(
               generated,
-              [...issuesToRepairInput(deterministic.issues), ...technicalReview.issues],
+              issuesToRepairInput(attempt.issues),
               author,
               provider,
               plan,
             ),
             sourceTitle,
           );
+          currentOrigin = 'targeted_repair';
         }
       } catch {
         break;
       }
-      lastGenerated = generated;
-    }
-
-    if (lastGenerated) {
-      lastCandidate = finalizeGeneratedPostContent(lastGenerated, sourceTitle, {
-        topic: sourceTitle,
-        includeContactInfo: !!config.includeContactInfo,
-        includeWebsiteLink: !!config.includeWebsiteLink,
-        contactInfo: config.contactInfo,
-        websiteUrl: config.websiteUrl,
-        description: config.description,
-       
-      });
     }
   }
 
-  const forceAccept = lastCandidate && lastAcceptance && (
-    isSpecificityOnlyBlocking(
-      lastAcceptance.blockingIssueCodes.map((code) => ({ code, severity: 'error' as const })),
-    )
-    || canForceAcceptBlockingCodes(lastAcceptance.blockingIssueCodes)
-  );
-
-  if (forceAccept) {
-    console.warn('[ghostwriter] slot force-accepted after quality gate', {
+  const bestUsableCandidate = candidatePool.best();
+  if (bestUsableCandidate) {
+    const summary = candidatePool.summary();
+    console.warn('[ghostwriter] slot returning best usable candidate after quality gate', {
       sourceTitle: sourceTitle.slice(0, 60),
-      blockingIssueCodes: lastAcceptance!.blockingIssueCodes,
+      blockingIssueCodes: bestUsableCandidate.acceptance.blockingIssueCodes,
+      ...summary,
     });
     return {
       ok: true,
-      finalized: lastCandidate!,
-      imageContent: buildSafeFallbackImageContent(lastCandidate!),
+      finalized: bestUsableCandidate.finalized,
+      imageContent: buildSafeFallbackImageContent(bestUsableCandidate.finalized),
       sourceTitle,
       plan,
-      qualityScore: lastAcceptance!.qualityScore,
+      qualityScore: bestUsableCandidate.acceptance.qualityScore,
       attempts: MAX_FRESH_GENERATIONS,
-      acceptance: lastAcceptance!,
+      acceptance: bestUsableCandidate.acceptance,
     };
   }
 
@@ -479,6 +546,7 @@ export async function generateSlotPostUntilSuccess(
   slotOptions?: SlotGenerationOptions,
 ): Promise<Extract<GeneratedSlotResult, { ok: true }>> {
   let lastFailure: Extract<GeneratedSlotResult, { ok: false }> | undefined;
+  const candidatePool = slotOptions?.candidatePool ?? new SlotCandidatePool();
   for (let round = 1; round <= MAX_QUOTA_FILL_ROUNDS; round++) {
     const result = await generateSlotPost(
       contentService,
@@ -488,7 +556,11 @@ export async function generateSlotPostUntilSuccess(
       config,
       acceptedBodies,
       provider,
-      slotOptions,
+      {
+        ...slotOptions,
+        candidatePool,
+        retainedCollisionCandidate: round === 1 ? slotOptions?.retainedCollisionCandidate : undefined,
+      },
     );
     if (result.ok) return result;
     lastFailure = result;

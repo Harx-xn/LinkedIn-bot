@@ -112,7 +112,7 @@ export function buildExpressionModePromptBlock(mode: ExpressionMode | undefined,
   if (!mode) return '';
   const recent = recentPosts.slice(0, RECENT_STYLE_POST_LIMIT).map(compactRecentPostFingerprint).join('\n');
   return `EXPRESSION MODE: ${mode.toUpperCase()}
-The fixed CENTRAL CLAIM controls the argument; this mode controls its rhetorical movement and stopping behavior.
+The SELECTED CENTRAL CLAIM controls the argument; this mode controls its rhetorical movement and stopping behavior.
 ${MODE_RULES[mode].map((rule) => `- ${rule}`).join('\n')}
 - Keep the author's identity stable. Saved style: ${(strategy?.writingStyle.tone ?? []).join(', ') || 'supplied author tone'}; ${strategy?.writingStyle.formality ?? 'balanced'} formality; ${strategy?.writingStyle.postLength ?? 'medium'} preferred length.
 - Use only the rhetorical moves the claim needs. Examples, scenarios, advice, questions, and conclusions are optional.

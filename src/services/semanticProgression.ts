@@ -25,7 +25,10 @@ export type SemanticProgressionCode =
   | 'ENUMERATION_WITHOUT_INTERPRETATION'
   | 'CONCLUSION_RESTATES_THESIS'
   | 'FORCED_NICHE_PARAGRAPH'
-  | 'GENERIC_RECOMMENDATION_ENDING';
+  | 'GENERIC_RECOMMENDATION_ENDING'
+  | 'GENERIC_SCENARIO_STRUCTURE'
+  | 'GENERIC_CHECKLIST_EXPANSION'
+  | 'GENERIC_ENGAGEMENT_ENDING';
 
 export function evaluateSemanticProgression(
   content: string,
@@ -68,6 +71,26 @@ export function evaluateSemanticProgression(
   if (/^(?:therefore,? (?:organizations|teams|businesses) should|by (?:fostering|embracing|prioritizing)|the key takeaway is|ultimately,?|in conclusion,?|this (?:will|can) help (?:organizations|teams|businesses))/i.test(ending)) {
     issues.push('ends with a generic recommendation or summary transition');
     codes.push('GENERIC_RECOMMENDATION_ENDING');
+  }
+  const genericMoves = [
+    /\b(?:today(?:'s)?|modern|rapidly changing|evolving) (?:world|landscape|environment)\b/i,
+    /\b(?:the (?:issue|challenge|problem) (?:lies|is)|a common challenge|this creates? a tension)\b/i,
+    /\b(?:consider|imagine|picture) (?:a |the )?(?:scenario|situation|team|company|organization)\b/i,
+    /\b(?:to (?:address|mitigate|navigate|overcome) (?:this|these)|practical steps|actionable steps|steps (?:teams|leaders|organizations) can take)\b/i,
+    /\b(?:the key is|finding|strike|striking) (?:the )?(?:right |proper )?balance\b/i,
+  ].filter((pattern) => pattern.test(content)).length;
+  if (genericMoves >= 3) {
+    issues.push('follows a generic article sequence instead of advancing a specific argument');
+    codes.push('GENERIC_SCENARIO_STRUCTURE');
+  }
+  const checklistLead = /\b(?:here (?:are|is)|start with|follow these|practical|actionable)\b.{0,35}\b(?:steps|tips|practices|ways|checklist)\b/is.test(content);
+  if (!options.allowEnumeration && checklistLead && enumeratedLines >= 3 && !interpretationSignals) {
+    issues.push('expands a generic recommendation into a checklist without adding reasoning');
+    codes.push('GENERIC_CHECKLIST_EXPANSION');
+  }
+  if (/\b(?:what|which|how) (?:approaches|strategies|methods|practices|steps).{0,45}(?:worked|effective|use|recommend|found)\b[?]?$/i.test(ending)) {
+    issues.push('ends with a generic engagement question');
+    codes.push('GENERIC_ENGAGEMENT_ENDING');
   }
   if (paragraphs.length >= 4 && !interpretationSignals && !options.allowEnumeration) {
     issues.push('argument accumulates points without a clear interpretive move');

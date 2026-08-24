@@ -25,6 +25,13 @@ describe('generated post length policy', () => {
     assert.equal(MAX_LENGTH_REPAIR_ATTEMPTS, 2);
   });
 
+  it('uses plan-aware completion repair without inflating to the legacy target', () => {
+    const instruction = buildLengthRepairInstruction('TOO_SHORT', { min: 600, max: 1100 });
+    assert.match(instruction, /600–1,100/);
+    assert.match(instruction, /Stop as soon as the missing substance is complete/);
+    assert.doesNotMatch(instruction, /1,800–2,300/);
+  });
+
   it('recognizes explicit shortening rewrites', () => {
     assert.equal(isExplicitShorteningInstruction('make this shorter'), true);
     assert.equal(isExplicitShorteningInstruction('Please make it more concise'), true);

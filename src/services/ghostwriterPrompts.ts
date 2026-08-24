@@ -1,5 +1,6 @@
 import type { AuthorContext, BatchPostPlan, GeneratedPostContent, QualityIssue, SpecificityResult, TechnicalReviewIssue, TrendCandidate } from './generationTypes';
 import { buildExpressionModePromptBlock } from './expressionModeService';
+import { resolvePostDepthMetadata } from './postDepth';
 
 export const TECHNICAL_DISTINCTIONS = `TECHNICAL ACCURACY DISTINCTIONS:
 
@@ -52,7 +53,7 @@ export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
 - Dwell quality: provide appropriate depth and concrete value without filler. A compact post can be complete without staged progression.
 - Conversational potential: make the idea worth discussing without requiring a question, CTA, or explicit conclusion.
 - Credibility/proof: use supplied proof when available; otherwise use sound technical reasoning. Use a concrete example or labeled hypothetical only when it materially helps.
-- Length: normally target approximately 1,800–2,500 characters, with at least 1,600 and no more than 3,000 characters. Add length only through useful reasoning, examples, specificity, contrast, implications, or narrative development; never use repetition, filler, or generic advice.
+- Length: let idea complexity, completeness, and information density determine the natural stopping point. Follow any generation-mode depth or length contract supplied below. Never add repetition, filler, generic advice, or optional sections to reach a character target. LinkedIn's 3,000-character maximum remains hard.
 - Formatting: never use Markdown bold markers or double asterisks. Do not include ** anywhere in the output.`;
 
  export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
@@ -130,6 +131,7 @@ ${TECHNICAL_DISTINCTIONS}`;
 
 export function buildAuthorBlock(author: AuthorContext, options: { includeQualityContext?: boolean } = {}): string {
   const niches = (author.niches ?? []).join(', ') || 'general technology';
+  const intelligence = author.contentIntelligence;
   const audience = (author.targetAudience ?? []).join(', ') || 'builders and operators';
   const strategy = author.strategy;
   const strategyBlock = strategy ? `
@@ -144,6 +146,9 @@ STRATEGY CONTEXT (use for topic angle and audience fit):
     ...strategy.contentPillars.primaryPillars.map((pillar) => pillar.name),
     ...strategy.contentPillars.secondaryPillars.map((pillar) => pillar.name),
   ].join(', ') || niches}
+${intelligence ? `- Positioning promise: ${intelligence.identity.contentPromise}
+- Credibility boundaries: ${intelligence.identity.credibilityBoundaries.join('; ')}
+- Authority rule: a configured niche indicates intended subject matter, not personal experience or comprehensive expertise. Use neutral or exploratory framing unless explicit author evidence supports stronger authority.` : ''}
 - Excluded topics: ${strategy.contentPillars.excludedTopics.join(', ') || 'none specified'}
 - Rejected patterns: ${strategy.topicRules.rejectedPatterns.join(', ') || 'none specified'}
 - Writing style: ${strategy.writingStyle.tone.join(', ') || author.tone}; formality ${strategy.writingStyle.formality}; length ${strategy.writingStyle.postLength}; formats ${strategy.writingStyle.preferredFormats.join(', ') || 'use existing LinkedIn formatting rules'}
@@ -263,11 +268,14 @@ Rules:
 export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null, recentPosts: string[] = [], author?: AuthorContext): string {
   const centralClaim = plan.centralClaim ?? plan.coreClaim ?? plan.sourceTopic ?? 'Develop one narrow claim from the source topic.';
   const depth = plan.depthPlan;
+  const { depthClass, targetLengthRange } = resolvePostDepthMetadata(plan);
   return `
 ${buildSourceEvidenceBlock(trend)}
 ${buildAngleSpecificityBlock(plan)}
 ASSIGNED BATCH PLAN:
-- CENTRAL CLAIM (fixed): ${centralClaim}
+- Claim provenance: ${plan.claimSource ?? 'LEGACY_TOPIC'}
+- SELECTED CENTRAL CLAIM — PRESERVE THIS MEANING: ${centralClaim}
+- This is the primary semantic contract for the post. Do not broaden it, substitute a different mechanism, reverse its conclusion, or change its audience implication.
 - Angle: ${plan.angle}
 - Optional hook hint: ${plan.hookStyle}
 - Optional ending preference: ${plan.endingStyle} (use only when the Expression Mode and completed idea benefit from an explicit ending)
@@ -275,6 +283,14 @@ ASSIGNED BATCH PLAN:
 - Source topic (inspiration only): ${plan.sourceTopic ?? 'evergreen author expertise'}
 - Rationale: ${plan.rationale}
 ${sourceLink ? `- Reference link (do not summarize unless directly relevant): ${sourceLink}` : ''}
+
+DEPTH AND LENGTH CONTRACT:
+- Depth class: ${depthClass}
+- Soft guidance range: approximately ${targetLengthRange.min}–${targetLengthRange.max} characters
+- The range guides drafting; it is not a quota. Information density and claim completeness determine when to stop.
+- Do not add examples, checklists, qualifications, failure modes, CTAs, conclusions, or additional paragraphs merely to reach a target length.
+- A concise LinkedIn-native post is explicitly allowed for COMPACT ideas. STANDARD ideas should develop only their necessary reasoning. DEEP ideas may use longer treatment when the assigned substance justifies it.
+- Never exceed LinkedIn's hard 3,000-character maximum.
 
 DEPTH PLAN — use as intellectual backbone, not a mandatory section template:
 - Strongest observations (maximum three): ${depth?.strongestObservations.join(' | ') || '(none planned)'}
@@ -287,7 +303,7 @@ DEPTH PLAN — use as intellectual backbone, not a mandatory section template:
 - Avoid ideas: ${depth?.avoidIdeas.join(' | ') || '(none listed)'}
 
 The source is inspiration only. Transform it into an author-relevant ${plan.angle.replace(/_/g, ' ')} post.
-Develop the fixed CENTRAL CLAIM above. Do not broaden it, replace it with a general topic summary, or introduce a second thesis.
+Develop the SELECTED CENTRAL CLAIM above. Do not broaden it, replace it with a general topic summary, or introduce a second thesis.
 This post exists to develop that claim, not to cover the broader category.
 Every major paragraph must support, explain, challenge, illustrate, qualify, or apply it.
 Do not turn it into a checklist of adjacent benefits, risks, best practices, or subtopics unless the selected angle, layout, or Expression Mode explicitly calls for a list or walkthrough. Depth on one relevant point is better than breadth.
@@ -331,7 +347,7 @@ ${plan ? buildPlanBlock(plan) : ''}
 
 Repair the post as a clean final draft while preserving its successful rhetorical shape.
 
-Preserve the fixed CENTRAL CLAIM, assigned angle, and verified facts.
+Preserve the SELECTED CENTRAL CLAIM and its meaning, assigned angle, and verified facts.
 Do not preserve sentence structure when it causes awkward or contradictory prose.
 Address every listed issue.
 Do not invent personal experiences, results, users, metrics, or project history.
@@ -356,7 +372,7 @@ ISSUES:
 ${formatStructuredIssues(structured)}
 
 ${isShortLengthRepair && plan ? `LENGTH REPAIR DEPTH CHECK:
-Use the approved Depth Plan above. Identify which useful planned dimension is missing or underdeveloped, then add only that material. Do not invent a new adjacent argument or expand an idea that is already clear.` : ''}
+Use the approved Depth Plan above. Identify which useful planned dimension is missing or underdeveloped, then add only that material. Do not invent a new adjacent argument or expand an idea that is already clear. Stop when the missing substance is complete; do not inflate the draft to reach the soft range.` : ''}
 
 ORIGINAL POST:
 ${post.body}
@@ -394,7 +410,7 @@ ${buildPlanBlock(plan, undefined)}
 ${SPECIFICITY_RULES}
 ${LINKEDIN_LINE_FORMAT_RULES}
 
-Make this post concretely useful without changing the fixed CENTRAL CLAIM or expanding its rhetorical structure.
+Make this post concretely useful without changing the SELECTED CENTRAL CLAIM or expanding its rhetorical structure.
 
 Current signals: ${(specificity?.signals ?? []).join(', ') || 'none'}
 Missing signals: ${(specificity?.missing ?? []).join(', ') || 'unknown'}
@@ -515,10 +531,22 @@ export function buildTechnicalReviewPrompt(
   author: AuthorContext,
   plan: BatchPostPlan,
 ): string {
-  return `Review the post as a senior backend and SaaS engineer.
+  return `Review the post as a senior technical editor and domain-generic argument reviewer.
 
 Identify conceptual errors, misleading simplifications, unsupported guarantees,
 and missing distinctions that materially affect technical accuracy.
+
+Also judge information gain. A section advances the post only when it adds a new causal mechanism,
+constraint, consequence, counterpoint, evidence item, decision-relevant implication, implementation
+detail, or qualification that materially changes the claim. Transition words, synonym swaps, examples
+that merely prove the thesis again, and checklists that restate it do not count as progression.
+
+Distinguish claim → mechanism → new consequence → useful implication from an elaborated repetition of
+claim → paraphrase → generic example → paraphrase with "because" → generic checklist.
+
+Detect generic discourse by rhetorical structure, not exact phrases: broad category intro → vague tension
+→ announced scenario → practical steps → balanced summary → engagement question. Do not penalize a concise,
+dense post merely because it has few paragraphs. Longer posts must earn their length with information gain.
 
 Do not reject a post merely because it is simplified.
 Reject or warn when simplification changes the meaning or teaches an unsafe design.
@@ -544,6 +572,7 @@ ${author.description.slice(0, 400)}
 
 ASSIGNED ANGLE: ${plan.angle}
 SOURCE TOPIC: ${plan.sourceTopic ?? 'evergreen'}
+SELECTED CENTRAL CLAIM: ${plan.selectedCentralClaim ?? plan.centralClaim ?? plan.coreClaim ?? '(not supplied)'}
 
 POST:
 ${post.body}
@@ -552,9 +581,14 @@ Output JSON only:
 {
   "passed": boolean,
   "confidence": number between 0 and 1,
+  "informationDensity": integer 0-100,
+  "progressionQuality": integer 0-100,
+  "redundancyRisk": integer 0-100,
+  "genericDiscourseRisk": integer 0-100,
+  "claimFidelity": integer 0-100,
   "issues": [
     {
-      "code": "auth_vs_authorization" | "tenant_isolation_confusion" | "token_auth_overclaim" | "frontend_security_claim" | "compliance_overclaim" | "audit_trail_overclaim" | "false_architecture_tradeoff" | "environment_isolation_error" | "idempotency_omitted" | "locking_overclaim" | "atomic_usage_omitted" | "background_job_overclaim" | "guaranteed_outcome" | "unsupported_personal_claim" | "other",
+      "code": "auth_vs_authorization" | "tenant_isolation_confusion" | "token_auth_overclaim" | "frontend_security_claim" | "compliance_overclaim" | "audit_trail_overclaim" | "false_architecture_tradeoff" | "environment_isolation_error" | "idempotency_omitted" | "locking_overclaim" | "atomic_usage_omitted" | "background_job_overclaim" | "guaranteed_outcome" | "unsupported_personal_claim" | "REDUNDANT_EXPLANATION" | "LOW_INFORMATION_DENSITY" | "GENERIC_SCENARIO_STRUCTURE" | "GENERIC_CHECKLIST_EXPANSION" | "THESIS_RESTATEMENT" | "WEAK_ARGUMENT_PROGRESSION" | "GENERIC_ENGAGEMENT_ENDING" | "CLAIM_DRIFT" | "other",
       "severity": "warning" | "error",
       "excerpt": "short quote from post",
       "explanation": "why this is inaccurate or unsafe",

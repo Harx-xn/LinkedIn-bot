@@ -30,9 +30,11 @@ import {
   buildTechnicalReviewPrompt,
 } from './ghostwriterPrompts';
 import {
+  extractBalancedJsonObject,
   GeneratedOutputParseError,
   parseGeneratedJsonDetailed,
 } from './ghostwriterJsonParser';
+import { withDerivedPostDepth } from './postDepth';
 import {
   batchPlanSchema,
   GENERATED_POST_OPENAI_JSON_SCHEMA,
@@ -44,7 +46,13 @@ import type { SpecificityResult } from './generationTypes';
 import { buildDeterministicBatchPlan } from './ghostwriterBatchPlanner';
 import { evaluateTopicCombination } from './ghostwriterQualityService';
 import { MANUAL_PLANNING_OPENAI_JSON_SCHEMA, MANUAL_POST_OPENAI_JSON_SCHEMA } from './manualPost/manualPostSchemas';
-import { deriveNarrowCentralClaim, isObviouslyGenericClaim } from './claimNarrowingService';
+import {
+  assessSelectedClaim,
+  canLockSelectedClaim,
+  deriveNarrowCentralClaim,
+  evaluateClaimSemanticFidelity,
+  resolveClaimSource,
+} from './claimNarrowingService';
 import { buildExpressionModePromptBlock, buildExpressionModeSystemInstruction, expressionModeFromPrompt } from './expressionModeService';
 
 dotenv.config();
@@ -59,6 +67,73 @@ const PLAN_MAX_OUTPUT_TOKENS = Number(process.env.PLAN_MAX_OUTPUT_TOKENS ?? 3200
 const REVIEW_MAX_OUTPUT_TOKENS = Number(process.env.REVIEW_MAX_OUTPUT_TOKENS ?? 700);
 const IMAGE_COPY_MAX_OUTPUT_TOKENS = Number(process.env.IMAGE_COPY_MAX_OUTPUT_TOKENS ?? 500);
 const MAX_JSON_REPAIRS = 2;
+
+const REVIEW_REPAIR_INSTRUCTIONS: Partial<Record<TechnicalReviewIssue['code'], string>> = {
+  LOW_INFORMATION_DENSITY: 'Replace filler or thesis paraphrases with one concrete mechanism, constraint, consequence, or decision-relevant implication.',
+  WEAK_ARGUMENT_PROGRESSION: 'Rebuild the support as claim → mechanism → new consequence or implication; each move must add information.',
+  REDUNDANT_EXPLANATION: 'Remove paraphrased support and keep only the strongest distinct explanation or evidence.',
+  GENERIC_SCENARIO_STRUCTURE: 'Remove the broad intro and staged hypothetical; state the specific claim and develop only material reasoning.',
+  GENERIC_CHECKLIST_EXPANSION: 'Replace generic checklist items with the one implementation detail or decision rule that materially advances the claim.',
+  THESIS_RESTATEMENT: 'Delete the restated thesis and use that space for a new qualification, consequence, or useful implication.',
+  GENERIC_ENGAGEMENT_ENDING: 'End on the final substantive implication instead of a broad engagement question.',
+  CLAIM_DRIFT: 'Restore the selected central claim and remove support for a substituted mechanism, conclusion, or audience implication.',
+};
+
+function derivedReviewIssue(
+  code: TechnicalReviewIssue['code'],
+  explanation: string,
+  excerpt: string,
+): TechnicalReviewIssue {
+  return {
+    code,
+    severity: 'error',
+    excerpt,
+    explanation,
+    repairInstruction: REVIEW_REPAIR_INSTRUCTIONS[code] ?? 'Repair only the identified issue without inventing facts.',
+  };
+}
+
+/** Parse direct, fenced, or prose-wrapped reviewer JSON without another model call. */
+export function parseTechnicalReviewOutput(raw: string, postExcerpt = ''): TechnicalReviewResult {
+  const cleaned = raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+  const candidates = [cleaned, extractBalancedJsonObject(cleaned)].filter((value, index, all): value is string => (
+    !!value && all.indexOf(value) === index
+  ));
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = technicalReviewSchema.safeParse(JSON.parse(candidate));
+      if (!parsed.success) continue;
+      const data = parsed.data;
+      const issues = [...data.issues] as TechnicalReviewIssue[];
+      const add = (code: TechnicalReviewIssue['code'], explanation: string) => {
+        if (!issues.some((issue) => issue.code === code)) {
+          issues.push(derivedReviewIssue(code, explanation, postExcerpt.slice(0, 180)));
+        }
+      };
+      if (data.informationDensity < 55) add('LOW_INFORMATION_DENSITY', 'Too much of the draft repeats or frames the idea without adding a material element.');
+      if (data.progressionQuality < 55) add('WEAK_ARGUMENT_PROGRESSION', 'Major sections do not advance from claim into distinct reasoning and implication.');
+      if (data.redundancyRisk > 55) add('REDUNDANT_EXPLANATION', 'Support sections paraphrase the same proposition instead of adding new information.');
+      if (data.genericDiscourseRisk > 60) add('GENERIC_SCENARIO_STRUCTURE', 'The draft relies on a generic professional-article sequence rather than claim-specific reasoning.');
+      if (data.claimFidelity < 65) add('CLAIM_DRIFT', 'The draft changes or broadens the selected central claim.');
+      return {
+        available: true,
+        passed: data.passed && !issues.some((issue) => issue.severity === 'error'),
+        confidence: data.confidence,
+        informationDensity: data.informationDensity,
+        progressionQuality: data.progressionQuality,
+        redundancyRisk: data.redundancyRisk,
+        genericDiscourseRisk: data.genericDiscourseRisk,
+        claimFidelity: data.claimFidelity,
+        issues,
+      };
+    } catch {
+      // Try the balanced-object candidate before declaring the review unavailable.
+    }
+  }
+
+  return { available: false, passed: false, confidence: 0, issues: [] };
+}
 
 export class ContentService {
   private geminiKeys: string[] = [];
@@ -254,51 +329,106 @@ Output JSON array only:
     author: AuthorContext,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<BatchPostPlan[]> {
-    const applyClaim = (plan: BatchPostPlan, centralClaim: string, depthPlan?: PostDepthPlan): BatchPostPlan => ({
+    const preparedPlans = plans.map((plan, index) => {
+      const trend = trends[index];
+      const claimSource = plan.claimSource ?? resolveClaimSource(trend);
+      const selectedCentralClaim = plan.selectedCentralClaim
+        ?? (claimSource === 'STRATEGY_SELECTED' ? trend?.topic?.trim() : undefined)
+        ?? plan.centralClaim
+        ?? plan.coreClaim
+        ?? trend?.topic?.trim();
+      return { ...plan, claimSource, selectedCentralClaim };
+    });
+
+    const applyClaim = (
+      plan: BatchPostPlan,
+      centralClaim: string,
+      depthPlan?: PostDepthPlan,
+    ): BatchPostPlan => ({
       ...plan,
       centralClaim,
       depthPlan: depthPlan
         ? { ...depthPlan, centralClaim }
         : plan.depthPlan
           ? { ...plan.depthPlan, centralClaim }
-          : undefined,
+          : {
+              centralClaim,
+              whyThisClaimIsInteresting: null,
+              strongestObservations: [],
+              underlyingCauseOrMechanism: null,
+              deeperInterpretation: null,
+              meaningfulConsequence: null,
+              usefulTensionOrQualification: null,
+              personalPerspective: { supported: false, insight: null },
+              endingInsight: null,
+              avoidIdeas: [],
+            },
     });
-    const fallback = () => plans.map((plan, index) => applyClaim(plan, deriveNarrowCentralClaim({
-        topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic',
-        candidateClaim: plan.centralClaim ?? plan.coreClaim,
+
+    const fallbackTopic = (plan: BatchPostPlan, trend?: TrendCandidate): string => {
+      if (trend?.territory?.trim()) return trend.territory.trim();
+      if (plan.normalizedTopic?.trim()) return plan.normalizedTopic.trim();
+      if (trend?.matchedPillar?.trim()) return trend.matchedPillar.trim();
+      if (plan.claimSource === 'STRATEGY_SELECTED') return 'the selected approach';
+      return plan.sourceTopic ?? trend?.topic ?? 'the topic';
+    };
+
+    const fallbackClaim = (plan: BatchPostPlan, trend?: TrendCandidate): string => {
+      const selected = plan.selectedCentralClaim?.trim() ?? '';
+      if (plan.claimSource === 'STRATEGY_SELECTED' && canLockSelectedClaim(selected, trend)) return selected;
+      if (assessSelectedClaim(plan.centralClaim ?? '').usable) return plan.centralClaim!.trim();
+      return deriveNarrowCentralClaim({
+        topic: fallbackTopic(plan, trend),
+        candidateClaim: selected || plan.centralClaim || plan.coreClaim,
         angle: plan.angle,
         expressionMode: plan.expressionMode,
         author,
-      })));
+      });
+    };
+
+    const fallback = () => preparedPlans.map((plan, index) => withDerivedPostDepth(
+      applyClaim(plan, fallbackClaim(plan, trends[index])),
+      trends[index],
+    ));
     const prompt = `${buildAuthorBlock(author)}
 
-Narrow each broad topic below into ONE concise, domain-appropriate central claim before drafting.
-The topic is territory; the claim is the specific assertion one post will develop.
+Build a compact supporting-reasoning plan for each selected batch item.
 
-${plans.map((plan, index) => {
+CLAIM PROVENANCE RULES:
+- STRATEGY_SELECTED means the central claim was intentionally selected upstream. Preserve it exactly unless it is malformed, factually unsafe, internally contradictory, too vague to write, grammatically broken, or unsupported by mandatory source evidence.
+- If a STRATEGY_SELECTED claim needs correction, keep the same intended subject, mechanism, direction, and audience implication. Do not broaden it into a category summary or replace it with a different conclusion.
+- SEARCH_DISCOVERED and LEGACY_TOPIC inputs may still be narrowed from source material into one publishable claim.
+- Use the same planning response to add supporting reasoning. Do not create a separate claim-review task.
+
+${preparedPlans.map((plan, index) => {
   const trend = trends[index];
-  return `${index}. TOPIC: ${plan.sourceTopic ?? trend?.topic ?? 'evergreen author expertise'}
+  return `${index}. CLAIM SOURCE: ${plan.claimSource}
+SELECTED CENTRAL CLAIM: ${plan.selectedCentralClaim ?? '(none; derive one from source material)'}
+SOURCE TOPIC: ${plan.sourceTopic ?? trend?.topic ?? 'evergreen author expertise'}
 ANGLE: ${plan.angle}
 EXPRESSION MODE: ${plan.expressionMode ?? 'direct'}
+EXPECTED MECHANISM: ${(plan.mechanismFocus ?? trend?.fingerprint?.mechanisms ?? []).join(' | ') || 'not specified'}
 SOURCE SUMMARY: ${trend?.summary?.trim() || 'none; use conditional or observational wording'}
 SOURCE POINTS: ${(trend?.keyPoints ?? []).join(' | ') || 'none'}`;
 }).join('\n\n')}
 
 Rules:
 - Use the author's niche, positioning, audience pains, desired outcomes, pillars, and available source evidence.
-- Each claim must assert one cause-and-effect relationship, distinction, behavior, process failure, decision rule, trade-off, constraint, misconception, consequence, condition, or non-obvious observation that fits its domain.
+- Preserve a usable STRATEGY_SELECTED claim as the primary semantic contract. Enrich its reasoning instead of making it "narrower" again.
+- A newly derived or corrected claim must assert one cause-and-effect relationship, distinction, behavior, process failure, decision rule, trade-off, constraint, misconception, consequence, condition, or non-obvious observation that fits its domain.
 - Do not merely say the topic is important, essential, beneficial, efficient, reduces risk, or drives success.
 - Do not force software or technical vocabulary onto non-technical domains.
 - Do not invent personal experience, outcomes, statistics, medical/financial/legal facts, or named results. Use conditional framing where evidence is limited.
-- Make claims in this batch meaningfully different in their underlying argument, not just their nouns.
-- For each claim, return a compact Depth Plan that distinguishes concrete observations, cause/mechanism, interpretation, consequence, qualification, and ending insight. Use at most three observations.
+- Do not change the selected mechanism, conclusion, or audience implication merely to make claims in the batch look different.
+- For each claim, return a compact Depth Plan with only the reasoning this idea needs. A compact plan may contain just the central claim, one observation or mechanism, and one implication.
+- Optional depth fields may be null or omitted. Use at most three observations.
 - Attempt one useful interpretation beyond surface advice, but do not manufacture complexity when a simple mechanism is enough.
 - Set personalPerspective.supported to true only when the supplied author profile or source evidence directly supports that intellectual shift; otherwise return false and null.
 - Put obvious restatements, exhaustive adjacent points, and generic recommendations in avoidIdeas.
 - Return exactly one claim per indexed topic.
 
 Output one JSON object only:
-{"claims":[{"index":0,"centralClaim":"One concise sentence.","depthPlan":{"centralClaim":"same concise sentence","whyThisClaimIsInteresting":"string or null","strongestObservations":["maximum three"],"underlyingCauseOrMechanism":"string or null","deeperInterpretation":"string or null","meaningfulConsequence":"string or null","usefulTensionOrQualification":"string or null","personalPerspective":{"supported":false,"insight":null},"endingInsight":"string or null","avoidIdeas":["obvious or redundant ideas"]}}]}`;
+{"claims":[{"index":0,"centralClaim":"preserved or faithfully corrected claim","correctionReason":"null or concise reason","depthPlan":{"centralClaim":"same claim","strongestObservations":["optional; maximum three"],"underlyingCauseOrMechanism":"optional string","meaningfulConsequence":"optional string"}}]}`;
 
     try {
       const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS);
@@ -311,14 +441,39 @@ Output one JSON object only:
             ? parsed.centralClaims
             : null;
       if (!items) return fallback();
-      return plans.map((plan, index) => {
+      return preparedPlans.map((plan, index) => {
         const item = items.find((candidate: unknown) => Number((candidate as { index?: unknown })?.index) === index);
         const candidate = typeof item?.centralClaim === 'string' ? item.centralClaim.trim() : '';
-        const centralClaim = candidate && !isObviouslyGenericClaim(candidate)
-            ? candidate
-            : deriveNarrowCentralClaim({ topic: plan.sourceTopic ?? trends[index]?.topic ?? 'the topic', candidateClaim: candidate, angle: plan.angle, expressionMode: plan.expressionMode, author });
+        const selected = plan.selectedCentralClaim?.trim() ?? '';
+        const locked = plan.claimSource === 'STRATEGY_SELECTED' && canLockSelectedClaim(selected, trends[index]);
+        let centralClaim: string;
+        let usePlannedDepth = true;
+        if (locked) {
+          centralClaim = selected;
+          if (candidate && candidate !== selected) {
+            const fidelity = evaluateClaimSemanticFidelity(selected, candidate, plan.mechanismFocus);
+            usePlannedDepth = fidelity.faithful;
+            console.warn('[ghostwriter] restored strategy-selected claim after planner rewrite', {
+              index,
+              faithfulRewrite: fidelity.faithful,
+              reasons: fidelity.reasons,
+            });
+          }
+        } else if (candidate && assessSelectedClaim(candidate).usable) {
+          const fidelity = plan.claimSource === 'STRATEGY_SELECTED' && selected
+            ? evaluateClaimSemanticFidelity(selected, candidate, plan.mechanismFocus)
+            : { faithful: true, reasons: [] as string[], selectedTokenCoverage: 1 };
+          centralClaim = fidelity.faithful ? candidate : fallbackClaim(plan, trends[index]);
+          usePlannedDepth = fidelity.faithful;
+        } else {
+          centralClaim = fallbackClaim(plan, trends[index]);
+          usePlannedDepth = false;
+        }
         const parsedDepthPlan = postDepthPlanSchema.safeParse(item?.depthPlan);
-        return applyClaim(plan, centralClaim, parsedDepthPlan.success ? parsedDepthPlan.data : undefined);
+        return withDerivedPostDepth(
+          applyClaim(plan, centralClaim, parsedDepthPlan.success && usePlannedDepth ? parsedDepthPlan.data : undefined),
+          trends[index],
+        );
       });
     } catch (error) {
       console.warn('[ghostwriter] central claim planning failed; using non-blocking fallback', { message: error instanceof Error ? error.message : String(error) });
@@ -343,7 +498,7 @@ ${HASHTAG_RULES}
 ${LANGUAGE_RULES}
 
 EXPRESSION MODE:
-The fixed CENTRAL CLAIM controls what the post argues. The following mode contract controls how the thought unfolds when it does not conflict with explicit user controls.
+The SELECTED CENTRAL CLAIM controls what the post argues. The following mode contract controls how the thought unfolds when it does not conflict with explicit user controls.
 ${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author.strategy)}
 
 ${DEFAULT_EDITORIAL_RULES}
@@ -536,22 +691,11 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
   ): Promise<TechnicalReviewResult> {
     const prompt = buildTechnicalReviewPrompt(post, author, plan);
     const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, REVIEW_MAX_OUTPUT_TOKENS);
-    const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-    try {
-      const parsed = technicalReviewSchema.safeParse(JSON.parse(cleaned));
-      if (parsed.success) {
-        const issues = parsed.data.issues as TechnicalReviewIssue[];
-        return {
-          passed: !issues.some((i) => i.severity === 'error'),
-          confidence: parsed.data.confidence,
-          issues,
-        };
-      }
-    } catch {
-      // fall through
+    const review = parseTechnicalReviewOutput(raw, post.body);
+    if (!review.available) {
+      console.warn('[ghostwriter] technical/quality review unavailable; using deterministic validation');
     }
-
-    return { passed: true, confidence: 0.5, issues: [] };
+    return review;
   }
 
   async generateImageCopy(

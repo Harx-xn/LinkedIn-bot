@@ -159,6 +159,7 @@ model User {
   topicHistory               GeneratedTopicHistory[]
   topicInventory             TopicInventory[]
   voiceProfile               UserVoiceProfile?
+  contentIntelligence        UserContentIntelligence?
   postContentFingerprints    PostContentFingerprint[]
   authProviderAccounts       AuthProviderAccount[]
   supportRequests            SupportRequest[]
@@ -169,6 +170,21 @@ model User {
   @@index([regionId])
   @@index([role])
   @@index([isBillingExempt])
+}
+
+model UserContentIntelligence {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  profile          Json
+  inputFingerprint String
+  version          Int      @default(1)
+  confidence       Float?
+  generatedAt      DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([inputFingerprint])
 }
 
 enum LinkedInAnalyticsStatus {
@@ -577,11 +593,19 @@ model PostContentFingerprint {
 
   primaryTopic String
   subtopic     String?
+  pillar       String?
+  territory    String?
   coreClaim    String
+  mechanism    String?
+  perspective  String?
+  argumentPattern String?
   structure    String?
   hookType     String?
   evidenceType String?
+  exampleType  String?
   ctaType      String?
+  authorityMode String?
+  contentIntent String?
   keywords     Json?
 
   createdAt DateTime @default(now())

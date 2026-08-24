@@ -99,10 +99,10 @@ export function areHardBatchDuplicates(a: RankedTrendCandidate, b: RankedTrendCa
   if (a === b) return true;
   const normalizedA = normalizeTrendTitle(a.fingerprint.normalizedTopic);
   const normalizedB = normalizeTrendTitle(b.fingerprint.normalizedTopic);
-  if (normalizedA && normalizedA === normalizedB) return true;
   const titleSimilarity = jaccardSimilarity(normalizeTrendTitle(a.trend.topic), normalizeTrendTitle(b.trend.topic));
   const claimSimilarity = jaccardSimilarity(normalizeTrendTitle(a.fingerprint.coreClaim), normalizeTrendTitle(b.fingerprint.coreClaim));
   const mechanisms = mechanismOverlap(a.fingerprint.mechanisms, b.fingerprint.mechanisms);
+  if (normalizedA && normalizedA === normalizedB && (claimSimilarity >= 0.55 || mechanisms >= 0.6)) return true;
   return titleSimilarity >= TOPIC_DIVERSITY_CONFIG.titleDuplicateThreshold
     || claimSimilarity >= TOPIC_DIVERSITY_CONFIG.currentBatchSemanticThreshold
     || (claimSimilarity >= 0.55 && mechanisms >= 0.7);
