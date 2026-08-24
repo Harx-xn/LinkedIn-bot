@@ -1,6 +1,6 @@
 import { ContentService } from './contentService';
-import type { AuthorContext, BatchPostPlan, RankedTrendCandidate, TrendCandidate } from './generationTypes';
-import { summarizeBatchPlan, buildTopicDiverseBatchPlan } from './ghostwriterBatchPlanner';
+import type { AuthorContext, BatchPostPlan, RankedTrendCandidate, TrendCandidate, TrendPoolStats } from './generationTypes';
+import { summarizeBatchPlan, buildDeterministicBatchPlan, buildTopicDiverseBatchPlan } from './ghostwriterBatchPlanner';
 import type { Trend } from './trendsService';
 import {
   generateSlotPost as generateSlotPostImpl,
@@ -11,15 +11,27 @@ import {
 import { TrendOrchestrationService } from './trendOrchestrationService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
 import { BatchScheduleError } from './batchScheduleService';
-import { combineFreshAndInventoryTopics, inventoryFingerprint, reserveValidInventoryTopics, storeQualifiedTopics, unselectedQualifiedTopics } from './topicInventoryService';
+import { inventoryFingerprint, reserveValidInventoryTopics, storeQualifiedTopics, unselectedQualifiedTopics } from './topicInventoryService';
 import { getOrBuildContentIntelligence } from './contentIntelligenceService';
-import { buildStrategyIdeaCandidates, ideaToRankedCandidate, selectDiverseIdeas } from './contentIdeaService';
+import { ideaToRankedCandidate } from './contentIdeaService';
+import { buildStrategyIdeaCandidatePool } from './semanticIdeaGenerationService';
 import { loadRecentTopicHistory } from './topicHistoryService';
 import {
   createRecentContentMemory,
   loadRecentContentMemory,
-  selectRankedCandidatesWithMemory,
 } from './recentContentMemoryService';
+import { buildUnifiedCandidateSelection, selectUnifiedBatchCandidates } from './unifiedBatchCandidateService';
+import { loadAccountPerformanceProfileSafe, type AccountPerformanceProfile } from './accountPerformanceLearningService';
+import {
+  applyKnowledgeAuthorityToContentIntelligence,
+  buildGenerationAuthorityContext,
+  buildUserKnowledgeAuthorityContext,
+  loadUserKnowledgeAuthorityContext,
+} from './userKnowledgeAuthorityService';
+import {
+  FALLBACK_PROVENANCE,
+  logFallbackProvenance,
+} from './fallbackProvenanceService';
 
 export type { GeneratedSlotResult };
 
@@ -125,6 +137,20 @@ export async function prepareBatchContextV2(params: {
     strategy: params.config.strategy,
   };
 
+  let knowledgeContext = buildUserKnowledgeAuthorityContext({
+    profileDescription: author.description,
+    niches: params.niches,
+  });
+  try {
+    knowledgeContext = await loadUserKnowledgeAuthorityContext(params.userId, { niches: params.niches });
+  } catch (error) {
+    console.warn('[user-authority] evidence load failed; using conservative profile-only boundaries', {
+      userId: params.userId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  author.authorityContext = buildGenerationAuthorityContext(knowledgeContext, 'BATCH', params.niches);
+
   const orchestrator = new TrendOrchestrationService(params.openaiApiKey);
   let recentContentMemory = createRecentContentMemory();
   try {
@@ -135,71 +161,88 @@ export async function prepareBatchContextV2(params: {
       message: error instanceof Error ? error.message : String(error),
     });
   }
+  // Candidate selection mutates its memory as it builds the batch. Editorial planning
+  // needs the historical snapshot so it can add form decisions slot-by-slot itself.
+  const editorialMemory = createRecentContentMemory(recentContentMemory.fingerprints);
+  const performanceProfile = await loadAccountPerformanceProfileSafe(params.userId);
 
-  // Strategy-derived evergreen ideas are the primary path. Search is reserved
-  // for shortages and candidates that explicitly require fresh evidence.
+  let strategyRanked: RankedTrendCandidate[] = [];
+  let strategyCandidateCount = 0;
+  let intelligenceOpenAiCalls = 0;
   if (params.config.strategy) {
     try {
       const [intelligence, recentHistory] = await Promise.all([
         getOrBuildContentIntelligence(params.userId, params.config.strategy, params.openaiApiKey),
         loadRecentTopicHistory(params.userId),
       ]);
-      const candidates = buildStrategyIdeaCandidates(intelligence.profile, params.config.strategy, recentHistory, params.slotCount);
-      const selectedIdeas = selectDiverseIdeas(
-        candidates,
-        params.slotCount,
-        createRecentContentMemory(recentContentMemory.fingerprints),
+      const evidenceGroundedProfile = applyKnowledgeAuthorityToContentIntelligence(intelligence.profile, knowledgeContext);
+      const ideaPool = await buildStrategyIdeaCandidatePool({
+        profile: evidenceGroundedProfile,
+        strategy: params.config.strategy,
+        history: recentHistory,
+        recentMemory: recentContentMemory,
+        count: params.slotCount,
+        apiKey: params.openaiApiKey,
+      });
+      const candidates = ideaPool.candidates;
+      strategyCandidateCount = candidates.length;
+      strategyRanked = candidates.map(ideaToRankedCandidate);
+      intelligenceOpenAiCalls = (intelligence.semanticEnrichmentSucceeded ? 1 : 0) + ideaPool.modelCalls;
+      author.contentIntelligence = evidenceGroundedProfile;
+      author.authorityContext = buildGenerationAuthorityContext(
+        knowledgeContext,
+        'BATCH',
+        evidenceGroundedProfile.territoryMap.map((entry) => entry.territory),
       );
-      const selectedRanked = selectedIdeas.map(ideaToRankedCandidate);
-      author.contentIntelligence = intelligence.profile;
-      console.info('[content-ideas] selection', {
+      console.info('[content-ideas] candidates prepared for unified selection', {
         userId: params.userId,
         intelligenceSource: intelligence.source,
+        intelligenceInputFingerprintCurrent: intelligence.inputFingerprint === intelligence.profileInputFingerprint,
+        semanticEnrichmentSucceeded: intelligence.semanticEnrichmentSucceeded,
+        intelligenceError: intelligence.error,
+        ideaGenerationSource: ideaPool.source,
+        semanticIdeaError: ideaPool.error,
+        semanticIdeaCalls: ideaPool.modelCalls,
         candidateCount: candidates.length,
-        selected: selectedIdeas.map((idea) => ({
+        candidates: candidates.map((idea) => ({
           pillar: idea.pillar, territory: idea.territory, origin: idea.origin,
           qualityScore: idea.score.composite, rejectedReasons: idea.rejectedReasons,
           authorityMode: idea.authorityMode, searchUsed: idea.searchRequired,
+          generationMode: idea.generationMode,
+          personalEvidencePotential: idea.personalEvidencePotential,
           saturationPenalty: idea.saturationPenalty, similarityPenalty: idea.score.recentSimilarityRisk,
           contentMemoryPenalty: idea.memoryPenalty ?? 0, contentMemoryReasons: idea.memoryReasons ?? [],
           coreClaim: idea.coreClaim, fallbackLevel: 1,
         })),
       });
-      if (selectedRanked.length >= params.slotCount) {
-        return requireCompleteTrendPool({
-          author,
-          eligible: selectedRanked.map((item) => item.trend),
-          ranked: selectedRanked,
-          stats: { rawCount: candidates.length, rejectedLowValue: candidates.filter((c) => c.rejectedReasons.length > 0).length, rejectedByExclusions: 0, exactDuplicatesRemoved: 0, nearDuplicatesRemoved: candidates.length - selectedRanked.length, historyMatchesRemoved: candidates.filter((c) => c.rejectedReasons.includes('recent_claim_or_mechanism_similarity')).length, fingerprinted: candidates.length, selected: selectedRanked.length, evergreenFilled: selectedRanked.length, openAiCalls: intelligence.source === 'rebuilt' ? 1 : 0 },
-        });
-      }
-      console.info('[content-ideas] insufficient strategy-derived ideas; using existing discovery fallback', { userId: params.userId, selected: selectedRanked.length, requested: params.slotCount, fallbackLevel: 4 });
     } catch (error) {
-      console.warn('[content-ideas] primary idea path failed; using existing discovery fallback', { userId: params.userId, message: error instanceof Error ? error.message : String(error), fallbackLevel: 4 });
+      console.warn('[content-ideas] strategy candidate preparation failed; unified selection will retain other origins', { userId: params.userId, message: error instanceof Error ? error.message : String(error), fallbackLevel: 4 });
     }
   }
 
-  // Preview pools remain cached for preview UX. This legacy discovery path is
-  // now the bounded fallback when strategy-derived ideas cannot fill the batch.
   void params.previewId;
   void params.configHash;
-
-  const pool = await orchestrator.buildTrendPoolForBatch({
-    userId: params.userId,
-    niches: params.niches,
-    author,
-    strategy: params.config.strategy,
-    sources: params.sources,
-    slotCount: params.slotCount,
-    mode: 'generation',
+  let discoveryPool: Awaited<ReturnType<TrendOrchestrationService['buildTrendPoolForBatch']>> | undefined;
+  const mixed = await buildUnifiedCandidateSelection({
+    strategyCandidates: strategyRanked,
+    count: params.slotCount,
+    memory: recentContentMemory,
+    search: async (candidateCount) => {
+      discoveryPool = await orchestrator.buildTrendPoolForBatch({
+        userId: params.userId,
+        niches: params.niches,
+        author,
+        strategy: params.config.strategy,
+        sources: params.sources,
+        slotCount: candidateCount,
+        mode: 'generation',
+      });
+      return discoveryPool.qualifiedRanked ?? discoveryPool.ranked;
+    },
+    performanceProfile,
   });
-
-  const freshQualified = pool.qualifiedRanked ?? pool.ranked;
-  const freshSelected = selectRankedCandidatesWithMemory(
-    freshQualified.filter((candidate) => candidate.novelty.allowed),
-    params.slotCount,
-    recentContentMemory,
-  );
+  const freshSelected = mixed.selected.map((candidate) => candidate.ranked);
+  const searchQualified = discoveryPool?.qualifiedRanked ?? discoveryPool?.ranked ?? [];
   const inventorySelected = freshSelected.length < params.slotCount
     ? await reserveValidInventoryTopics({
         userId: params.userId,
@@ -207,24 +250,34 @@ export async function prepareBatchContextV2(params: {
         count: params.slotCount - freshSelected.length,
         activeNiches: params.niches,
         selectedFreshTopics: freshSelected,
-        activeProfileFingerprints: new Map(pool.expansionPlans.map((plan) => [plan.niche, plan.inputFingerprint ?? ''])),
+        activeProfileFingerprints: new Map((discoveryPool?.expansionPlans ?? []).map((plan) => [plan.niche, plan.inputFingerprint ?? ''])),
       })
     : [];
-  const combinedSelection = combineFreshAndInventoryTopics(freshSelected, inventorySelected, params.slotCount);
-  const selected = combinedSelection.selected;
-  const selectedFreshFingerprints = new Set(freshSelected.map((item) => inventoryFingerprint(item.fingerprint)));
-  const excessFresh = unselectedQualifiedTopics(freshQualified, freshSelected);
-  if (freshSelected.length > freshQualified.length) throw new Error('final_selection_invariant:fresh_selected_exceeds_qualified');
+  const selected = inventorySelected.length
+    ? selectUnifiedBatchCandidates(
+        [...mixed.observed.map((candidate) => candidate.ranked), ...inventorySelected],
+        params.slotCount,
+        createRecentContentMemory(recentContentMemory.fingerprints),
+        performanceProfile,
+      ).map((candidate) => candidate.ranked)
+    : freshSelected;
+  const selectedSearchFingerprints = new Set(selected
+    .filter((item) => item.trend.sourceType !== 'strategy_derived')
+    .map((item) => inventoryFingerprint(item.fingerprint)));
+  const excessFresh = unselectedQualifiedTopics(searchQualified, selected.filter((item) => selectedSearchFingerprints.has(inventoryFingerprint(item.fingerprint))));
   if (selected.length > params.slotCount) throw new Error('final_selection_invariant:total_exceeds_requested');
-  if (selected.length !== freshSelected.length + inventorySelected.length) throw new Error('final_selection_invariant:selection_sum_mismatch');
-  if (excessFresh.some((item) => selectedFreshFingerprints.has(inventoryFingerprint(item.fingerprint)))) throw new Error('final_selection_invariant:selected_stored_as_excess');
+  if (excessFresh.some((item) => selectedSearchFingerprints.has(inventoryFingerprint(item.fingerprint)))) throw new Error('final_selection_invariant:selected_stored_as_excess');
   const excessStored = await storeQualifiedTopics(params.userId, excessFresh);
   const attemptedByNiche = excessFresh.reduce<Record<string, number>>((counts, item) => {
     const niche = item.trend.originNiche ?? item.trend.niche ?? 'unknown'; counts[niche] = (counts[niche] ?? 0) + 1; return counts;
   }, {});
   console.info('[topic-inventory] batch selection completed', {
     userId: params.userId, requestedPosts: params.slotCount,
-    freshQualified: freshQualified.length,
+    strategyCandidates: strategyCandidateCount,
+    searchRequested: mixed.searchRequested,
+    searchQualified: searchQualified.length,
+    searchFailed: mixed.searchFailed,
+    evidenceEnriched: mixed.evidenceEnriched,
     freshSelected: freshSelected.length, inventorySelected: inventorySelected.length,
     totalSelected: selected.length, excessFreshAttempted: excessFresh.length, excessFreshCommitted: excessStored,
     attemptedByNiche,
@@ -233,11 +286,47 @@ export async function prepareBatchContextV2(params: {
     }, {}),
   });
 
+  console.info('[content-ideas] unified batch selection', {
+    userId: params.userId,
+    requested: params.slotCount,
+    observed: mixed.observed.length,
+    searchRequested: mixed.searchRequested,
+    evidenceEnriched: mixed.evidenceEnriched,
+    selected: selected.map((candidate) => ({
+      origin: candidate.trend.ideaOrigin ?? (candidate.trend.sourceType === 'strategy_derived' ? 'STRATEGY_DERIVED' : 'SEARCH_DISCOVERED'),
+      pillar: candidate.matchedPillar ?? candidate.trend.matchedPillar ?? candidate.trend.originNiche,
+      territory: candidate.trend.territory ?? candidate.fingerprint.topicCluster,
+      sourceQuality: candidate.sourceQualityScore,
+      freshness: candidate.recencyScore,
+      ideaQuality: candidate.trend.ideaQualityScore ?? candidate.totalScore,
+      saturationPenalty: candidate.trend.saturationPenalty ?? 0,
+      performanceReasons: (candidate.trend.strategyReasons ?? []).filter((reason) => reason.startsWith('account_performance:')),
+    })),
+  });
+
+  const stats: TrendPoolStats = discoveryPool?.stats ?? {
+    rawCount: strategyCandidateCount,
+    rejectedLowValue: strategyRanked.filter((candidate) => !candidate.novelty.allowed).length,
+    rejectedByExclusions: 0,
+    exactDuplicatesRemoved: 0,
+    nearDuplicatesRemoved: Math.max(0, strategyCandidateCount - selected.length),
+    historyMatchesRemoved: 0,
+    fingerprinted: strategyCandidateCount,
+    selected: selected.length,
+    evergreenFilled: selected.filter((candidate) => candidate.trend.sourceType === 'strategy_derived').length,
+    openAiCalls: 0,
+  };
+  stats.selected = selected.length;
+  stats.evergreenFilled = selected.filter((candidate) => candidate.trend.sourceType === 'strategy_derived').length;
+  stats.openAiCalls = (stats.openAiCalls ?? 0) + intelligenceOpenAiCalls;
+
   return requireCompleteTrendPool({
     author,
     eligible: selected.map((item) => item.trend),
     ranked: selected,
-    stats: pool.stats,
+    stats,
+    editorialMemory,
+    performanceProfile,
   });
 }
 
@@ -292,9 +381,23 @@ export async function planBatchForGeneration(
   count: number,
   provider: 'OPENAI' | 'GEMINI' = 'OPENAI',
   ranked?: RankedTrendCandidate[],
+  editorialMemory?: import('./recentContentMemoryService').RecentContentMemory,
+  performanceProfile?: AccountPerformanceProfile,
 ) {
   if (ranked?.length) {
-    const basePlan = buildTopicDiverseBatchPlan(ranked.slice(0, count), count, author.strategy?.writingStyle);
+    const basePlan = buildTopicDiverseBatchPlan(
+      ranked.slice(0, count),
+      count,
+      author.strategy?.writingStyle,
+      {
+        recentMemory: editorialMemory,
+        audience: author.targetAudience,
+        primaryGoal: author.strategy?.contentGoals.primaryGoal,
+        // Saved Experience Bank details are deliberately withheld from batch generation.
+        personalEvidenceAvailable: false,
+        performanceProfile,
+      },
+    );
     const plan = await contentService.narrowBatchClaims(basePlan, ranked.slice(0, count).map((item) => item.trend), author, provider);
     const diversityIssues = validatePlanTopicDiversity(plan);
     if (diversityIssues.length) {
@@ -304,7 +407,36 @@ export async function planBatchForGeneration(
     return plan;
   }
 
-  const basePlan = await contentService.planBatch(eligible, author, count, provider);
+  const legacyPlan = await contentService.planBatch(eligible, author, count, provider);
+  logFallbackProvenance({
+    provenance: FALLBACK_PROVENANCE.LEGACY_DISCOVERY,
+    stage: 'batch_planning',
+    count: Math.min(count, eligible.length),
+    reason: 'unified_ranked_candidates_unavailable',
+  });
+  const editorialPlan = buildDeterministicBatchPlan(
+    eligible,
+    count,
+    author.strategy?.writingStyle,
+    {
+      recentMemory: editorialMemory,
+      audience: author.targetAudience,
+      primaryGoal: author.strategy?.contentGoals.primaryGoal,
+      personalEvidenceAvailable: false,
+      performanceProfile,
+    },
+  );
+  // Retain any useful AI-produced claim/depth reasoning while making the editorial
+  // form deterministic, evidence-aware, and consistent with the shared selector.
+  const basePlan = legacyPlan.map((plan, index) => ({
+    ...plan,
+    angle: editorialPlan[index]?.angle ?? plan.angle,
+    hookStyle: editorialPlan[index]?.hookStyle ?? plan.hookStyle,
+    endingStyle: editorialPlan[index]?.endingStyle ?? plan.endingStyle,
+    layout: editorialPlan[index]?.layout ?? plan.layout,
+    expressionMode: editorialPlan[index]?.expressionMode ?? plan.expressionMode,
+    editorialDecision: editorialPlan[index]?.editorialDecision,
+  }));
   const plan = await contentService.narrowBatchClaims(basePlan, eligible, author, provider);
   console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author));
   return plan;

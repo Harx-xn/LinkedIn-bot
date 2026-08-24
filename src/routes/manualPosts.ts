@@ -39,6 +39,7 @@ import {
   GHOSTWRITER_CONFIG_REQUIRED_MESSAGE,
   hasSavedGhostwriterDescription,
 } from '../services/ghostwriterConfigRequirementService';
+import { savePersonalExperience, suggestPersonalExperiences } from '../services/manualPost/personalExperienceService';
 
 const router = Router();
 
@@ -82,7 +83,9 @@ async function generateAndUploadManualAiImage(params: {
   instructions?: string;
   style?: string;
   aspectRatio?: LinkedInImageAspectRatio;
-} & Partial<Pick<GenerateLinkedInPostImageInput, 'visualFormat' | 'imageType' | 'mood' | 'colorPalette' | 'complexity' | 'composition' | 'humanPresence' | 'backgroundStyle' | 'textMode'>>): Promise<{ mediaUrl: string; mimeType: string; model: string }> {
+} & Partial<Pick<GenerateLinkedInPostImageInput, 'visualFormat' | 'imageType' | 'mood' | 'colorPalette' | 'complexity' | 'composition' | 'humanPresence' | 'backgroundStyle' | 'textMode'>>): Promise<{ mediaUrl: string; mimeType: string; model: string; requestId: string }> {
+  const requestId = randomUUID();
+  console.info(JSON.stringify({ scope: 'ai-image', requestId, stage: 'route', event: 'manual_request_received' }));
   await canUseImageGeneration(params.userId);
 
   const [imageService, voice, botConfig] = await Promise.all([
@@ -110,6 +113,7 @@ async function generateAndUploadManualAiImage(params: {
     humanPresence: params.humanPresence,
     backgroundStyle: params.backgroundStyle,
     textMode: params.textMode,
+    requestId,
   });
 
   const branded = await applyOptionalBrandLogo({
@@ -120,16 +124,20 @@ async function generateAndUploadManualAiImage(params: {
   const finalBuffer = branded.buffer;
   const finalMimeType = branded.mimeType;
   const ext = extensionForMimeType(finalMimeType);
-  const mediaUrl = await uploadBufferToR2(
-    finalBuffer,
-    `${params.uploadKey}.${ext}`,
-    finalMimeType,
-  );
+  let mediaUrl: string;
+  try {
+    mediaUrl = await uploadBufferToR2(finalBuffer, `${params.uploadKey}.${ext}`, finalMimeType);
+    console.info(JSON.stringify({ scope: 'ai-image', requestId, stage: 'upload', event: 'upload_succeeded', byteLength: finalBuffer.length, mimeType: finalMimeType }));
+  } catch (error) {
+    console.error(JSON.stringify({ scope: 'ai-image', requestId, stage: 'upload', event: 'upload_failed', message: error instanceof Error ? error.message.slice(0, 800) : String(error).slice(0, 800) }));
+    throw new GenerativeImageError(502, 'AI_IMAGE_UPLOAD_FAILED', 'The image was created but could not be stored. Try again.', { stage: 'upload', requestId, cause: error });
+  }
 
   return {
     mediaUrl,
     mimeType: finalMimeType,
     model: generated.model,
+    requestId,
   };
 }
 
@@ -163,7 +171,8 @@ function handle(fn: (req: Request, res: Response) => Promise<void>) {
         return;
       }
       if (err instanceof GenerativeImageError) {
-        res.status(err.status).json({ error: err.message, code: err.code });
+        console.error(JSON.stringify({ scope: 'ai-image', requestId: err.requestId, stage: err.stage, event: 'request_failed', code: err.code, provider: err.providerDetails }));
+        res.status(err.status).json({ error: err.message, message: err.message, code: err.code });
         return;
       }
       console.error('[manual-posts] error:', err);
@@ -219,6 +228,31 @@ router.post(
       refresh: req.body?.refresh === true,
     });
     res.json(result);
+  }),
+);
+
+// Manual-only personal experience bank. Batch generation never imports this service.
+router.get(
+  '/experiences/suggestions',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const topic = typeof req.query.topic === 'string' ? req.query.topic.trim() : '';
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 3;
+    if (!topic) { res.json({ experiences: [] }); return; }
+    const experiences = await suggestPersonalExperiences(userId, topic, Number.isFinite(limit) ? limit : 3);
+    res.json({ experiences });
+  }),
+);
+
+router.post(
+  '/experiences',
+  requireAuth,
+  handle(async (req, res) => {
+    const userId = requireUserId(req);
+    const rawText = typeof req.body?.rawText === 'string' ? req.body.rawText : '';
+    const experience = await savePersonalExperience(userId, rawText);
+    res.status(201).json(experience);
   }),
 );
 
@@ -333,17 +367,22 @@ router.post(
 
     const options = parseAiImageOptions(req.body);
 
-    const { mediaUrl } = await generateAndUploadManualAiImage({
+    const { mediaUrl, requestId } = await generateAndUploadManualAiImage({
       userId,
       postText: content,
       uploadKey: `generated/ai-manual-${postId}-${Date.now()}`,
       ...options,
     });
 
-    const updated = await prisma.post.update({
-      where: { id: post.id },
-      data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null },
-    });
+    let updated;
+    try {
+      updated = await prisma.post.update({
+        where: { id: post.id },
+        data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null },
+      });
+    } catch (error) {
+      throw new GenerativeImageError(500, 'AI_IMAGE_DB_SAVE_FAILED', 'The image was created but could not be attached to the post. Try again.', { stage: 'database', requestId, cause: error });
+    }
 
     await recordImageGeneration(userId);
 

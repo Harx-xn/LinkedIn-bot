@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../prismaClient';
 import {
@@ -420,6 +421,8 @@ router.post('/:id/rewrite', requireAuth, async (req, res) => {
 });
 
 router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
+  const imageRequestId = randomUUID();
+  console.info(JSON.stringify({ scope: 'ai-image', requestId: imageRequestId, stage: 'route', event: 'post_request_received', postId: req.params.id }));
   const post = await prisma.post.findUnique({ where: { id: req.params.id } });
 
   if (!post) return res.status(404).json({ error: 'Post not found' });
@@ -465,6 +468,7 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
       brandName: resolveBrandNameFromVoice(voice),
       profileDescription: voice.description,
       ...parseImageCreativeOverrides(req.body),
+      requestId: imageRequestId,
     });
 
     const branded = await applyOptionalBrandLogo({
@@ -475,28 +479,33 @@ router.post('/:id/generate-ai-image', requireAuth, async (req, res) => {
     const finalBuffer = branded.buffer;
     const finalMimeType = branded.mimeType;
     const ext = extensionForMimeType(finalMimeType);
-    const mediaUrl = await uploadBufferToR2(
-      finalBuffer,
-      `generated/ai-post-${post.id}-${Date.now()}.${ext}`,
-      finalMimeType,
-    );
+    let mediaUrl: string;
+    try {
+      mediaUrl = await uploadBufferToR2(finalBuffer, `generated/ai-post-${post.id}-${Date.now()}.${ext}`, finalMimeType);
+      console.info(JSON.stringify({ scope: 'ai-image', requestId: imageRequestId, stage: 'upload', event: 'upload_succeeded', byteLength: finalBuffer.length, mimeType: finalMimeType }));
+    } catch (error) {
+      throw new GenerativeImageError(502, 'AI_IMAGE_UPLOAD_FAILED', 'The image was created but could not be stored. Try again.', { stage: 'upload', cause: error });
+    }
 
-    const updated = await prisma.post.update({
-      where: { id: post.id },
-      data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null },
-    });
+    let updated;
+    try {
+      updated = await prisma.post.update({ where: { id: post.id }, data: { mediaUrl, attachmentType: 'IMAGE', carouselProjectId: null, carouselPdfUrl: null, carouselFileName: null, carouselUpdatedAt: null, carouselAttachmentStatus: null } });
+    } catch (error) {
+      throw new GenerativeImageError(500, 'AI_IMAGE_DB_SAVE_FAILED', 'The image was created but could not be attached to the post. Try again.', { stage: 'database', cause: error });
+    }
 
     await recordImageGeneration(req.userId!);
 
     return res.json(updated);
   } catch (err: unknown) {
     if (err instanceof GenerativeImageError) {
-      return res.status(err.status).json({ error: err.message, code: err.code });
+      console.error(JSON.stringify({ scope: 'ai-image', requestId: imageRequestId, stage: err.stage, event: 'request_failed', code: err.code, provider: err.providerDetails }));
+      return res.status(err.status).json({ error: err.message, message: err.message, code: err.code });
     }
     console.error('[posts] generate-ai-image failed:', err instanceof Error ? err.message : err);
     return res.status(500).json({
       error: 'Failed to generate AI image',
-      code: 'GEMINI_IMAGE_GENERATION_FAILED',
+      code: 'AI_IMAGE_UNKNOWN_ERROR',
     });
   }
 });

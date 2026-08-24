@@ -27,6 +27,8 @@ import { evaluateSemanticProgression } from './semanticProgression';
 import type { TopicHistoryRow } from './topicHistoryService';
 import { buildLengthRepairInstruction, evaluateGeneratedPostLength } from './generatedPostLength';
 import { resolvePostDepthMetadata } from './postDepth';
+import { evaluateFirstThreeLines } from './editorialDecisionService';
+import { classifyFinalPostFingerprint } from './finalPostFingerprintClassifier';
 
 const VERIFIED_IDENTITY_PATTERNS = [
   /\bI am a\b/i,
@@ -223,24 +225,18 @@ export function validateAngleContent(body: string, plan: BatchPostPlan): Quality
 
   switch (plan.angle) {
     case 'debugging_story':
-      if (!/\b(symptom|failed|error|timeout|duplicate|retry|stuck|incorrect)\b/i.test(body)) {
-        issues.push({ code: 'debugging_missing_symptom', severity: 'error', instruction: 'Include a defined failure symptom.' });
-      }
-      if (!/\b(because|cause|mechanism|reason|due to)\b/i.test(body)) {
-        issues.push({ code: 'debugging_missing_cause', severity: 'error', instruction: 'Explain a likely mechanism or cause.' });
-      }
-      if (!/\b(fix|prevent|guard|idempoten|atomic|constraint)\b/i.test(body)) {
-        issues.push({ code: 'debugging_missing_fix', severity: 'error', instruction: 'Include a correction or decision that addresses the cause.' });
+      if (!/\b(symptom|signal|failed|error|delay|stuck|incorrect|diagnos|trace|reveals?)\b/i.test(body)) {
+        issues.push({ code: 'diagnostic_lens_weak', severity: 'warning', instruction: 'Make the diagnostic observation clearer without forcing symptom, cause, check, and fix sections.' });
       }
       break;
     case 'technical_mistake':
       if (!/\b(mistake|wrong|incorrect|anti-?pattern|should not|instead|pitfall|risk|problem|avoid)\b/i.test(body)) {
-        issues.push({ code: 'mistake_not_named', severity: 'error', instruction: 'Name the actual mistake or risky assumption.' });
+        issues.push({ code: 'mistake_lens_weak', severity: 'warning', instruction: 'Clarify the mistaken assumption or correction without adding a formulaic failure section.' });
       }
       break;
     case 'architecture_tradeoff':
-      if (!/\b(trade-?off|versus|vs\.|alternative|on the other hand|however)\b/i.test(body)) {
-        issues.push({ code: 'tradeoff_missing', severity: 'error', instruction: 'Describe two valid alternatives and the trade-off.' });
+      if (!/\b(trade-?off|versus|vs\.|alternative|however|rather than|instead|depends|only when|choice|distinction)\b/i.test(body)) {
+        issues.push({ code: 'choice_lens_weak', severity: 'warning', instruction: 'Clarify the decision or distinction; two balanced alternatives are not mandatory.' });
       }
       if (/\b(consistency|security|environment)\b[^.]{0,40}\bversus\b[^.]{0,40}\b(scalability|usability)\b/i.test(body) &&
           !/\b(context|workload|specific)\b/i.test(body)) {
@@ -248,18 +244,14 @@ export function validateAngleContent(body: string, plan: BatchPostPlan): Quality
       }
       break;
     case 'practical_tutorial':
-      if (!/\b(step|first|then|configure|implement|add|check|validate)\b/i.test(body)) {
+      if ((plan.expressionMode === 'walkthrough' || plan.editorialDecision?.rhetoricalStructure === 'FRAMEWORK_EXPLANATION_APPLICATION')
+          && !/\b(step|first|then|before|after|begin|next|process|sequence|apply|use|check|review)\b/i.test(body)) {
         issues.push({ code: 'tutorial_not_actionable', severity: 'error', instruction: 'Include actionable implementation steps.' });
       }
       break;
     case 'defensible_opinion':
       if (!/\b(because|since|reason|means|therefore|so that|which)\b/i.test(body)) {
         issues.push({ code: 'opinion_missing_reasoning', severity: 'error', instruction: 'Support the position with defensible reasoning.' });
-      }
-      break;
-    case 'product_lesson':
-      if (!/\b(user|reliability|maintain|cost|value|product|customer)\b/i.test(body)) {
-        issues.push({ code: 'product_lesson_weak', severity: 'warning', instruction: 'Connect to user value, reliability, or maintainability.' });
       }
       break;
     default:
@@ -348,6 +340,30 @@ export function runDeterministicValidation(
       instruction: 'Rewrite as a general engineering scenario. Do not attribute the experience to the author.',
     });
     score -= 30;
+  }
+
+  if (plan.editorialDecision) {
+    const opening = evaluateFirstThreeLines(body, {
+      personalEvidenceAvailable: plan.editorialDecision.personalEvidenceAvailable,
+      audienceTerms: author.targetAudience,
+    });
+    issues.push(...opening.issues);
+
+    const actualForm = classifyFinalPostFingerprint(body);
+    const repeatsActualForm = acceptedBodies.some((acceptedBody) => {
+      const acceptedForm = classifyFinalPostFingerprint(acceptedBody);
+      return acceptedForm.structure === actualForm.structure
+        && acceptedForm.argumentPattern === actualForm.argumentPattern;
+    });
+    if (repeatsActualForm) {
+      issues.push({
+        code: 'repeated_body_structure',
+        severity: 'warning',
+        evidence: [`${actualForm.argumentPattern} / ${actualForm.structure}`],
+        instruction: `Develop this idea through its assigned ${plan.editorialDecision.rhetoricalStructure} progression instead of repeating the prior post's body experience.`,
+      });
+      score -= 6;
+    }
   }
 
   issues.push(...detectDeterministicTechnicalIssues(body));
@@ -632,24 +648,25 @@ const RELAXABLE_BLOCKING_CODES = new Set([
   'product_lesson_weak',
 ]);
 
+export function isCriticalCandidateIssueCode(code: string): boolean {
+  return CRITICAL_BLOCKING_CODES.has(code)
+    || /(?:unsupported_(?:first_person|personal|authority)|authority_boundary|source_(?:evidence_)?loss|evidence_(?:loss|integrity)|factual_(?:safety|integrity)|prohibited|hard_platform)/i.test(code)
+    || code === 'body_above_linkedin_limit'
+    || code === 'generated_post_too_long';
+}
+
 export function filterBlockingIssues(issues: QualityIssue[], attempt: number): QualityIssue[] {
   const errors = issues.filter((i) => i.severity === 'error');
   if (attempt >= 7) {
-    return errors.filter((i) => CRITICAL_BLOCKING_CODES.has(i.code) || PERSISTENT_COMPLETENESS_CODES.has(i.code));
+    return errors.filter((i) => isCriticalCandidateIssueCode(i.code) || PERSISTENT_COMPLETENESS_CODES.has(i.code));
   }
   if (attempt >= 3) {
-    return errors.filter((i) => !RELAXABLE_BLOCKING_CODES.has(i.code) || CRITICAL_BLOCKING_CODES.has(i.code));
+    return errors.filter((i) => !RELAXABLE_BLOCKING_CODES.has(i.code) || isCriticalCandidateIssueCode(i.code));
   }
   return errors;
 }
 
 export function canForceAcceptBlockingCodes(codes: string[]): boolean {
   if (codes.length === 0) return true;
-  return codes.every((code) => RELAXABLE_BLOCKING_CODES.has(code) && !CRITICAL_BLOCKING_CODES.has(code));
-}
-
-export function isCriticalCandidateIssueCode(code: string): boolean {
-  return CRITICAL_BLOCKING_CODES.has(code)
-    || code === 'body_above_linkedin_limit'
-    || code === 'generated_post_too_long';
+  return codes.every((code) => RELAXABLE_BLOCKING_CODES.has(code) && !isCriticalCandidateIssueCode(code));
 }

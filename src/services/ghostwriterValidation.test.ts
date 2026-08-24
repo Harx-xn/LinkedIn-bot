@@ -136,7 +136,7 @@ describe('specificity scoring', () => {
 });
 
 describe('angle validation', () => {
-  it('fails debugging story without cause and prevention', () => {
+  it('does not force symptom, cause, check, and prevention sections from the angle label', () => {
     const issues = validateAngleContent('A bug happened and then things improved.', {
       trendIndex: 0,
       sourceTopic: 'queues',
@@ -146,7 +146,8 @@ describe('angle validation', () => {
       layout: 'story_then_lesson',
       rationale: 'test',
     });
-    assert.ok(issues.some((i) => i.severity === 'error'));
+    assert.ok(!issues.some((i) => i.severity === 'error'));
+    assert.ok(issues.some((i) => i.code === 'diagnostic_lens_weak'));
   });
 
   it('fails architecture trade-off with false dichotomy', () => {
@@ -165,7 +166,7 @@ describe('angle validation', () => {
     assert.ok(issues.some((i) => i.code === 'false_dichotomy' || i.code === 'tradeoff_missing'));
   });
 
-  it('fails tutorial without actionable steps', () => {
+  it('requires a sequence only when the assigned editorial form is a walkthrough', () => {
     const issues = validateAngleContent('Entitlements are important for SaaS products.', {
       trendIndex: 0,
       sourceTopic: 'entitlements',
@@ -174,6 +175,7 @@ describe('angle validation', () => {
       endingStyle: 'action',
       layout: 'technical_walkthrough',
       rationale: 'test',
+      expressionMode: 'walkthrough',
     });
     assert.ok(issues.some((i) => i.code === 'tutorial_not_actionable'));
   });

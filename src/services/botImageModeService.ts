@@ -12,6 +12,12 @@ import type {
   LinkedInImageAspectRatio,
 } from './generativeImagesService';
 import { applyOptionalBrandLogo } from './brandLogoService';
+import {
+  resolveMediaBehavior,
+  resolveMediaDecision,
+  runOptionalMediaOperation,
+  type MediaRecommendationResult,
+} from './mediaRecommendationService';
 
 export type BotImageMode = 'none' | 'providedBackground' | 'aiGenerated';
 
@@ -91,6 +97,8 @@ export interface BatchPostImageInput {
     bulletPoints?: string[];
   } | null;
   uploadKeyPrefix?: string;
+  mediaRecommendation?: MediaRecommendationResult;
+  existingAttachmentType?: string | null;
 }
 
 export function buildBatchGenerativeImageInput(
@@ -109,7 +117,17 @@ export function buildBatchGenerativeImageInput(
 export async function generateBatchPostMediaUrl(
   input: BatchPostImageInput,
 ): Promise<string | null> {
-  if (input.imageMode === 'none') {
+  const resolvedBehavior = resolveMediaBehavior({ imageMode: input.imageMode, backgroundImageUrl: input.backgroundImageUrl });
+  const mediaDecision = resolveMediaDecision({
+    behavior: resolvedBehavior.behavior,
+    recommendation: input.mediaRecommendation ?? {
+      recommendation: 'SIMPLE_IMAGE', confidence: 0, reason: 'Legacy batch media behavior.',
+    },
+    existingAttachmentType: input.existingAttachmentType,
+    allowedAutomaticTypes: ['IMAGE'],
+    legacyAlwaysGenerateTemplate: resolvedBehavior.legacyAlwaysGenerateTemplate,
+  });
+  if (mediaDecision.action !== 'GENERATE_IMAGE') {
     return null;
   }
 
@@ -124,10 +142,14 @@ export async function generateBatchPostMediaUrl(
         });
         return null;
       }
-      throw err;
+      console.warn('[batch] AI image entitlement check failed; preserving text post', {
+        userId: input.userId,
+        message: err instanceof Error ? err.message : 'unknown error',
+      });
+      return null;
     }
 
-    try {
+    return runOptionalMediaOperation(async () => {
       const generative = await getGenerativeImagesServiceForUser(input.userId);
       const generated = await generative.generateLinkedInPostImage(
         buildBatchGenerativeImageInput(input),
@@ -150,13 +172,7 @@ export async function generateBatchPostMediaUrl(
 
       await recordImageGeneration(input.userId);
       return mediaUrl;
-    } catch (err) {
-      console.warn('[batch] AI image generation failed', {
-        userId: input.userId,
-        message: err instanceof Error ? err.message : 'unknown error',
-      });
-      return null;
-    }
+    }, `batch-ai-image:${input.userId}`);
   }
 
   // providedBackground — existing template/background image flow
@@ -171,7 +187,7 @@ export async function generateBatchPostMediaUrl(
     return null;
   }
 
-  try {
+  return runOptionalMediaOperation(async () => {
     const mediaUrl = await input.imageService.createTopicImage(
       input.imageContent?.headline ?? input.finalized.headline,
       input.backgroundImageUrl ?? undefined,
@@ -193,11 +209,5 @@ export async function generateBatchPostMediaUrl(
     );
     await recordImageGeneration(input.userId);
     return mediaUrl;
-  } catch (err) {
-    console.warn('[batch] Template image generation failed', {
-      userId: input.userId,
-      message: err instanceof Error ? err.message : 'unknown error',
-    });
-    return null;
-  }
+  }, `batch-template-image:${input.userId}`);
 }

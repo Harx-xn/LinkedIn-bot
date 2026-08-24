@@ -1,4 +1,5 @@
 import { prisma } from '../prismaClient';
+import type { Prisma } from '@prisma/client';
 import { TOPIC_DIVERSITY_CONFIG } from '../config/topicDiversityConfig';
 import type { PostAngle, TopicFingerprint, TopicHistoryStatus } from './generationTypes';
 
@@ -57,17 +58,19 @@ export async function createGeneratedTopicHistory(input: {
   fingerprint: TopicFingerprint;
   angle?: PostAngle;
   knownNewPost?: boolean;
+  transaction?: Prisma.TransactionClient;
 }): Promise<void> {
   if (!input.postId) return;
+  const database = input.transaction ?? prisma;
 
   if (!input.knownNewPost) {
-    const existing = await prisma.generatedTopicHistory.findFirst({
+    const existing = await database.generatedTopicHistory.findFirst({
       where: { postId: input.postId },
     });
     if (existing) return;
   }
 
-  await prisma.generatedTopicHistory.create({
+  await database.generatedTopicHistory.create({
     data: {
       userId: input.userId,
       postId: input.postId,

@@ -4,6 +4,11 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../prismaClient';
 import type { EffectiveBotStrategy } from './botStrategyService';
+import {
+  FALLBACK_PROVENANCE,
+  logFallbackProvenance,
+  type FallbackProvenance,
+} from './fallbackProvenanceService';
 
 export type AuthorityMode = 'EXPLICIT_EXPERTISE' | 'SUPPORTED_PRACTITIONER' | 'INFERRED_FAMILIARITY' | 'EXPLORATORY' | 'UNKNOWN';
 export type ContentIntelligenceProfile = {
@@ -74,37 +79,166 @@ export function buildFallbackContentIntelligence(strategy: EffectiveBotStrategy)
   };
 }
 
-async function enrich(strategy: EffectiveBotStrategy, apiKey?: string | null): Promise<ContentIntelligenceProfile> {
+type SemanticEnrichmentAttempt =
+  | { success: true; profile: ContentIntelligenceProfile }
+  | { success: false; error: string };
+
+async function enrich(strategy: EffectiveBotStrategy, apiKey?: string | null): Promise<SemanticEnrichmentAttempt> {
   const fallback = buildFallbackContentIntelligence(strategy);
   const key = apiKey || process.env.OPENAI_API_KEY;
-  if (!key) return fallback;
+  if (!key) return { success: false, error: 'semantic_enrichment_unavailable:no_api_key' };
   const response = await new OpenAI({ apiKey: key }).chat.completions.create({
     model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini', temperature: 0.2,
     response_format: { type: 'json_object' },
     messages: [{ role: 'system', content: 'Conservatively enrich a LinkedIn content strategy. Return JSON matching the supplied fallback shape. Expand every pillar into niche-native territories and idea families. A selected niche is interest, not proof of expertise. Never invent biography, achievements, clients, projects, results, or first-person experience.' }, { role: 'user', content: JSON.stringify({ strategy, fallback }) }],
   });
   const parsed = profileSchema.safeParse(JSON.parse(response.choices[0]?.message?.content || '{}'));
-  return parsed.success ? { ...parsed.data, version: fallback.version } : fallback;
+  return parsed.success
+    ? { success: true, profile: { ...parsed.data, version: fallback.version } }
+    : { success: false, error: 'semantic_enrichment_invalid_profile' };
 }
 
-export async function getOrBuildContentIntelligence(userId: string, strategy: EffectiveBotStrategy, apiKey?: string | null): Promise<{ profile: ContentIntelligenceProfile; source: 'cache' | 'rebuilt' | 'fallback'; error?: string }> {
+type StoredContentIntelligence = {
+  inputFingerprint: string;
+  profile: unknown;
+  version: number;
+};
+
+type ContentIntelligenceResolutionDependencies = {
+  load: () => Promise<StoredContentIntelligence | null>;
+  enrich: () => Promise<SemanticEnrichmentAttempt>;
+  save: (profile: ContentIntelligenceProfile, inputFingerprint: string) => Promise<{ version: number }>;
+  deterministicFallback?: (strategy: EffectiveBotStrategy) => ContentIntelligenceProfile;
+};
+
+export type ContentIntelligenceSource = Extract<FallbackProvenance,
+  | 'CONTENT_INTELLIGENCE_CACHE'
+  | 'CONTENT_INTELLIGENCE_REBUILT'
+  | 'CONTENT_INTELLIGENCE_DETERMINISTIC_FALLBACK'
+  | 'STALE_PROFILE_RECOVERY'
+>;
+
+export type ContentIntelligenceResult = {
+  profile: ContentIntelligenceProfile;
+  source: ContentIntelligenceSource;
+  inputFingerprint: string;
+  profileInputFingerprint: string;
+  semanticEnrichmentSucceeded: boolean;
+  error?: string;
+};
+
+export async function resolveContentIntelligence(
+  userId: string,
+  strategy: EffectiveBotStrategy,
+  dependencies: ContentIntelligenceResolutionDependencies,
+): Promise<ContentIntelligenceResult> {
   const inputFingerprint = contentIntelligenceInputFingerprint(strategy);
-  const existing = await prisma.userContentIntelligence.findUnique({ where: { userId } });
+  const existing = await dependencies.load();
   if (existing?.inputFingerprint === inputFingerprint) {
     const parsed = profileSchema.safeParse(existing.profile);
-    if (parsed.success) return { profile: parsed.data, source: 'cache' };
+    if (parsed.success) {
+      logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_CACHE, userId, stage: 'content_intelligence' });
+      return {
+        profile: parsed.data,
+        source: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_CACHE,
+        inputFingerprint,
+        profileInputFingerprint: existing.inputFingerprint,
+        semanticEnrichmentSucceeded: false,
+      };
+    }
   }
+
+  let enrichment: SemanticEnrichmentAttempt;
   try {
-    const profile = await enrich(strategy, apiKey);
-    const saved = await prisma.userContentIntelligence.upsert({
+    enrichment = await dependencies.enrich();
+  } catch (error) {
+    enrichment = { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  if (enrichment.success) {
+    let version = enrichment.profile.version;
+    let persistenceError: string | undefined;
+    try {
+      version = (await dependencies.save(enrichment.profile, inputFingerprint)).version;
+    } catch (error) {
+      persistenceError = `semantic_profile_persistence_failed:${error instanceof Error ? error.message : String(error)}`;
+    }
+    logFallbackProvenance({
+      provenance: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_REBUILT,
+      userId,
+      stage: 'content_intelligence',
+      metadata: { persisted: !persistenceError },
+    });
+    return {
+      profile: { ...enrichment.profile, version },
+      source: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_REBUILT,
+      inputFingerprint,
+      profileInputFingerprint: inputFingerprint,
+      semanticEnrichmentSucceeded: true,
+      error: persistenceError,
+    };
+  }
+
+  try {
+    const profile = (dependencies.deterministicFallback ?? buildFallbackContentIntelligence)(strategy);
+    let version = profile.version;
+    let persistenceError: string | undefined;
+    try {
+      version = (await dependencies.save(profile, inputFingerprint)).version;
+    } catch (error) {
+      persistenceError = `deterministic_profile_persistence_failed:${error instanceof Error ? error.message : String(error)}`;
+    }
+    const error = [enrichment.error, persistenceError].filter(Boolean).join(';') || undefined;
+    logFallbackProvenance({
+      provenance: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_DETERMINISTIC_FALLBACK,
+      userId,
+      stage: 'content_intelligence',
+      reason: enrichment.error,
+      metadata: { currentStrategy: true, persisted: !persistenceError },
+    });
+    return {
+      profile: { ...profile, version },
+      source: FALLBACK_PROVENANCE.CONTENT_INTELLIGENCE_DETERMINISTIC_FALLBACK,
+      inputFingerprint,
+      profileInputFingerprint: inputFingerprint,
+      semanticEnrichmentSucceeded: false,
+      error,
+    };
+  } catch (fallbackError) {
+    const parsed = existing ? profileSchema.safeParse(existing.profile) : null;
+    if (!parsed?.success) throw fallbackError;
+    const error = `${enrichment.error};deterministic_fallback_failed:${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`;
+    logFallbackProvenance({
+      provenance: FALLBACK_PROVENANCE.STALE_PROFILE_RECOVERY,
+      userId,
+      stage: 'content_intelligence',
+      reason: error,
+      metadata: { currentStrategy: false, fingerprintMismatch: existing!.inputFingerprint !== inputFingerprint },
+    });
+    return {
+      profile: parsed.data,
+      source: FALLBACK_PROVENANCE.STALE_PROFILE_RECOVERY,
+      inputFingerprint,
+      profileInputFingerprint: existing!.inputFingerprint,
+      semanticEnrichmentSucceeded: false,
+      error,
+    };
+  }
+}
+
+export async function getOrBuildContentIntelligence(
+  userId: string,
+  strategy: EffectiveBotStrategy,
+  apiKey?: string | null,
+): Promise<ContentIntelligenceResult> {
+  return resolveContentIntelligence(userId, strategy, {
+    load: () => prisma.userContentIntelligence.findUnique({ where: { userId } }),
+    enrich: () => enrich(strategy, apiKey),
+    save: async (profile, inputFingerprint) => prisma.userContentIntelligence.upsert({
       where: { userId },
       create: { userId, profile: profile as unknown as Prisma.InputJsonValue, inputFingerprint, version: 1, confidence: profile.confidence },
       update: { profile: profile as unknown as Prisma.InputJsonValue, inputFingerprint, version: { increment: 1 }, confidence: profile.confidence, generatedAt: new Date() },
-    });
-    return { profile: { ...profile, version: saved.version }, source: 'rebuilt' };
-  } catch (error) {
-    console.warn('[content-intelligence] enrichment failed; continuing safely', { userId, message: error instanceof Error ? error.message : String(error), previousProfileRetained: !!existing });
-    const parsed = existing ? profileSchema.safeParse(existing.profile) : null;
-    return { profile: parsed?.success ? parsed.data : buildFallbackContentIntelligence(strategy), source: 'fallback', error: error instanceof Error ? error.message : String(error) };
-  }
+      select: { version: true },
+    }),
+  });
 }

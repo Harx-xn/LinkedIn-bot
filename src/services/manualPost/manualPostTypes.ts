@@ -39,6 +39,7 @@ export type ManualAngleCandidate = {
   audience: string;
   structure: string;
   evidenceMode: string;
+  experienceRelevance?: 'HIGH' | 'MEDIUM' | 'LOW';
   specificity: number;
   novelty: number;
   audienceFit: number;
@@ -58,9 +59,11 @@ export type SelectedManualPlan = {
   audience: string;
   structure: string;
   evidenceMode: string;
+  experienceRelevance?: 'HIGH' | 'MEDIUM' | 'LOW';
   hook: string;
   selectedHookType: string;
   depthPlan: PostDepthPlan;
+  shareabilityProfile?: import('../shareabilityIntelligenceService').ShareabilityProfile;
 };
 
 export type ManualCriticScores = {

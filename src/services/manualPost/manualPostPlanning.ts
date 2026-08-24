@@ -17,6 +17,7 @@ import {
   isBroadTopicAllowed,
   type ManualPostFingerprintRecord,
 } from './manualPostFingerprintService';
+import { classifyExperienceRelevance } from './personalExperienceService';
 
 const ANGLE_SCORE_WEIGHTS = {
   specificity: 0.25,
@@ -202,6 +203,7 @@ function normalizeAngle(raw: unknown): ManualAngleCandidate | null {
   const audience = typeof item.audience === 'string' ? item.audience.trim() : '';
   const structure = typeof item.structure === 'string' ? item.structure.trim() : '';
   const evidenceMode = typeof item.evidenceMode === 'string' ? item.evidenceMode.trim() : '';
+  const experienceRelevance = item.experienceRelevance === 'HIGH' || item.experienceRelevance === 'MEDIUM' ? item.experienceRelevance : 'LOW';
   if (!title || !coreClaim || !audience || !structure || !evidenceMode) return null;
 
   const hookCandidates = Array.isArray(item.hookCandidates)
@@ -216,6 +218,7 @@ function normalizeAngle(raw: unknown): ManualAngleCandidate | null {
     audience,
     structure,
     evidenceMode,
+    experienceRelevance,
     specificity: clampScore(item.specificity),
     novelty: clampScore(item.novelty),
     audienceFit: clampScore(item.audienceFit),
@@ -308,6 +311,7 @@ export function rejectAngle(
   angle: ManualAngleCandidate,
   topic: string,
   supportingContext?: string,
+  personalExperience?: string,
 ): string | null {
   const combined = `${angle.title} ${angle.coreClaim}`;
   const topicOverlap = overlapRatio(angle.coreClaim, topic);
@@ -331,7 +335,7 @@ export function rejectAngle(
     return 'requires invented stories';
   }
 
-  const allowedEvidence = `${supportingContext ?? ''} ${topic}`;
+  const allowedEvidence = `${supportingContext ?? ''} ${personalExperience ?? ''} ${topic}`;
   if (
     UNSUPPORTED_FACT_PATTERNS.some((pattern) => pattern.test(combined)) &&
     !UNSUPPORTED_FACT_PATTERNS.some((pattern) => pattern.test(allowedEvidence))
@@ -438,12 +442,13 @@ export function selectManualPlan(
   topic: string,
   supportingContext?: string,
   recentFingerprints: ManualPostFingerprintRecord[] = [],
+  personalExperience?: string,
 ): SelectedManualPlan {
   const evaluatedAngles = planning.angles
     .map((angle) => ({
       angle,
       rejection:
-        rejectAngle(angle, topic, supportingContext) ??
+        rejectAngle(angle, topic, supportingContext, personalExperience) ??
         evaluateAngleAgainstFingerprints(angle, recentFingerprints),
       score: scoreAngle(angle) - fingerprintPenaltyForAngle(angle, recentFingerprints),
     }));
@@ -476,16 +481,26 @@ export function selectManualPlan(
   const selectedHook = eligibleHooks[0]?.hook ?? null;
   const selectedCoreClaim = deriveNarrowCentralClaim({ topic, candidateClaim: selectedAngle.coreClaim });
   const selectedDepthPlan = selectedAngle.depthPlan ?? normalizeDepthPlan(undefined, selectedCoreClaim);
+  const experienceRelevance = personalExperience
+    ? (selectedAngle.experienceRelevance ?? classifyExperienceRelevance(topic, personalExperience))
+    : 'LOW';
+  const evidenceMode = experienceRelevance === 'LOW' && selectedAngle.evidenceMode === 'supplied_experience'
+    ? 'reasoned_observation'
+    : selectedAngle.evidenceMode;
+  const depthPlan = experienceRelevance === 'LOW' && personalExperience
+    ? { ...selectedDepthPlan, personalPerspective: { supported: false, insight: null } }
+    : selectedDepthPlan;
 
   return {
     title: selectedAngle.title,
     coreClaim: selectedCoreClaim,
     audience: selectedAngle.audience,
     structure: selectedAngle.structure,
-    evidenceMode: selectedAngle.evidenceMode,
+    evidenceMode,
+    experienceRelevance,
     hook: selectedHook?.text ?? '',
     selectedHookType: selectedHook?.type ?? 'specific_observation',
-    depthPlan: { ...selectedDepthPlan, centralClaim: selectedCoreClaim },
+    depthPlan: { ...depthPlan, centralClaim: selectedCoreClaim },
   };
 }
 
@@ -525,7 +540,7 @@ function buildFallbackDepthPlan(topic: string, centralClaim: string): PostDepthP
   };
 }
 
-export function createFallbackManualPlan(topic: string, expressionMode: ExpressionMode = 'direct', author?: import('../generationTypes').AuthorContext): SelectedManualPlan {
+export function createFallbackManualPlan(topic: string, expressionMode: ExpressionMode = 'direct', author?: import('../generationTypes').AuthorContext, personalExperience?: string): SelectedManualPlan {
   const trimmedTopic = topic.trim() || 'this topic';
   const centralClaim = deriveNarrowCentralClaim({ topic: trimmedTopic, expressionMode, author });
   return {
@@ -534,6 +549,7 @@ export function createFallbackManualPlan(topic: string, expressionMode: Expressi
     audience: 'Practitioners working on this topic',
     structure: getExpressionModeFallbackStructure(expressionMode),
     evidenceMode: 'reasoned_observation',
+    experienceRelevance: classifyExperienceRelevance(trimmedTopic, personalExperience),
     hook: '',
     selectedHookType: 'specific_observation',
     depthPlan: buildFallbackDepthPlan(trimmedTopic, centralClaim),

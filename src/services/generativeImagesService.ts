@@ -1,4 +1,5 @@
 import { GoogleGenAI, Modality } from '@google/genai';
+import { randomUUID } from 'node:crypto';
 
 const DEFAULT_GEMINI_IMAGE_MODEL =
   process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
@@ -38,6 +39,7 @@ export interface GenerateLinkedInPostImageInput {
   backgroundStyle?: ImageBackgroundStyle;
   textMode?: ImageTextMode;
   model?: string;
+  requestId?: string;
 }
 
 export interface GeneratedLinkedInImageResult {
@@ -54,13 +56,49 @@ function sleep(ms: number): Promise<void> {
 export class GenerativeImageError extends Error {
   status: number;
   code: string;
+  stage?: string;
+  providerDetails?: Record<string, unknown>;
+  requestId?: string;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, options: { stage?: string; providerDetails?: Record<string, unknown>; requestId?: string; cause?: unknown } = {}) {
     super(message);
     this.name = 'GenerativeImageError';
     this.status = status;
     this.code = code;
+    this.stage = options.stage;
+    this.providerDetails = options.providerDetails;
+    this.requestId = options.requestId;
+    if (options.cause !== undefined) (this as Error & { cause?: unknown }).cause = options.cause;
   }
+}
+
+type ProviderErrorShape = { status?: number; code?: number | string; message?: string; response?: { status?: number; data?: unknown }; error?: { code?: number | string; message?: string; status?: string; details?: unknown } };
+
+function safeProviderError(error: unknown): Record<string, unknown> {
+  const err = error as ProviderErrorShape;
+  return {
+    status: err?.status ?? err?.response?.status ?? err?.error?.code ?? err?.code,
+    providerStatus: err?.error?.status,
+    message: String(err?.error?.message ?? err?.message ?? 'Unknown provider error').slice(0, 800),
+    hasDetails: Boolean(err?.error?.details ?? err?.response?.data),
+  };
+}
+
+function imageLog(requestId: string, stage: string, event: string, data: Record<string, unknown> = {}): void {
+  console.info(JSON.stringify({ scope: 'ai-image', requestId, stage, event, ...data }));
+}
+
+function classifyProviderError(error: unknown, requestId: string): GenerativeImageError {
+  const details = safeProviderError(error);
+  const status = Number(details.status);
+  const message = String(details.message ?? '').toLowerCase();
+  if (status === 401 || status === 403 || message.includes('api key') || message.includes('permission_denied')) return new GenerativeImageError(502, 'AI_IMAGE_PROVIDER_AUTH_FAILED', 'The image provider rejected the configured credentials.', { stage: 'provider', providerDetails: details, requestId, cause: error });
+  if (status === 404 || message.includes('model') && (message.includes('not found') || message.includes('unsupported'))) return new GenerativeImageError(502, 'AI_IMAGE_MODEL_INVALID', 'The configured image model is unavailable.', { stage: 'provider', providerDetails: details, requestId, cause: error });
+  if (isRateLimitError(error)) return new GenerativeImageError(429, 'AI_IMAGE_PROVIDER_RATE_LIMITED', 'Image generation is temporarily rate limited. Try again shortly.', { stage: 'provider', providerDetails: details, requestId, cause: error });
+  if (status === 408 || status === 504 || message.includes('timeout') || message.includes('timed out')) return new GenerativeImageError(504, 'AI_IMAGE_PROVIDER_TIMEOUT', 'The image provider timed out. Try again.', { stage: 'provider', providerDetails: details, requestId, cause: error });
+  if (status === 400 || message.includes('safety') || message.includes('blocked') || message.includes('prohibited')) return new GenerativeImageError(422, 'AI_IMAGE_PROVIDER_REJECTED', 'The image provider could not generate this visual request.', { stage: 'provider', providerDetails: details, requestId, cause: error });
+  imageLog(requestId, 'provider', 'unclassified_error', details);
+  return new GenerativeImageError(502, 'AI_IMAGE_UNKNOWN_ERROR', 'AI image generation failed unexpectedly. Try again.', { stage: 'provider', providerDetails: details, requestId, cause: error });
 }
 
 function isRateLimitError(error: unknown): boolean {
@@ -496,14 +534,13 @@ export class GenerativeImagesService {
     retryCount = 0,
     qualityRetryCount = 0,
   ): Promise<GeneratedLinkedInImageResult> {
+    const requestId = input.requestId || randomUUID();
     if (!input.postText?.trim()) {
-      throw new Error('postText is required for LinkedIn image generation.');
+      throw new GenerativeImageError(400, 'AI_IMAGE_PROVIDER_REJECTED', 'Post content is required for image generation.', { stage: 'validation', requestId });
     }
 
     if (!this.geminiKeys.length) {
-      throw new Error(
-        'No Gemini API keys available. Pass decrypted regional Gemini keys into GenerativeImagesService.',
-      );
+      throw new GenerativeImageError(503, 'AI_IMAGE_CONFIG_MISSING', 'AI image generation is not configured for this region.', { stage: 'configuration', requestId });
     }
 
     const model = input.model || DEFAULT_GEMINI_IMAGE_MODEL;
@@ -513,6 +550,7 @@ export class GenerativeImagesService {
     try {
       const ai = this.getGeminiClient(usedKeyIndex);
       const prompt = buildLinkedInImagePrompt(input);
+      imageLog(requestId, 'provider', 'request_started', { model, aspectRatio, keyConfigured: true, keyIndex: usedKeyIndex, promptChars: prompt.length, promptPreview: prompt.slice(0, 160) });
 
       const response = await ai.models.generateContent({
         model,
@@ -527,27 +565,36 @@ export class GenerativeImagesService {
 
       const parts = response.candidates?.[0]?.content?.parts ?? [];
       const imagePart = parts.find((part) => part.inlineData?.data);
+      imageLog(requestId, 'provider', 'response_received', { candidateCount: response.candidates?.length ?? 0, finishReason: response.candidates?.[0]?.finishReason, partTypes: parts.map((part) => part.inlineData ? 'inlineData' : part.text ? 'text' : 'other'), hasImageData: Boolean(imagePart?.inlineData?.data) });
 
       if (!imagePart?.inlineData?.data) {
-        throw new Error(
-          'Gemini image generation did not return an image. Try adjusting the post text or instructions.',
-        );
+        const rejected = /SAFETY|BLOCK|PROHIBITED/i.test(String(response.candidates?.[0]?.finishReason ?? ''));
+        throw new GenerativeImageError(rejected ? 422 : 502, rejected ? 'AI_IMAGE_PROVIDER_REJECTED' : 'AI_IMAGE_EMPTY_RESPONSE', rejected ? 'The image provider declined this visual request.' : 'The image provider returned no image data.', { stage: 'response-parsing', requestId });
       }
 
       const mimeType = imagePart.inlineData.mimeType || 'image/png';
       const buffer = Buffer.from(imagePart.inlineData.data, 'base64');
+      if (!buffer.length) throw new GenerativeImageError(502, 'AI_IMAGE_INVALID_RESPONSE', 'The image provider returned invalid image data.', { stage: 'response-parsing', requestId });
+      imageLog(requestId, 'response-parsing', 'image_decoded', { mimeType, byteLength: buffer.length });
 
-      const textQuality = await this.inspectImageTextQuality(ai, buffer, mimeType, input.postText);
+      let textQuality: ImageTextQualityResult;
+      try {
+        textQuality = await this.inspectImageTextQuality(ai, buffer, mimeType, input.postText);
+      } catch (qualityError) {
+        imageLog(requestId, 'quality-review', 'review_unavailable_image_preserved', safeProviderError(qualityError));
+        return { buffer, mimeType, model, usedKeyIndex };
+      }
       if (!textQuality.passed) {
         if (qualityRetryCount >= MAX_IMAGE_TEXT_QUALITY_RETRIES) {
           throw new GenerativeImageError(
             502,
-            'GEMINI_IMAGE_TEXT_QUALITY_FAILED',
+            'AI_IMAGE_PROVIDER_REJECTED',
             'Could not generate an image with correctly spelled, complete, and fully visible text. Try shorter image text or disable visible text.',
           );
         }
 
         console.warn('[generative-images] Image text quality check failed. Regenerating.', {
+          requestId,
           qualityRetryCount: qualityRetryCount + 1,
           spellingErrors: textQuality.spellingErrors,
           incompleteWords: textQuality.incompleteWords,
@@ -558,6 +605,7 @@ export class GenerativeImagesService {
         const correctionInstructions = buildImageTextCorrectionInstructions(textQuality);
         return this.generateLinkedInPostImage({
           ...input,
+          requestId,
           instructions: [input.instructions?.trim(), correctionInstructions].filter(Boolean).join('\n\n'),
         }, retryCount, qualityRetryCount + 1);
       }
@@ -598,25 +646,17 @@ export class GenerativeImagesService {
 
         throw new GenerativeImageError(
           429,
-          'GEMINI_IMAGE_QUOTA_EXCEEDED',
-          'Gemini image quota is exhausted for the configured API keys. Check Gemini billing/limits or try again later.',
+          'AI_IMAGE_PROVIDER_RATE_LIMITED',
+          'Image generation is temporarily rate limited. Try again shortly.',
+          { stage: 'provider', providerDetails: safeProviderError(error), requestId, cause: error },
         );
       }
 
       const message = error instanceof Error ? error.message : String(error);
       if (message.toLowerCase().includes('no gemini api keys')) {
-        throw new GenerativeImageError(
-          400,
-          'GEMINI_NOT_CONFIGURED',
-          'Gemini is not configured for image generation in your region.',
-        );
+        throw new GenerativeImageError(503, 'AI_IMAGE_CONFIG_MISSING', 'AI image generation is not configured for this region.', { stage: 'configuration', requestId, cause: error });
       }
-
-      throw new GenerativeImageError(
-        502,
-        'GEMINI_IMAGE_GENERATION_FAILED',
-        'Could not generate an AI image. Try again or adjust the post text.',
-      );
+      throw classifyProviderError(error, requestId);
     }
   }
 }

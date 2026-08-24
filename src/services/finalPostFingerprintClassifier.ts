@@ -5,6 +5,7 @@ export type FinalPostFingerprintClassification = {
   argumentPattern: string;
   structure: string;
   endingType: string;
+  endingIntent: 'CONCLUSION' | 'INSIGHT' | 'PREDICTION' | 'OBSERVATION' | 'CHALLENGE' | 'QUESTION' | 'PERSONAL_NOTE' | 'SOFT_CTA' | 'NO_CTA';
   ctaType: string;
   mechanism: string | null;
   perspective: string;
@@ -33,28 +34,37 @@ export function classifyHookType(body: string): string {
   return 'DIRECT_CLAIM_HOOK';
 }
 
-export function classifyEnding(body: string): { endingType: string; ctaType: string } {
+export function classifyEnding(body: string): Pick<FinalPostFingerprintClassification, 'endingType' | 'endingIntent' | 'ctaType'> {
   const ending = paragraphs(body).at(-1) ?? body.trim();
   if (/\b(?:contact|message|dm|book|schedule|download|subscribe|learn more|link in)\b/i.test(ending)) {
-    return { endingType: 'PROMOTIONAL_CLOSE', ctaType: 'RESOURCE_OR_CONTACT_CTA' };
+    return { endingType: 'PROMOTIONAL_CLOSE', endingIntent: 'SOFT_CTA', ctaType: 'RESOURCE_OR_CONTACT_CTA' };
   }
   if (/\?$/.test(ending)) {
-    if (/\b(?:what|which|how|where)\b/i.test(ending)) return { endingType: 'DISCUSSION_QUESTION', ctaType: 'DISCUSSION_CTA' };
-    return { endingType: 'REFLECTIVE_QUESTION', ctaType: 'REFLECTION_CTA' };
+    if (/\b(?:what|which|how|where)\b/i.test(ending)) return { endingType: 'DISCUSSION_QUESTION', endingIntent: 'QUESTION', ctaType: 'DISCUSSION_CTA' };
+    return { endingType: 'REFLECTIVE_QUESTION', endingIntent: 'QUESTION', ctaType: 'REFLECTION_CTA' };
   }
   if (/^(?:try|start|use|check|review|ask|name|map|remove|choose|write|measure)\b/i.test(ending)) {
-    return { endingType: 'ACTION_CLOSE', ctaType: 'ACTION_CTA' };
+    return { endingType: 'ACTION_CLOSE', endingIntent: 'SOFT_CTA', ctaType: 'ACTION_CTA' };
   }
   if (/\b(?:the point|the takeaway|this means|which means|that is why|so the real|ultimately)\b/i.test(ending)) {
-    return { endingType: 'SYNTHESIS_CLOSE', ctaType: 'TAKEAWAY_CLOSE' };
+    return { endingType: 'SYNTHESIS_CLOSE', endingIntent: 'CONCLUSION', ctaType: 'TAKEAWAY_CLOSE' };
   }
   if (/\b(?:avoid|never|risk|warning|do not|don't)\b/i.test(ending)) {
-    return { endingType: 'CAUTION_CLOSE', ctaType: 'CAUTION_CLOSE' };
+    return { endingType: 'CAUTION_CLOSE', endingIntent: 'CHALLENGE', ctaType: 'CAUTION_CLOSE' };
   }
   if (/\b(?:worth|changes how|reveals|reminder|less about|more about)\b/i.test(ending)) {
-    return { endingType: 'REFLECTIVE_CLOSE', ctaType: 'REFLECTIVE_CLOSE' };
+    return { endingType: 'REFLECTIVE_CLOSE', endingIntent: 'INSIGHT', ctaType: 'REFLECTIVE_CLOSE' };
   }
-  return { endingType: 'NATURAL_RESOLUTION', ctaType: 'NO_EXPLICIT_CTA' };
+  if (/\b(?:will|likely|next|future|expect|is moving toward)\b/i.test(ending)) {
+    return { endingType: 'PREDICTION_CLOSE', endingIntent: 'PREDICTION', ctaType: 'NO_EXPLICIT_CTA' };
+  }
+  if (/\b(?:I|we|my|our)\b/.test(ending)) {
+    return { endingType: 'PERSONAL_NOTE_CLOSE', endingIntent: 'PERSONAL_NOTE', ctaType: 'NO_EXPLICIT_CTA' };
+  }
+  if (/\b(?:notice|observe|signal|pattern|tends? to|often)\b/i.test(ending)) {
+    return { endingType: 'OBSERVATION_CLOSE', endingIntent: 'OBSERVATION', ctaType: 'NO_EXPLICIT_CTA' };
+  }
+  return { endingType: 'NATURAL_RESOLUTION', endingIntent: 'NO_CTA', ctaType: 'NO_EXPLICIT_CTA' };
 }
 
 export function extractFinalMechanism(body: string, plannedMechanism?: string | null): string | null {

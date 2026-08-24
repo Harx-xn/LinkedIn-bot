@@ -7,12 +7,17 @@ import { buildManualFingerprintContextBlock } from './manualPostFingerprintPromp
 import type { ExpressionMode } from '../generationTypes';
 import type { ManualGeneratedPost, SelectedManualPlan } from './manualPostTypes';
 import { buildExpressionModePromptBlock } from '../expressionModeService';
+import type { ResolvedPersonalExperience } from './personalExperienceService';
 
 /** Manual-composer system instructions — isolated from batch GHOSTWRITER_SYSTEM usage in planned-post prompts. */
 export const MANUAL_COMPOSER_SYSTEM = `You are a LinkedIn composer assistant for the manual post editor.
 
 Write for the supplied author profile. The user provides a topic or rewrite instructions.
-Do not invent statistics, customers, incidents, revenue, costs, timelines, quotes, regulatory outcomes, or personal experiences unless explicitly supplied in the author profile or user-provided supporting context.
+Use first-person factual claims only when supported by:
+1. explicit current user input,
+2. selected user-supplied experience,
+3. other already-authorized manual evidence.
+Do not infer biography. Do not invent or embellish statistics, customers, incidents, revenue, costs, timelines, quotes, regulatory outcomes, achievements, or personal experiences.
 
 Priority order:
 1. Author credibility and supplied profile
@@ -92,10 +97,31 @@ Evidence rules with supporting context:
 - If context is absent or insufficient, use technical examples, reasoned observations, or labeled hypotheticals instead.`;
 }
 
-function buildEvidenceRulesBlock(hasSupportingContext: boolean): string {
-  if (hasSupportingContext) {
+export function buildPersonalExperienceBlock(
+  experience?: ResolvedPersonalExperience,
+  relevance?: 'HIGH' | 'MEDIUM' | 'LOW',
+): string {
+  if (!experience?.rawText.trim()) return '';
+  return `
+PERSONAL EXPERIENCE — USER-SUPPLIED FACTUAL EVIDENCE (separate from VOICE CONTEXT)
+${experience.rawText.trim()}
+${relevance ? `Planner relevance: ${relevance}` : 'Planner must classify relevance as HIGH, MEDIUM, or LOW for every angle.'}
+
+PERSONAL EXPERIENCE RULES:
+- For first-person experiential claims, this deliberately selected Experience Bank/current-request evidence is stronger than general profile, familiarity, discussion-history, niche, or authority signals.
+- This text authorizes only the facts it explicitly states. Paraphrase faithfully; do not embellish or extrapolate.
+- Do not invent numbers, dates, clients, scale, outcomes, causation, achievements, emotions, or lessons not supplied.
+- HIGH or MEDIUM relevance may be used when it strengthens the selected argument. LOW relevance should be ignored.
+- The experience is optional evidence, not a required story structure.
+- personalEvidencePotential and voice/style samples never authorize additional factual claims.`;
+}
+
+function buildEvidenceRulesBlock(hasSupportingContext: boolean, hasPersonalExperience = false): string {
+  if (hasSupportingContext || hasPersonalExperience) {
     return `- Use supplied supporting context only for claims it explicitly supports.
-- Do not imply broader personal experience than the context provides.`;
+- Use selected personal experience only for facts it explicitly states and only when planner relevance is HIGH or MEDIUM.
+- Do not imply broader personal experience than the supplied evidence provides.
+- Never invent numerical outcomes, clients, scale, dates, or achievements.`;
   }
   return `- No personal experience claims ("I", "my team", "we built", "last year I") unless present in the author profile.
 - Prefer sound technical reasoning or a reasoned observation. Use an example or labeled hypothetical only when it materially improves clarity, and integrate it naturally.`;
@@ -105,6 +131,7 @@ export function buildManualPostPromptV2(input: {
   topic: string;
   additionalInstructions?: string;
   supportingContext?: string;
+  personalExperience?: ResolvedPersonalExperience;
   author: AuthorContext;
   voiceContext?: ManualVoiceContext;
 }): string {
@@ -112,7 +139,8 @@ export function buildManualPostPromptV2(input: {
     ? `\nAdditional user instructions:\n${input.additionalInstructions.trim()}`
     : '';
   const supportingBlock = buildSupportingContextBlock(input.supportingContext);
-  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim());
+  const experienceBlock = buildPersonalExperienceBlock(input.personalExperience);
+  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim(), !!input.personalExperience);
 
   const voiceBlocks = buildManualVoiceContextBlocks(input.voiceContext);
 
@@ -123,6 +151,7 @@ Write an original LinkedIn post for the manual composer based on this topic or i
 ${input.topic.trim()}
 ${extraInstructions}
 ${supportingBlock}
+${experienceBlock}
 
 ${MANUAL_QUALITY_RULES}
 
@@ -165,6 +194,7 @@ export const MANUAL_PLANNING_OUTPUT_SCHEMA = `Output MUST be valid JSON with thi
       "audience": "string",
       "structure": "string",
       "evidenceMode": "technical_example | reasoned_observation | labeled_hypothetical | supplied_experience",
+      "experienceRelevance": "HIGH | MEDIUM | LOW",
       "specificity": 8,
       "novelty": 8,
       "audienceFit": 8,
@@ -235,6 +265,7 @@ export function buildManualPlanningPrompt(input: {
   topic: string;
   additionalInstructions?: string;
   supportingContext?: string;
+  personalExperience?: ResolvedPersonalExperience;
   author: AuthorContext;
   voiceContext?: ManualVoiceContext;
   recentFingerprints?: ManualPostFingerprintRecord[];
@@ -244,7 +275,8 @@ export function buildManualPlanningPrompt(input: {
     ? `\nAdditional user instructions:\n${input.additionalInstructions.trim()}`
     : '';
   const supportingBlock = buildSupportingContextBlock(input.supportingContext);
-  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim());
+  const experienceBlock = buildPersonalExperienceBlock(input.personalExperience);
+  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim(), !!input.personalExperience);
 
   const voiceBlocks = buildManualVoiceContextBlocks(input.voiceContext);
   const fingerprintBlocks = buildManualFingerprintContextBlock(input.recentFingerprints ?? []);
@@ -261,11 +293,12 @@ Plan 3-5 distinct LinkedIn post angles for this manual-composer topic:
 ${input.topic.trim()}
 ${extraInstructions}
 ${supportingBlock}
+${experienceBlock}
 ${retryBlock}
 
 Planning rules:
 - Generate 3-5 candidate angles internally in the JSON output.
-- Each angle must contain one central claim, audience, a concise reasoning direction in the structure field, evidenceMode, numeric planning scores, and 2-3 optional hookCandidates.
+- Each angle must contain one central claim, audience, a concise reasoning direction in the structure field, evidenceMode, experienceRelevance, numeric planning scores, and 2-3 optional hookCandidates.
 - The selected Expression Mode will own final rhetorical structure; do not prescribe the same hook/problem/example/advice/closing sequence for every angle.
 - Explicit Direction, Format, Tone, Angle, and Structure instructions take precedence over the default editorial bias. Treat broad labels such as "hook -> body -> close" and "three-part insight" as framing preferences, not mandatory equal-sized paragraph templates.
 - Reject vague hooks such as "One overlooked detail...", "In today's rapidly evolving landscape...", "Many businesses struggle with...", "Have you ever wondered...", "In the world of...", "This one thing can change everything...".
@@ -279,7 +312,8 @@ Planning rules:
 - Prefer the strongest two or three observations, then interpret them. Do not enumerate every plausible reason, benefit, risk, or recommendation.
 - Attempt one useful interpretation beyond surface advice when the topic supports it. Never manufacture fake profundity.
 - Populate only dimensions that genuinely deepen the claim. Record obvious restatements and generic recommendations in avoidIdeas.
-- Set personalPerspective.supported to true only when the author profile, writing samples, or supporting context directly supports the insight. Otherwise use false and null.
+- Classify the supplied PERSONAL EXPERIENCE independently for every angle: HIGH, MEDIUM, or LOW. HIGH/MEDIUM may use it; LOW should normally ignore it. When no experience is supplied, use LOW.
+- Set personalPerspective.supported to true only when explicit current input, the selected personal experience, the author profile, or other already-authorized manual evidence directly supports the insight. Voice/style samples describe how to write and do not authorize their stories or facts. Otherwise use false and null.
 - Use the author profile, target audience, niche strategy, and supplied context to choose what to narrow. This rule is domain-agnostic: do not assume the subject is software or force technical vocabulary.
 
 Evidence rules:
@@ -294,6 +328,7 @@ export function buildManualDraftPrompt(input: {
   topic: string;
   additionalInstructions?: string;
   supportingContext?: string;
+  personalExperience?: ResolvedPersonalExperience;
   author: AuthorContext;
   voiceContext?: ManualVoiceContext;
   expressionMode?: ExpressionMode;
@@ -304,7 +339,8 @@ export function buildManualDraftPrompt(input: {
     ? `\nAdditional user instructions:\n${input.additionalInstructions.trim()}`
     : '';
   const supportingBlock = buildSupportingContextBlock(input.supportingContext);
-  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim());
+  const experienceBlock = buildPersonalExperienceBlock(input.personalExperience, input.selectedPlan.experienceRelevance);
+  const evidenceRules = buildEvidenceRulesBlock(!!input.supportingContext?.trim(), !!input.personalExperience);
   const hookInstruction = input.selectedPlan.hook.trim()
     ? `Use this selected hook exactly unless a tiny coherence edit is required:\n${input.selectedPlan.hook.trim()}`
     : 'No hook was selected. Do not invent a hook wrapper. Return hook: "" and let the body begin directly in the form required by the Expression Mode.';
@@ -322,6 +358,7 @@ Topic:
 ${input.topic.trim()}
 ${extraInstructions}
 ${supportingBlock}
+${experienceBlock}
 
 Selected plan:
 - Angle title: ${input.selectedPlan.title}
@@ -329,7 +366,9 @@ Selected plan:
 - Audience: ${input.selectedPlan.audience}
 - Planning direction (not a mandatory section sequence): ${input.selectedPlan.structure}
 - Evidence mode: ${input.selectedPlan.evidenceMode}
+- Personal experience relevance: ${input.selectedPlan.experienceRelevance ?? 'LOW'}
 - Hook type: ${input.selectedPlan.selectedHookType}
+- Presentation goal: ${input.selectedPlan.shareabilityProfile?.presentationGuidance ?? 'Present the central claim clearly without manufacturing a list, framework, controversy, or CTA.'}
 
 DEPTH PLAN — intellectual backbone, not a mandatory section template:
 - Why interesting: ${input.selectedPlan.depthPlan.whyThisClaimIsInteresting ?? '(not needed)'}
@@ -375,6 +414,7 @@ export function buildManualTargetedRepairPrompt(input: {
   voiceContext?: ManualVoiceContext;
   expressionMode?: ExpressionMode;
   selectedPlan: SelectedManualPlan;
+  personalExperience?: ResolvedPersonalExperience;
   draft: ManualGeneratedPost;
   detectedIssues: string[];
   missingPlanDimension?: string | null;
@@ -384,6 +424,7 @@ export function buildManualTargetedRepairPrompt(input: {
   finalRecovery?: boolean;
 }): string {
   const voiceBlock = buildManualVoiceContextBlocks(input.voiceContext);
+  const experienceBlock = buildPersonalExperienceBlock(input.personalExperience, input.selectedPlan.experienceRelevance);
   const modeBlock = buildExpressionModePromptBlock(input.expressionMode, [], input.author.strategy);
   const missingDimension = input.missingPlanDimension
     ? `The post is below the minimum length. Develop the planned ${input.missingPlanDimension}; do not add an unrelated cause, example, list, or summary.`
@@ -414,6 +455,7 @@ ${input.unusedDepthDimensions?.length
   return `${MANUAL_COMPOSER_SYSTEM}
 ${buildAuthorBlock(input.author, { includeQualityContext: false })}
 ${voiceBlock}
+${experienceBlock}
 ${taskLabel} Return the repaired post directly.
 
 Topic: ${input.topic.trim()}
@@ -540,6 +582,7 @@ export function buildManualLengthRepairPrompt(input: {
   topic: string;
   additionalInstructions?: string;
   supportingContext?: string;
+  personalExperience?: ResolvedPersonalExperience;
   author: AuthorContext;
   voiceContext?: ManualVoiceContext;
   expressionMode?: ExpressionMode;
@@ -549,10 +592,12 @@ export function buildManualLengthRepairPrompt(input: {
   repairInstruction: string;
 }): string {
   const voiceBlocks = buildManualVoiceContextBlocks(input.voiceContext);
+  const experienceBlock = buildPersonalExperienceBlock(input.personalExperience, input.selectedPlan.experienceRelevance);
   const diversityBlock = buildExpressionModePromptBlock(input.expressionMode, input.recentPosts ?? [], input.author.strategy);
   return `${MANUAL_COMPOSER_SYSTEM}
 ${buildAuthorBlock(input.author, { includeQualityContext: false })}
 ${voiceBlocks}
+${experienceBlock}
 Repair the length of this existing draft without changing its selected architecture.
 
 ORIGINAL TOPIC:

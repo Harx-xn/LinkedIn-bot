@@ -21,20 +21,17 @@ export const generatedPostSchema = z.object({
   warnings: z.array(z.string()).optional(),
 });
 
-/** Strict OpenAI schema: every property must appear in `required`; omit optional model fields. */
+/** Strict writer schema. Planner metadata is injected by orchestration, not echoed by the model. */
 export const GENERATED_POST_OPENAI_JSON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['headline', 'subheadline', 'bulletPoints', 'body', 'hashtags', 'sourceTopic', 'angle', 'layout'],
+  required: ['headline', 'subheadline', 'bulletPoints', 'body', 'hashtags'],
   properties: {
     headline: { type: 'string', minLength: 1 },
     subheadline: { type: 'string' },
     bulletPoints: { type: 'array', items: { type: 'string' } },
     body: { type: 'string', minLength: 40 },
     hashtags: { type: 'string' },
-    sourceTopic: { type: ['string', 'null'] },
-    angle: { type: 'string' },
-    layout: { type: 'string' },
   },
 } as const;
 

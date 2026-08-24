@@ -62,6 +62,7 @@ export const MANUAL_PLANNING_OPENAI_JSON_SCHEMA = {
         additionalProperties: false,
         required: [
           'title', 'coreClaim', 'audience', 'structure', 'evidenceMode',
+          'experienceRelevance',
           'specificity', 'novelty', 'audienceFit', 'voiceFit',
           'evidenceAvailability', 'hookCandidates',
           'depthPlan',
@@ -75,6 +76,7 @@ export const MANUAL_PLANNING_OPENAI_JSON_SCHEMA = {
             type: 'string',
             enum: ['technical_example', 'reasoned_observation', 'labeled_hypothetical', 'supplied_experience'],
           },
+          experienceRelevance: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] },
           specificity: { type: 'number', minimum: 0, maximum: 10 },
           novelty: { type: 'number', minimum: 0, maximum: 10 },
           audienceFit: { type: 'number', minimum: 0, maximum: 10 },

@@ -151,7 +151,7 @@ describe('GenerativeImagesService', () => {
     const service = new GenerativeImagesService({ geminiApiKeys: ['test-key'] });
     await assert.rejects(
       () => service.generateLinkedInPostImage({ postText: '   ' }),
-      /postText is required/,
+      (error: unknown) => error instanceof GenerativeImageError && error.code === 'AI_IMAGE_PROVIDER_REJECTED',
     );
   });
 
@@ -159,14 +159,22 @@ describe('GenerativeImagesService', () => {
     const service = new GenerativeImagesService({ geminiApiKeys: [] });
     await assert.rejects(
       () => service.generateLinkedInPostImage({ postText: 'Hello LinkedIn' }),
-      /No Gemini API keys available/,
+      (error: unknown) => error instanceof GenerativeImageError && error.code === 'AI_IMAGE_CONFIG_MISSING',
     );
   });
 
   it('exposes GenerativeImageError for quota failures', () => {
-    const err = new GenerativeImageError(429, 'GEMINI_IMAGE_QUOTA_EXCEEDED', 'quota exhausted');
-    assert.equal(err.code, 'GEMINI_IMAGE_QUOTA_EXCEEDED');
+    const err = new GenerativeImageError(429, 'AI_IMAGE_PROVIDER_RATE_LIMITED', 'quota exhausted');
+    assert.equal(err.code, 'AI_IMAGE_PROVIDER_RATE_LIMITED');
     assert.equal(err.status, 429);
+  });
+
+  it('retains diagnostic stage and safe provider metadata', () => {
+    const err = new GenerativeImageError(502, 'AI_IMAGE_PROVIDER_AUTH_FAILED', 'credentials rejected', {
+      stage: 'provider', providerDetails: { status: 401, hasDetails: true },
+    });
+    assert.equal(err.stage, 'provider');
+    assert.deepEqual(err.providerDetails, { status: 401, hasDetails: true });
   });
 
   it('accepts constructor with decrypted geminiApiKeys array', () => {

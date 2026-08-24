@@ -48,8 +48,8 @@ describe('domain-agnostic claim narrowing', () => {
     const post: GeneratedPostContent = { headline: '', subheadline: '', bulletPoints: [], body: centralClaim, hashtags: '' };
     assert.match(buildPlanBlock(plan), new RegExp(centralClaim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(buildPlanBlock(plan), /SELECTED CENTRAL CLAIM — PRESERVE THIS MEANING/);
-    assert.match(buildRepairPrompt(post, ['generic'], author, plan), /Preserve the SELECTED CENTRAL CLAIM and its meaning/);
-    assert.match(buildExpandSpecificityPrompt(post, undefined, author, plan), /without changing the SELECTED CENTRAL CLAIM/);
+    assert.match(buildRepairPrompt(post, ['generic'], author, plan), /Preserve the claim contract/);
+    assert.match(buildExpandSpecificityPrompt(post, undefined, author, plan), /without changing the claim contract/);
   });
 
   it('preserves an already-specific user claim exactly', () => {

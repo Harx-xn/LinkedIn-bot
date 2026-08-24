@@ -17,11 +17,25 @@ export type IdeaQualityScore = {
   discussionPotential: number; freshnessWhenRelevant: number; recentSimilarityRisk: number; composite: number;
 };
 
+export type PersonalEvidencePotential = 'NONE' | 'OPTIONAL' | 'STRONGLY_BENEFICIAL';
+export type SemanticIdeaCritique = {
+  audienceRelevance: number; nonObviousness: number; specificity: number; usefulness: number;
+  authorOwnership: number; authorityFit: number; practicalConsequence: number; valueDensity: number;
+  shareability: number; discussionPotential: number; noveltyVsRecentContent: number;
+  mechanismNovelty: number; defensibility: number;
+};
+
 export type ContentIdeaCandidate = {
   id: string; pillar: string; territory: string; coreClaim: string; mechanism: string;
   perspective: string; ideaFamily: string; origin: IdeaOrigin; authorityMode: import('./contentIntelligenceService').AuthorityMode;
   searchRequired: boolean; score: IdeaQualityScore; saturationPenalty: number; rejectedReasons: string[];
   memoryPenalty?: number; memoryReasons?: string[];
+  audienceConsequence?: string;
+  evidenceNeed?: 'NONE' | 'CURRENT_FACTS' | 'EXTERNAL_VERIFICATION' | 'USER_EXPERIENCE';
+  authorityRequirement?: import('./contentIntelligenceService').AuthorityMode;
+  personalEvidencePotential?: PersonalEvidencePotential;
+  generationMode?: 'SEMANTIC' | 'DETERMINISTIC_FALLBACK';
+  semanticCritique?: SemanticIdeaCritique;
 };
 
 const OBVIOUS = /\b(is important|matters|should be considered|best practices are important|need optimization|testing before launch)\b/i;
@@ -35,7 +49,8 @@ export function scoreContentIdea(input: Omit<ContentIdeaCandidate, 'score' | 're
   const similarity = similarityRisk(`${input.coreClaim} ${input.mechanism}`, history);
   const wordCount = input.coreClaim.trim().split(/\s+/).length;
   const nonObviousness = OBVIOUS.test(input.coreClaim) ? 20 : /\b(until|unless|but|instead|rather|only when|cost|trade-off|hidden)\b/i.test(input.coreClaim) ? 85 : 65;
-  const specificityPotential = wordCount >= 8 && wordCount <= 28 && !BROAD.test(input.coreClaim) ? 80 : 45;
+  const categorySummary = wordCount < 7 || (/^[\w\s&/-]+\s+for\s+[\w\s&/-]+[.!]?$/i.test(input.coreClaim) && !/\b(should|cannot|can|fails?|changes?|reduces?|increases?|depends?|creates?|removes?|becomes?|starts?|needs?|wins?|fix(?:es)?)\b/i.test(input.coreClaim));
+  const specificityPotential = wordCount >= 8 && wordCount <= 32 && !BROAD.test(input.coreClaim) && !categorySummary ? 80 : 25;
   const authorityFit = input.authorityMode === 'EXPLICIT_EXPERTISE' ? 95 : input.authorityMode === 'SUPPORTED_PRACTITIONER' ? 85 : input.authorityMode === 'INFERRED_FAMILIARITY' ? 70 : input.authorityMode === 'EXPLORATORY' ? 60 : 45;
   const score = {
     strategyFit: 85, audienceValue: 75, novelty: 100 - similarity, nonObviousness, authorityFit,
@@ -71,7 +86,7 @@ export function buildStrategyIdeaCandidates(profile: ContentIntelligenceProfile,
     const authority = profile.authorityMap.find((a) => a.territory.toLowerCase() === territory.territory.toLowerCase());
     for (const [index, family] of territory.ideaFamilies.slice(0, 6).entries()) {
       const made = claimFor(territory.territory, family, audience, strategy.targetAudience.painPoints[index % Math.max(1, strategy.targetAudience.painPoints.length)]);
-      const base = { id: `${territory.pillar}:${territory.territory}:${family}`, pillar: territory.pillar, territory: territory.territory, coreClaim: made.claim, mechanism: made.mechanism, perspective: profile.ideaStrategy.underusedPerspectives[index % Math.max(1, profile.ideaStrategy.underusedPerspectives.length)] || 'audience decision', ideaFamily: family, origin: 'STRATEGY_DERIVED' as const, authorityMode: authority?.mode ?? 'EXPLORATORY' as const, searchRequired: false, saturationPenalty };
+      const base = { id: `${territory.pillar}:${territory.territory}:${family}`, pillar: territory.pillar, territory: territory.territory, coreClaim: made.claim, mechanism: made.mechanism, perspective: profile.ideaStrategy.underusedPerspectives[index % Math.max(1, profile.ideaStrategy.underusedPerspectives.length)] || 'audience decision', ideaFamily: family, origin: 'STRATEGY_DERIVED' as const, authorityMode: authority?.mode ?? 'EXPLORATORY' as const, searchRequired: false, saturationPenalty, generationMode: 'DETERMINISTIC_FALLBACK' as const, personalEvidencePotential: 'NONE' as const };
       const evaluated = scoreContentIdea(base, history);
       candidates.push({ ...base, ...evaluated });
     }
@@ -123,6 +138,6 @@ export function selectDiverseIdeas(
 
 export function ideaToRankedCandidate(idea: ContentIdeaCandidate): RankedTrendCandidate {
   const fingerprint: TopicFingerprint = { normalizedTopic: idea.territory.toLowerCase(), topicCluster: idea.territory.toLowerCase().replace(/\W+/g, '_'), coreClaim: idea.coreClaim, entities: [idea.pillar, idea.territory], mechanisms: [idea.mechanism] };
-  const trend: TrendCandidate = { topic: idea.coreClaim, niche: idea.pillar, originNiche: idea.pillar, summary: idea.coreClaim, suggestedAngle: idea.ideaFamily, audienceRelevance: idea.perspective, source: 'evergreen', sourceType: 'strategy_derived', ideaOrigin: idea.origin, territory: idea.territory, ideaFamily: idea.ideaFamily, authorityMode: idea.authorityMode, searchRequired: idea.searchRequired, ideaQualityScore: idea.score.composite, saturationPenalty: idea.saturationPenalty, fingerprint };
+  const trend: TrendCandidate = { topic: idea.coreClaim, niche: idea.pillar, originNiche: idea.pillar, summary: idea.coreClaim, suggestedAngle: idea.ideaFamily, audienceRelevance: idea.perspective, source: 'evergreen', sourceType: 'strategy_derived', ideaOrigin: idea.origin, territory: idea.territory, ideaFamily: idea.ideaFamily, authorityMode: idea.authorityMode, searchRequired: idea.searchRequired, ideaQualityScore: idea.score.composite, saturationPenalty: idea.saturationPenalty, audienceConsequence: idea.audienceConsequence, evidenceNeed: idea.evidenceNeed, personalEvidencePotential: idea.personalEvidencePotential, shareabilityHint: idea.semanticCritique?.shareability, ideaGenerationMode: idea.generationMode, fingerprint };
   return { trend, fingerprint, relevanceScore: idea.score.strategyFit, sourceQualityScore: 70, recencyScore: 70, technicalDepthScore: idea.score.specificityPotential, noveltyScore: idea.score.novelty, totalScore: idea.score.composite, novelty: { allowed: idea.rejectedReasons.length === 0, score: idea.score.novelty, reasons: idea.rejectedReasons }, contentType: 'evergreen', matchedPillar: idea.pillar, suggestedAngle: idea.ideaFamily, audienceRelevance: idea.perspective };
 }

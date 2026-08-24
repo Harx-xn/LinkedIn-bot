@@ -5,18 +5,21 @@ import { ManualPostError } from '../manualPostService';
 import { evaluateDeterministicDraftQuality, preservedFactsSurviveRevision } from './manualPostCritic';
 import { assembleManualPostBody, normalizeManualHashtags } from './manualPostFormatting';
 import { invokeManualDraftPrompt, invokeManualPlanningPrompt, invokeManualTargetedRepairPrompt } from './manualAiProvider';
-import { buildManualDraftPrompt, buildManualPlanningPrompt, buildManualTargetedRepairPrompt, EDITORIAL_AUTHORITY } from './manualPostPrompts';
+import { buildManualDraftPrompt, buildManualPlanningPrompt, buildManualTargetedRepairPrompt, buildPersonalExperienceBlock, EDITORIAL_AUTHORITY } from './manualPostPrompts';
 import { createFallbackManualPlan, ManualPlanValidationError, selectManualPlan, selectedPlanToContentPlan } from './manualPostPlanning';
 import type { ManualVoiceContext } from './manualVoiceProfileService';
 import type { ManualPostFingerprintRecord } from './manualPostFingerprintService';
 import type { ManualGeneratedPost, ManualProviderCallBudget, SelectedManualPlan } from './manualPostTypes';
 import { evaluateGeneratedPostLength } from '../generatedPostLength';
 import { estimatePromptTokens, logGenerationTelemetry } from '../generationTelemetry';
+import type { ResolvedPersonalExperience } from './personalExperienceService';
+import { assessShareability } from '../shareabilityIntelligenceService';
 
 export type ManualGenerationStageInput = {
   topic: string;
   additionalInstructions?: string;
   supportingContext?: string;
+  personalExperience?: ResolvedPersonalExperience;
   author: AuthorContext;
   voiceContext?: ManualVoiceContext;
   recentFingerprints?: ManualPostFingerprintRecord[];
@@ -79,8 +82,9 @@ Audience/profile: ${input.author.targetAudience?.join(', ') || input.author.desc
 Tone: ${input.author.tone || 'professional'}
 Expression mode: ${input.expressionMode || 'natural'}
 ${input.additionalInstructions ? `User instructions: ${input.additionalInstructions}` : ''}
+${buildPersonalExperienceBlock(input.personalExperience)}
 
-Return strict JSON only with: contentPlan (angle, coreClaim, audience, structure, hookType, evidenceType, ctaType), hook, body, closingLine, hashtags, and sourceTopic. Do not invent facts or sources.`;
+Return strict JSON only with: contentPlan (angle, coreClaim, audience, structure, hookType, evidenceType, ctaType), hook, body, closingLine, hashtags, and sourceTopic. Use first-person factual claims only when explicitly supported by current input or PERSONAL EXPERIENCE. Do not invent facts, numerical outcomes, or sources.`;
 }
 
 export function selectBestUsableManualCandidate<T extends {
@@ -214,6 +218,7 @@ function estimatePromptContributions(input: ManualGenerationStageInput, selected
     voiceSamples: estimatePromptTokens(voiceSamples),
     recentFingerprints: estimatePromptTokens(JSON.stringify(input.recentFingerprints ?? []), compactRecentEstimate),
     topicContext: estimatePromptTokens(input.topic, input.additionalInstructions ?? '', input.supportingContext ?? ''),
+    personalExperience: estimatePromptTokens(input.personalExperience?.rawText ?? ''),
     depthPlan: estimatePromptTokens(JSON.stringify(selectedPlan.depthPlan)),
     editorialRules: estimatePromptTokens(EDITORIAL_AUTHORITY),
   };
@@ -238,14 +243,14 @@ export async function runManualGenerationMultiStage(
   try {
     const planningRaw = await invokeManualPlanningPrompt(contentService, planningPrompt, provider, budget);
     try {
-      selectedPlan = selectManualPlan(planningRaw, input.topic, input.supportingContext, input.recentFingerprints ?? []);
+      selectedPlan = selectManualPlan(planningRaw, input.topic, input.supportingContext, input.recentFingerprints ?? [], input.personalExperience?.rawText);
     } catch (error) {
       if (!(error instanceof ManualPlanValidationError)) throw error;
       firstPlannerValidationFailure = error.message;
       plannerValidationFailureReason = `attempt 1: ${error.message}`;
       const retryPrompt = buildManualPlanningPrompt({ ...input, planningRetryIssues: error.issues });
       const retried = await invokeManualPlanningPrompt(contentService, retryPrompt, provider, budget);
-      selectedPlan = selectManualPlan(retried, input.topic, input.supportingContext, input.recentFingerprints ?? []);
+      selectedPlan = selectManualPlan(retried, input.topic, input.supportingContext, input.recentFingerprints ?? [], input.personalExperience?.rawText);
     }
   } catch (error) {
     const finalFailure = error instanceof Error ? error.message : String(error);
@@ -256,8 +261,27 @@ export async function runManualGenerationMultiStage(
     console.warn('[manual-post-v2] planning failed after at most one retry; using fallback plan', {
       message: plannerValidationFailureReason,
     });
-    selectedPlan = createFallbackManualPlan(input.topic, input.expressionMode, input.author);
+    selectedPlan = createFallbackManualPlan(input.topic, input.expressionMode, input.author, input.personalExperience?.rawText);
   }
+
+  selectedPlan = {
+    ...selectedPlan,
+    shareabilityProfile: assessShareability({
+      centralClaim: selectedPlan.coreClaim,
+      mechanism: selectedPlan.depthPlan.underlyingCauseOrMechanism,
+      audienceConsequence: selectedPlan.depthPlan.meaningfulConsequence,
+      ideaFamily: selectedPlan.structure,
+      supportingText: [
+        selectedPlan.depthPlan.deeperInterpretation,
+        selectedPlan.depthPlan.usefulTensionOrQualification,
+        ...selectedPlan.depthPlan.strongestObservations,
+      ].filter(Boolean).join(' '),
+      personalEvidenceAvailable: Boolean(
+        input.personalExperience
+        && selectedPlan.experienceRelevance !== 'LOW'
+      ),
+    }),
+  };
 
   const draftPrompt = buildManualDraftPrompt({ ...input, selectedPlan });
   let draft: ManualGeneratedPost;
@@ -325,6 +349,7 @@ export async function runManualGenerationMultiStage(
       voiceContext: input.voiceContext,
       expressionMode: input.expressionMode,
       selectedPlan,
+      personalExperience: input.personalExperience,
       draft,
       detectedIssues: uniqueRepairIssues,
       missingPlanDimension,
@@ -371,6 +396,7 @@ export async function runManualGenerationMultiStage(
       voiceContext: input.voiceContext,
       expressionMode: input.expressionMode,
       selectedPlan,
+      personalExperience: input.personalExperience,
       draft,
       detectedIssues: recoveryIssues,
       missingPlanDimension,
@@ -446,6 +472,12 @@ export async function runManualGenerationMultiStage(
       ...selectedCandidate.qualityWarnings,
       ...(finalLength < 1600 ? ['POST_BELOW_MINIMUM_LENGTH'] : []),
     ],
+    shareabilityPotential: selectedPlan.shareabilityProfile?.overallPotential,
+    shareabilityValueType: selectedPlan.shareabilityProfile?.valueType,
+    recommendedPresentation: selectedPlan.shareabilityProfile?.recommendedPresentation,
+    actualPresentationUsed: selectedPlan.shareabilityProfile
+      ? (finalLength < 700 ? 'COMPACT_TEXT' : finalPost.body.split(/\n\s*\n/).filter(Boolean).length >= 3 ? 'STRUCTURED_TEXT' : 'PLAIN_TEXT')
+      : undefined,
     plannerFallbackUsed,
     plannerValidationFailureReason,
   });

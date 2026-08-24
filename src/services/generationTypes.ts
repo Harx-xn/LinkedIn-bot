@@ -124,6 +124,12 @@ export type TrendCandidate = {
   searchRequired?: boolean;
   ideaQualityScore?: number;
   saturationPenalty?: number;
+  audienceConsequence?: string;
+  evidenceNeed?: 'NONE' | 'CURRENT_FACTS' | 'EXTERNAL_VERIFICATION' | 'USER_EXPERIENCE';
+  personalEvidencePotential?: 'NONE' | 'OPTIONAL' | 'STRONGLY_BENEFICIAL';
+  /** Optional semantic-critic hint. It is never a publishability gate. */
+  shareabilityHint?: number;
+  ideaGenerationMode?: 'SEMANTIC' | 'DETERMINISTIC_FALLBACK';
   selectionMode?: 'normal' | 'zero_result_fallback';
   discoveryIntent?: DiscoveryIntent;
   evidenceRole?: EvidenceRole;
@@ -392,9 +398,74 @@ export type AuthorContext = {
   targetAudience?: string[];
   strategy?: import('./botStrategyService').EffectiveBotStrategy;
   contentIntelligence?: import('./contentIntelligenceService').ContentIntelligenceProfile;
+  authorityContext?: import('./userKnowledgeAuthorityService').GenerationAuthorityContext;
 };
 
 export type ExpressionMode = 'direct' | 'analytical' | 'diagnostic' | 'conversational' | 'opinionated' | 'walkthrough' | 'reflective';
+
+export type ContentObjective =
+  | 'TEACH'
+  | 'BUILD_AUTHORITY'
+  | 'BUILD_TRUST'
+  | 'CREATE_DISCUSSION'
+  | 'SHOW_EXPERIENCE'
+  | 'CHALLENGE_ASSUMPTION'
+  | 'CREATE_REFERENCE_VALUE'
+  | 'GENERATE_PROFILE_INTEREST';
+
+export type ConversionObjective = 'NONE' | 'FOLLOW' | 'PROFILE_VISIT' | 'COMMENT' | 'DM' | 'WEBSITE';
+
+export type EditorialHookFamily =
+  | 'FIRST_PERSON_LESSON'
+  | 'OBSERVATION'
+  | 'CONTRARIAN_CLAIM'
+  | 'SPECIFIC_RESULT'
+  | 'MISTAKE'
+  | 'COMPARISON'
+  | 'QUESTION'
+  | 'STORY_OPENING'
+  | 'DIRECT_VALUE_PROMISE';
+
+export type RhetoricalStructure =
+  | 'CLAIM_EXPLANATION_IMPLICATION'
+  | 'STORY_TURNING_POINT_LESSON'
+  | 'OBSERVATION_MECHANISM_CONSEQUENCE'
+  | 'MISTAKE_CAUSE_CORRECTION'
+  | 'COMPARISON_DISTINCTION_DECISION'
+  | 'QUESTION_ANSWER_TAKEAWAY'
+  | 'FRAMEWORK_EXPLANATION_APPLICATION'
+  | 'COMPACT_INSIGHT';
+
+export type EditorialEndingIntent =
+  | 'CONCLUSION'
+  | 'INSIGHT'
+  | 'PREDICTION'
+  | 'OBSERVATION'
+  | 'CHALLENGE'
+  | 'QUESTION'
+  | 'PERSONAL_NOTE'
+  | 'SOFT_CTA'
+  | 'NO_CTA';
+
+export type ReferenceValueForm =
+  | 'NONE'
+  | 'MEMORABLE_DISTINCTION'
+  | 'FRAMEWORK'
+  | 'HEURISTIC'
+  | 'USEFUL_EXPLANATION'
+  | 'EXPERIENCE_LESSON';
+
+export type EditorialDecision = {
+  contentObjective: ContentObjective;
+  conversionObjective: ConversionObjective;
+  hookFamily: EditorialHookFamily;
+  rhetoricalStructure: RhetoricalStructure;
+  endingIntent: EditorialEndingIntent;
+  referenceValueForm: ReferenceValueForm;
+  personalEvidenceAvailable: boolean;
+  shareabilityProfile?: import('./shareabilityIntelligenceService').ShareabilityProfile;
+  rationale: string[];
+};
 
 export type PostAngle =
   | 'technical_mistake'
@@ -473,6 +544,8 @@ export type BatchPostPlan = {
   suggestedAngle?: string;
   audienceRelevance?: string;
   expressionMode?: ExpressionMode;
+  /** Idea-aware editorial form. This is authoritative over legacy rotation labels. */
+  editorialDecision?: EditorialDecision;
   depthPlan?: PostDepthPlan;
   /** Runtime-only execution metadata. It is derived from the idea/plan, not user configuration. */
   depthClass?: PostDepth;

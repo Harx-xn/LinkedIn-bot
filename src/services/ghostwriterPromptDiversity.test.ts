@@ -16,14 +16,14 @@ test('global production rules do not prescribe one six-stage essay progression',
   assert.doesNotMatch(globalRules, /hook, problem, mechanism, example, action, takeaway/i);
   assert.doesNotMatch(globalRules, /Recommended progression/i);
   assert.doesNotMatch(globalRules, /Voice Plan|adaptive (?:character )?range/i);
-  assert.match(globalRules, /Not every post needs a problem statement, example/);
-  assert.match(DEFAULT_EDITORIAL_RULES, /End by sharpening, reframing, resolving, exposing a tension, or stopping/);
-  assert.match(GHOSTWRITER_SYSTEM, /single most natural credible form/);
-  assert.match(GHOSTWRITER_SYSTEM, /do not include all of these forms/);
+  assert.match(globalRules, /Zero paragraphs, examples, lists, questions, conclusions, or CTAs are mandatory/);
+  assert.match(DEFAULT_EDITORIAL_RULES, /End on the final substantive move/);
+  assert.match(GHOSTWRITER_SYSTEM, /Depth-proportional completeness/);
+  assert.match(GHOSTWRITER_SYSTEM, /Natural LinkedIn formatting/);
 });
 
 test('examples, consequences, and explicit endings are optional globally', () => {
-  assert.match(SPECIFICITY_RULES, /Do not add a failure scenario, consequence, action step, example, trade-off, or implementation boundary unless the idea genuinely needs it/);
+  assert.match(SPECIFICITY_RULES, /optional reasoning dimensions, not mandatory sections of the final post/);
   assert.doesNotMatch(VARY_FORMAT_RULES_FOR_ASSERTION(), /Show one realistic scenario/);
   assert.doesNotMatch(LINKEDIN_LINE_FORMAT_RULES, /End with a useful takeaway/);
 });
@@ -47,24 +47,24 @@ test('batch repair preserves the selected expression mode and unusual structure'
   const post: GeneratedPostContent = { body: 'Pagination is part of the API contract.', headline: '', subheadline: '', bulletPoints: [], hashtags: '' };
   const prompt = buildRepairPrompt(post, ['clarify mechanism'], author, plan);
   assert.match(prompt, /EXPRESSION MODE: DIRECT/);
-  assert.match(prompt, /preserving its successful rhetorical shape/);
-  assert.match(prompt, /Do not add a scenario, action steps, takeaway, CTA, question, or closing section/);
+  assert.match(prompt, /Preserve the claim contract, verified facts, successful rhetorical movement/);
+  assert.match(prompt, /Do not normalize the draft into an essay or add a scenario, list, action step, conclusion, question, or CTA/);
 });
 
 test('expression modes define distinct movement, optional moves, avoids, and stopping behavior', () => {
   const expected: Record<string, RegExp[]> = {
-    direct: [/CLAIM -> SUPPORT -> STOP/, /scenarios, recommendation sections/, /completed the argument and satisfied the generation contract/],
-    analytical: [/CAUSAL REASONING/, /automatic pivot from analysis into advice/, /causal relationship and its implication/],
-    diagnostic: [/symptom -> trace -> cause -> fix or decision/, /educational setup/, /cause and appropriate response/],
-    conversational: [/observation -> free-form discussion/, /announced hypothetical stories/, /real person would naturally stop/],
-    opinionated: [/POSITION -> REASONS -> OPTIONAL QUALIFICATION/, /forced balance/, /position has been sufficiently defended/],
-    walkthrough: [/GOAL -> SEQUENCE OR PROCESS/, /lesson after the final step/, /last meaningful step may be the final line/],
-    reflective: [/OBSERVATION -> IMPLICATION/, /Do not force recommendations, action steps, lessons/, /end on the implication or observation/],
+    direct: [/State the claim immediately/, /strongest support/, /then stop/],
+    analytical: [/causal reasoning/, /implication or condition/, /do not automatically pivot/],
+    diagnostic: [/concrete signal/, /relevant cause and response/, /each optional/],
+    conversational: [/natural spoken progression/, /mixed cadence/, /naturally completes/],
+    opinionated: [/position clear early/, /credible reasoning/, /forced balance/],
+    walkthrough: [/actual sequence or process/, /intrinsic steps/, /last meaningful step/],
+    reflective: [/precise observation/, /useful implication/, /CTAs are optional/],
   };
   for (const [mode, patterns] of Object.entries(expected)) {
     const block = buildExpressionModePromptBlock(mode as ExpressionMode, []);
     for (const pattern of patterns) assert.match(block, pattern);
-    assert.match(block, /A complete post may use only 2 or 3 rhetorical moves/);
+    assert.match(block, /does not add mandatory sections/);
   }
 });
 

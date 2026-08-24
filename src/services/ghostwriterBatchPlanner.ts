@@ -1,17 +1,23 @@
 import type {
   AuthorContext,
   BatchPostPlan,
-  HookStyle,
   PostAngle,
-  PostLayout,
   RankedTrendCandidate,
   TrendCandidate,
 } from './generationTypes';
 import { resolvePlanAngle } from './ghostwriterValidationService';
-import { selectBatchExpressionMode } from './expressionModeService';
 import type { WritingStyle } from './botStrategyService';
 import { withDerivedPostDepth } from './postDepth';
 import { resolveClaimSource } from './claimNarrowingService';
+import type { RecentContentMemory } from './recentContentMemoryService';
+import type { AccountPerformanceProfile } from './accountPerformanceLearningService';
+import {
+  expressionModeForDecision,
+  inferEditorialAngle,
+  legacyHookStyle,
+  legacyLayout,
+  selectEditorialDecision,
+} from './editorialDecisionService';
 
 const DEFAULT_ANGLE_SEQUENCE: PostAngle[] = [
   'technical_mistake',
@@ -23,43 +29,23 @@ const DEFAULT_ANGLE_SEQUENCE: PostAngle[] = [
   'reflection',
 ];
 
-const HOOK_ROTATION: HookStyle[] = [
-  'observation',
-  'contrarian',
-  'mistake',
-  'lesson',
-  'comparison',
-  'story',
-  'question',
-];
-
-const LAYOUT_BY_ANGLE: Record<PostAngle, PostLayout> = {
-  technical_mistake: 'problem_mechanism_fix',
-  practical_tutorial: 'technical_walkthrough',
-  architecture_tradeoff: 'comparison',
-  defensible_opinion: 'opinion_with_reasoning',
-  debugging_story: 'story_then_lesson',
-  product_lesson: 'short_observation',
-  reflection: 'short_observation',
-};
-
-const ENDING_BY_ANGLE: Record<PostAngle, BatchPostPlan['endingStyle']> = {
-  technical_mistake: 'natural',
-  practical_tutorial: 'natural',
-  architecture_tradeoff: 'natural',
-  defensible_opinion: 'natural',
-  debugging_story: 'natural',
-  product_lesson: 'natural',
-  reflection: 'natural',
+export type BatchEditorialContext = {
+  recentMemory?: RecentContentMemory;
+  audience?: string[];
+  primaryGoal?: string | null;
+  /** Batch callers must leave this false until an explicit anecdote-approval flow exists. */
+  personalEvidenceAvailable?: boolean;
+  performanceProfile?: AccountPerformanceProfile;
 };
 
 export function buildTopicDiverseBatchPlan(
   ranked: RankedTrendCandidate[],
   count: number,
   writingStyle?: WritingStyle,
+  editorialContext: BatchEditorialContext = {},
 ): BatchPostPlan[] {
   const trends = ranked.map((r) => r.trend);
-  const plans = buildDeterministicBatchPlan(trends, count, writingStyle);
+  const plans = buildDeterministicBatchPlan(trends, count, writingStyle, editorialContext);
   return plans.map((plan, i) => {
     const fp = ranked[i]?.fingerprint;
     if (!fp) return plan;
@@ -77,24 +63,34 @@ export function buildDeterministicBatchPlan(
   trends: TrendCandidate[],
   count: number,
   writingStyle?: WritingStyle,
+  editorialContext: BatchEditorialContext = {},
 ): BatchPostPlan[] {
   const plans: BatchPostPlan[] = [];
-  let questionEndings = 0;
 
   for (let i = 0; i < count; i++) {
     const trend = trends[i] ?? null;
     const claimSource = resolveClaimSource(trend);
     const selectedCentralClaim = trend?.topic?.trim() || undefined;
-    const requestedAngle = DEFAULT_ANGLE_SEQUENCE[i % DEFAULT_ANGLE_SEQUENCE.length];
+    const fallbackAngle = DEFAULT_ANGLE_SEQUENCE[i % DEFAULT_ANGLE_SEQUENCE.length];
     const topic = trend?.topic ?? '';
+    const requestedAngle = inferEditorialAngle(trend, fallbackAngle);
     const angle = topic ? resolvePlanAngle(topic, requestedAngle) : requestedAngle;
-    const hookStyle = HOOK_ROTATION[i % HOOK_ROTATION.length];
-    let endingStyle = ENDING_BY_ANGLE[angle];
-
-    if (endingStyle === 'specific_question') {
-      if (questionEndings >= 2) endingStyle = 'takeaway';
-      else questionEndings++;
-    }
+    const editorialDecision = selectEditorialDecision(trend, {
+      recentMemory: editorialContext.recentMemory,
+      currentBatch: plans.flatMap((plan) => plan.editorialDecision ? [plan.editorialDecision] : []),
+      audience: editorialContext.audience,
+      primaryGoal: editorialContext.primaryGoal,
+      personalEvidenceAvailable: editorialContext.personalEvidenceAvailable === true,
+      performanceProfile: editorialContext.performanceProfile,
+    });
+    const hookStyle = legacyHookStyle(editorialDecision.hookFamily);
+    const endingStyle: BatchPostPlan['endingStyle'] = editorialDecision.endingIntent === 'QUESTION'
+      ? 'specific_question'
+      : editorialDecision.endingIntent === 'CONCLUSION'
+        ? 'takeaway'
+        : editorialDecision.endingIntent === 'SOFT_CTA'
+          ? 'action'
+          : 'natural';
 
     const basePlan: BatchPostPlan = {
       trendIndex: trend ? i : null,
@@ -102,12 +98,13 @@ export function buildDeterministicBatchPlan(
       angle,
       hookStyle,
       endingStyle,
-      layout: LAYOUT_BY_ANGLE[angle],
+      layout: legacyLayout(editorialDecision.rhetoricalStructure),
       rationale: trend
         ? `Use trend as inspiration for a ${angle.replace(/_/g, ' ')} post`
         : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
       evergreen: !trend,
       claimSource,
+      editorialDecision,
       selectedCentralClaim,
       centralClaim: claimSource === 'STRATEGY_SELECTED' ? selectedCentralClaim : undefined,
       depthPlan: {
@@ -124,7 +121,7 @@ export function buildDeterministicBatchPlan(
       },
     };
     plans.push(withDerivedPostDepth(
-      { ...basePlan, expressionMode: selectBatchExpressionMode(i, angle) },
+      { ...basePlan, expressionMode: expressionModeForDecision(editorialDecision) },
       trend,
     ));
   }
@@ -160,6 +157,17 @@ export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext)
     angles: plan.map((p) => p.angle),
     hooks: plan.map((p) => p.hookStyle),
     endings: plan.map((p) => p.endingStyle),
+    contentObjectives: plan.map((p) => p.editorialDecision?.contentObjective ?? null),
+    conversionObjectives: plan.map((p) => p.editorialDecision?.conversionObjective ?? null),
+    hookFamilies: plan.map((p) => p.editorialDecision?.hookFamily ?? null),
+    rhetoricalStructures: plan.map((p) => p.editorialDecision?.rhetoricalStructure ?? null),
+    endingIntents: plan.map((p) => p.editorialDecision?.endingIntent ?? null),
+    referenceValueForms: plan.map((p) => p.editorialDecision?.referenceValueForm ?? null),
+    shareability: plan.map((p) => p.editorialDecision?.shareabilityProfile ? ({
+      overallPotential: p.editorialDecision.shareabilityProfile.overallPotential,
+      valueType: p.editorialDecision.shareabilityProfile.valueType,
+      recommendedPresentation: p.editorialDecision.shareabilityProfile.recommendedPresentation,
+    }) : null),
     depthClasses: plan.map((p) => p.depthClass ?? null),
     targetLengthRanges: plan.map((p) => p.targetLengthRange ?? null),
     evergreenCount: plan.filter((p) => p.evergreen).length,

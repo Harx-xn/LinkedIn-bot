@@ -74,7 +74,7 @@ describe('editorial depth planning', () => {
     );
     assert.match(batchRepairPrompt, /LENGTH REPAIR DEPTH CHECK/);
     assert.match(batchRepairPrompt, /resistance protects an ownership boundary/);
-    assert.match(batchRepairPrompt, /do not inflate the draft to reach the soft range/);
+    assert.match(batchRepairPrompt, /soft range is not a quota/);
   });
 
   it('deprioritizes generic question hooks while retaining question support', () => {

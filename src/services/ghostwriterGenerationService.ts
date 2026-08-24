@@ -18,6 +18,7 @@ import {
   buildSafeFallbackImageContent,
   detectUnsupportedFirstPersonClaims,
   filterBlockingIssues,
+  isCriticalCandidateIssueCode,
   issuesToRepairInput,
   runDeterministicValidation,
   sanitizeImageContent,
@@ -34,6 +35,11 @@ import {
   type CandidateObservation,
   type SlotCandidateOrigin,
 } from './ghostwriterCandidateSelection';
+import {
+  FALLBACK_PROVENANCE,
+  logFallbackProvenance,
+  type FallbackProvenance,
+} from './fallbackProvenanceService';
 
 export const MAX_FRESH_GENERATIONS = 3;
 export const MAX_TARGETED_REPAIRS_PER_GENERATION = 2;
@@ -49,6 +55,7 @@ export type GeneratedSlotResult =
       qualityScore: number;
       attempts: number;
       acceptance: SlotAcceptanceDecision;
+      fallbackProvenance?: FallbackProvenance[];
     }
   | {
       ok: false;
@@ -216,6 +223,99 @@ function applyLinkedInFormatting(
   };
 }
 
+/**
+ * Last bounded recovery when every writer/provider attempt failed before a safe
+ * candidate existed. It uses only the selected claim and existing plan reasoning,
+ * then runs the same hard deterministic, authority, formatting and platform gates.
+ */
+export function buildBoundedSafeWriterFallback(params: {
+  plan: BatchPostPlan;
+  trend: TrendCandidate | null;
+  author: AuthorContext;
+  config: GhostwriterBotConfig;
+  acceptedBodies: string[];
+  batchFingerprints?: TopicFingerprint[];
+  recentTopicHistory?: TopicHistoryRow[];
+  candidatePool?: SlotCandidatePool;
+}): Extract<GeneratedSlotResult, { ok: true }> | null {
+  const sourceTitle = params.trend?.topic ?? params.plan.sourceTopic ?? 'Author expertise';
+  const claim = (
+    params.plan.centralClaim
+    ?? params.plan.selectedCentralClaim
+    ?? params.plan.depthPlan?.centralClaim
+    ?? params.trend?.fingerprint?.coreClaim
+    ?? params.trend?.topic
+    ?? params.plan.sourceTopic
+    ?? ''
+  ).replace(/\s+/g, ' ').trim();
+  if (!claim) return null;
+  const plannedSupport = [
+    params.plan.depthPlan?.underlyingCauseOrMechanism,
+    params.plan.depthPlan?.meaningfulConsequence,
+    params.plan.depthPlan?.usefulTensionOrQualification,
+    params.plan.depthPlan?.endingInsight,
+  ].filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => value.replace(/\s+/g, ' ').trim())
+    .filter((value, index, all) => all.indexOf(value) === index && value.toLowerCase() !== claim.toLowerCase())
+    .slice(0, 2);
+  const safeSupport = plannedSupport.length
+    ? plannedSupport
+    : ['The practical value is making the next decision with the relevant constraint stated clearly.'];
+  const generated = applyLinkedInFormatting({
+    headline: claim.slice(0, 90),
+    subheadline: '',
+    bulletPoints: [],
+    body: [claim, ...safeSupport].join('\n\n'),
+    hashtags: '',
+  }, sourceTitle);
+  const deterministic = runDeterministicValidation(generated, params.author, params.plan, params.acceptedBodies, {
+    sourceTitle,
+    batchFingerprints: params.batchFingerprints,
+    history: params.recentTopicHistory,
+    enforceLength: false,
+  });
+  const finalized = finalizeGeneratedPostContent(generated, sourceTitle, {
+    topic: sourceTitle,
+    includeContactInfo: !!params.config.includeContactInfo,
+    includeWebsiteLink: !!params.config.includeWebsiteLink,
+    contactInfo: params.config.contactInfo,
+    websiteUrl: params.config.websiteUrl,
+    description: params.config.description,
+  });
+  const formatIssues = validateFormattedBody(finalized.body, finalized.hashtags, params.author.description, {
+    includeContactInfo: !!params.config.includeContactInfo,
+    includeWebsiteLink: !!params.config.includeWebsiteLink,
+  }).filter((issue) => issue.severity === 'error');
+  const authorityIssues: QualityIssue[] = detectUnsupportedFirstPersonClaims(finalized.body, params.author.description).length
+    ? [{ code: 'unsupported_first_person_after_format', severity: 'error' }]
+    : [];
+  const linkedInIssues: QualityIssue[] = validateLinkedInFormatting(finalized.body)
+    .filter((issue) => issue.severity === 'error')
+    .map((issue) => ({ code: issue.code, severity: 'error' as const }));
+  const issues = mergeIssues(deterministic.issues, formatIssues, authorityIssues, linkedInIssues);
+  if (issues.some((issue) => isCriticalCandidateIssueCode(issue.code))) return null;
+  const blocking = issues.filter((issue) => issue.severity === 'error');
+  const warnings = issues.filter((issue) => issue.severity === 'warning');
+  const technicalReview: TechnicalReviewResult = { available: false, passed: false, confidence: 0, issues: [] };
+  const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
+  const pool = params.candidatePool ?? new SlotCandidatePool();
+  const ranked = pool.add({ origin: 'emergency_fallback', generated, finalized, acceptance, technicalReview, issues, plan: params.plan });
+  if (!ranked.eligible) return null;
+  logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.WRITER_FALLBACK, stage: 'bounded_safe_writer', reason: 'writer_attempts_exhausted' });
+  logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE, stage: 'bounded_safe_writer', metadata: { tier: ranked.tier } });
+  return {
+    ok: true,
+    finalized,
+    imageContent: buildSafeFallbackImageContent(finalized),
+    sourceTitle,
+    plan: params.plan,
+    qualityScore: acceptance.qualityScore,
+    attempts: MAX_FRESH_GENERATIONS * MAX_QUOTA_FILL_ROUNDS,
+    acceptance,
+    fallbackProvenance: [FALLBACK_PROVENANCE.WRITER_FALLBACK, FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE],
+  };
+}
+
 function logSlotDecision(
   sourceTitle: string,
   plan: BatchPostPlan,
@@ -300,7 +400,9 @@ async function tryAcceptPost(
     formatIssues,
     authorityIssues,
     linkedInIssues,
-  );
+  ).map((issue) => isCriticalCandidateIssueCode(issue.code) && issue.severity !== 'error'
+    ? { ...issue, severity: 'error' as const }
+    : issue);
   const blocking = filterBlockingIssues(allIssues, slotAttemptIndex(counters));
   const warnings = allIssues.filter((i) => i.severity === 'warning');
   const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
@@ -466,12 +568,19 @@ export async function generateSlotPost(
         });
         const best = candidatePool.best();
         if (!best || best === rankedCandidate) return attempt.result;
+        logFallbackProvenance({
+          provenance: FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
+          stage: 'candidate_retention',
+          reason: `retained_${best.origin}_ranked_above_${rankedCandidate.origin}`,
+          metadata: { tier: best.tier },
+        });
         return {
           ...attempt.result,
           finalized: best.finalized,
           imageContent: buildSafeFallbackImageContent(best.finalized),
           qualityScore: best.acceptance.qualityScore,
           acceptance: best.acceptance,
+          fallbackProvenance: [FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK],
         };
       }
 
@@ -515,6 +624,15 @@ export async function generateSlotPost(
       blockingIssueCodes: bestUsableCandidate.acceptance.blockingIssueCodes,
       ...summary,
     });
+    logFallbackProvenance({
+      provenance: FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
+      stage: 'candidate_retention',
+      reason: 'quality_gate_exhausted',
+      metadata: { tier: bestUsableCandidate.tier },
+    });
+    if (bestUsableCandidate.tier === 'EMERGENCY') {
+      logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE, stage: 'candidate_retention' });
+    }
     return {
       ok: true,
       finalized: bestUsableCandidate.finalized,
@@ -524,6 +642,10 @@ export async function generateSlotPost(
       qualityScore: bestUsableCandidate.acceptance.qualityScore,
       attempts: MAX_FRESH_GENERATIONS,
       acceptance: bestUsableCandidate.acceptance,
+      fallbackProvenance: [
+        FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
+        ...(bestUsableCandidate.tier === 'EMERGENCY' ? [FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE] : []),
+      ],
     };
   }
 
@@ -573,6 +695,18 @@ export async function generateSlotPostUntilSuccess(
       });
     }
   }
+
+  const boundedFallback = buildBoundedSafeWriterFallback({
+    plan,
+    trend,
+    author,
+    config,
+    acceptedBodies,
+    batchFingerprints: slotOptions?.batchFingerprints,
+    recentTopicHistory: slotOptions?.recentTopicHistory,
+    candidatePool,
+  });
+  if (boundedFallback) return boundedFallback;
 
   throw new Error(
     `[ghostwriter] slot failed after ${MAX_QUOTA_FILL_ROUNDS} rounds: ${lastFailure?.reason ?? 'quality_gate_exhausted'} (${lastFailure?.sourceTitle?.slice(0, 60) ?? 'unknown'})`,

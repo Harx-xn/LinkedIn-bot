@@ -26,6 +26,7 @@ import {
   improveWeakTopicSuggestions,
   STRONG_TOPIC_SCORE,
 } from './manualPost/topicImprovementService';
+import { validatePersonalExperienceInput, type PersonalExperienceInput } from './manualPost/personalExperienceService';
 
 export const MAX_MANUAL_TOPIC_SUGGESTIONS = 10;
 export const DEFAULT_MANUAL_TOPIC_SUGGESTIONS = DEFAULT_TOPIC_SUGGESTION_COUNT;
@@ -87,7 +88,8 @@ export function validateGenerateInput(body: {
   topic?: unknown;
   additionalInstructions?: unknown;
   supportingContext?: unknown;
-}): { topic: string; additionalInstructions?: string; supportingContext?: string } {
+  personalExperience?: unknown;
+}): { topic: string; additionalInstructions?: string; supportingContext?: string; personalExperience?: PersonalExperienceInput } {
   const topic = typeof body.topic === 'string' ? body.topic.trim() : '';
   if (!topic) throw new ManualPostError(400, 'topic is required');
   if (topic.length > MAX_MANUAL_TOPIC_LENGTH) {
@@ -124,7 +126,8 @@ export function validateGenerateInput(body: {
     if (!supportingContext) supportingContext = undefined;
   }
 
-  return { topic, additionalInstructions, supportingContext };
+  const personalExperience = validatePersonalExperienceInput(body.personalExperience);
+  return { topic, additionalInstructions, supportingContext, personalExperience };
 }
 
 export function validateUnsavedRewriteInput(body: {

@@ -42,6 +42,10 @@ export type GenerationTelemetry = {
   candidateIssueCounts?: Array<{ origin: string; count: number }>;
   bestCandidateChanges?: Array<{ from: string | null; to: string; reason: string }>;
   finalFallbackTier?: string | null;
+  shareabilityPotential?: number;
+  shareabilityValueType?: string;
+  recommendedPresentation?: string;
+  actualPresentationUsed?: string;
   plannerFallbackUsed: boolean;
   plannerValidationFailureReason: string | null;
 };

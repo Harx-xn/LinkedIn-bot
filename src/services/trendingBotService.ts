@@ -14,6 +14,11 @@ import {
   prepareBatchContextV2,
   type GhostwriterBotConfig,
 } from "./ghostwriterPipeline";
+import { safeRecommendMediaForPost, type MediaRecommendationResult } from './mediaRecommendationService';
+import {
+  inferActualShareabilityPresentation,
+  type ShareabilityProfile,
+} from './shareabilityIntelligenceService';
 import { evaluateTopicCombination } from "./ghostwriterQualityService";
 import { buildDeterministicBatchPlan } from "./ghostwriterBatchPlanner";
 import type { PreviewTrendsResponse, TopicFingerprint, TrendCandidate } from "./generationTypes";
@@ -41,6 +46,7 @@ import {
   hasStrategyGenerationContext,
 } from "./botStrategyTrendService";
 import { consumeInventoryTopic, releaseInventoryTopic, availableInventoryByNiche, INVENTORY_LOW_WATERMARK, enqueueLowInventoryReplenishment } from './topicInventoryService';
+import { persistGeneratedPostWithMemory } from './generatedPostPersistenceService';
 
 function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undefined {
   if (!websiteUrl?.trim()) return undefined;
@@ -419,7 +425,7 @@ export class TrendingBotService {
      });
 
     const inventoryJobId = jobId ?? `batch-${userId}-${Date.now()}`;
-    const { author, eligible, ranked } = await prepareBatchContextV2({
+    const { author, eligible, ranked, editorialMemory, performanceProfile } = await prepareBatchContextV2({
       userId,
       niches,
       config: botConfig,
@@ -439,6 +445,8 @@ export class TrendingBotService {
       slots.length,
       provider,
       ranked,
+      editorialMemory,
+      performanceProfile,
     );
 
     const acceptedBodies: string[] = [];
@@ -555,6 +563,13 @@ export class TrendingBotService {
             argumentPattern: plan.layout,
             authorityMode: trend?.authorityMode,
             contentIntent: trend?.ideaFamily ?? plan.angle,
+            contentObjective: plan.editorialDecision?.contentObjective,
+            conversionObjective: plan.editorialDecision?.conversionObjective,
+            hookFamily: plan.editorialDecision?.hookFamily,
+            rhetoricalStructure: plan.editorialDecision?.rhetoricalStructure,
+            endingIntent: plan.editorialDecision?.endingIntent,
+            depthBand: plan.depthClass,
+            shareabilityProfile: plan.editorialDecision?.shareabilityProfile,
           },
           );
           if (trend?.inventoryId) await consumeInventoryTopic(trend.inventoryId, inventoryJobId);
@@ -618,8 +633,21 @@ export class TrendingBotService {
       argumentPattern?: string;
       authorityMode?: string;
       contentIntent?: string;
+      contentObjective?: string;
+      conversionObjective?: string;
+      hookFamily?: string;
+      rhetoricalStructure?: string;
+      endingIntent?: string;
+      depthBand?: string;
+      mediaRecommendation?: MediaRecommendationResult;
+      shareabilityProfile?: ShareabilityProfile;
     },
   ) {
+    const mediaRecommendation = topicMeta?.mediaRecommendation ?? safeRecommendMediaForPost(finalized.body, {
+      rhetoricalStructure: topicMeta?.rhetoricalStructure,
+      contentObjective: topicMeta?.contentObjective,
+      shareabilityProfile: topicMeta?.shareabilityProfile,
+    });
     const mediaUrl = await generateBatchPostMediaUrl({
       userId,
       imageMode: config.imageMode ?? resolveBotImageMode(config),
@@ -636,47 +664,51 @@ export class TrendingBotService {
       imageService: this.imageService,
       finalized,
       imageContent,
+      mediaRecommendation,
       uploadKeyPrefix: `generated/ai-batch-${userId}`,
     });
 
-    const created = await prisma.post.create({
-      data: {
-        userId,
-        regionId: persistenceContext.regionId,
-        content: finalized.content,
-        status: "REVIEW",
-        scheduledAt,
-        source: "AI",
-        mediaUrl,
-        hashtags: finalized.hashtags,
-        linkedinAccountId: persistenceContext.linkedinAccountId,
-      },
-    });
-
-    if (topicMeta?.fingerprint) {
-      const finalClassification = classifyFinalPostFingerprint(finalized.body, {
-        plannedMechanism: topicMeta.mechanism ?? topicMeta.fingerprint.mechanisms[0],
+    const topicFingerprint = topicMeta?.fingerprint;
+    const finalClassification = topicFingerprint ? classifyFinalPostFingerprint(finalized.body, {
+        plannedMechanism: topicMeta?.mechanism ?? topicFingerprint.mechanisms[0],
         plannedIdeaFamily: topicMeta.contentIntent,
         sourcePresent: !!topicMeta.sourceGrounded,
+      }) : null;
+    const created = await persistGeneratedPostWithMemory(prisma, async (tx) => {
+      const post = await tx.post.create({
+        data: {
+          userId,
+          regionId: persistenceContext.regionId,
+          content: finalized.content,
+          status: "REVIEW",
+          scheduledAt,
+          source: "AI",
+          mediaUrl,
+          attachmentType: mediaUrl ? 'IMAGE' : 'NONE',
+          hashtags: finalized.hashtags,
+          linkedinAccountId: persistenceContext.linkedinAccountId,
+        },
       });
+      if (!topicMeta || !topicFingerprint || !finalClassification) return post;
       await Promise.all([
         createGeneratedTopicHistory({
           userId,
-          postId: created.id,
+          postId: post.id,
           batchId: topicMeta.batchId,
           sourceTitle: topicMeta.sourceTitle,
-          fingerprint: topicMeta.fingerprint,
+          fingerprint: topicFingerprint,
           angle: topicMeta.angle,
           knownNewPost: true,
+          transaction: tx,
         }),
-        prisma.postContentFingerprint.create({ data: {
-          userId, postId: created.id,
-          primaryTopic: topicMeta.fingerprint.normalizedTopic,
+        tx.postContentFingerprint.create({ data: {
+          userId, postId: post.id,
+          primaryTopic: topicFingerprint.normalizedTopic,
           subtopic: topicMeta.sourceTitle,
           pillar: topicMeta.pillar,
           territory: topicMeta.territory,
-          coreClaim: topicMeta.fingerprint.coreClaim,
-          mechanism: finalClassification.mechanism ?? topicMeta.mechanism ?? topicMeta.fingerprint.mechanisms[0],
+          coreClaim: topicFingerprint.coreClaim,
+          mechanism: finalClassification.mechanism ?? topicMeta.mechanism ?? topicFingerprint.mechanisms[0],
           perspective: finalClassification.perspective,
           argumentPattern: finalClassification.argumentPattern,
           structure: finalClassification.structure,
@@ -686,13 +718,35 @@ export class TrendingBotService {
           authorityMode: finalClassification.authorityMode,
           contentIntent: finalClassification.contentIntent,
           keywords: {
-            entities: topicMeta.fingerprint.entities,
-            endingType: finalClassification.endingType,
+            entities: topicFingerprint.entities,
+            endingType: finalClassification.endingIntent,
+            endingClassifierDetail: finalClassification.endingType,
             ideaFamily: finalClassification.ideaFamily,
+            contentObjective: finalClassification.contentIntent ?? topicMeta.contentObjective,
+            plannedContentObjective: topicMeta.contentObjective,
+            conversionObjective: topicMeta.conversionObjective,
+            hookFamily: finalClassification.hookType ?? topicMeta.hookFamily,
+            plannedHookFamily: topicMeta.hookFamily,
+            rhetoricalStructure: finalClassification.structure ?? topicMeta.rhetoricalStructure,
+            plannedRhetoricalStructure: topicMeta.rhetoricalStructure,
+            plannedEndingIntent: topicMeta.endingIntent,
+            depthBand: topicMeta.depthBand,
+            visualType: mediaUrl ? 'IMAGE' : 'NONE',
+            recommendedMediaType: mediaRecommendation.recommendation,
+            recommendationConfidence: mediaRecommendation.confidence,
+            shareabilityPotential: topicMeta.shareabilityProfile?.overallPotential,
+            shareabilityValueType: topicMeta.shareabilityProfile?.valueType,
+            recommendedPresentation: topicMeta.shareabilityProfile?.recommendedPresentation,
+            actualPresentationUsed: inferActualShareabilityPresentation({
+              content: finalized.body,
+              structure: finalClassification.structure,
+              visualType: mediaUrl ? 'IMAGE' : 'NONE',
+            }),
           },
         } }),
       ]);
-    }
+      return post;
+    }, { userId, scheduledAt });
 
     console.log(`Created review post with proposed slot ${scheduledAt.toISOString()}`);
     return created;

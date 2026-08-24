@@ -34,8 +34,21 @@ import {
   evaluateGeneratedPostLength,
   isExplicitShorteningInstruction,
 } from '../generatedPostLength';
+import { safeRecommendMediaForPost } from '../mediaRecommendationService';
 import type { ManualGeneratedPost } from './manualPostTypes';
 import { evaluateSemanticProgression } from '../semanticProgression';
+import {
+  enforcePersonalExperienceNumberBoundary,
+  markPersonalExperienceUsed,
+  personalExperienceWasUsed,
+  resolvePersonalExperience,
+} from './personalExperienceService';
+import {
+  buildGenerationAuthorityContext,
+  buildUserKnowledgeAuthorityContext,
+  loadUserKnowledgeAuthorityContext,
+  type GenerationAuthorityContext,
+} from '../userKnowledgeAuthorityService';
 
 function deriveTopicFromContent(content: string): string {
   const line = content
@@ -45,7 +58,10 @@ function deriveTopicFromContent(content: string): string {
   return (line ?? 'LinkedIn post').slice(0, 200);
 }
 
-function toAuthorContext(voice: Awaited<ReturnType<typeof getBotVoice>>) {
+function toAuthorContext(
+  voice: Awaited<ReturnType<typeof getBotVoice>>,
+  authorityContext?: GenerationAuthorityContext,
+) {
   return {
     description: voice.description,
     tone: voice.tone,
@@ -57,6 +73,7 @@ function toAuthorContext(voice: Awaited<ReturnType<typeof getBotVoice>>) {
         ].filter(Boolean)
       : undefined,
     strategy: voice.strategy,
+    authorityContext,
   };
 }
 
@@ -202,6 +219,7 @@ export async function generateManualPostV2(
     topic?: unknown;
     additionalInstructions?: unknown;
     supportingContext?: unknown;
+    personalExperience?: unknown;
     provider?: unknown;
   },
 ) {
@@ -216,13 +234,32 @@ export async function generateManualPostV2(
 
   await canUseManualAiOperation(userId);
 
-  const { topic, additionalInstructions, supportingContext } = validateGenerateInput(body);
+  const { topic, additionalInstructions, supportingContext, personalExperience: experienceInput } = validateGenerateInput(body);
   const provider = parseContentProvider(body.provider);
+  const personalExperience = await resolvePersonalExperience(userId, experienceInput);
   const voice = await getBotVoice(userId);
-  const [voiceContext, recentVoiceRows] = await Promise.all([
+  let knowledgeContext = buildUserKnowledgeAuthorityContext({
+    profileDescription: voice.description,
+    profilePositioning: voice.strategy?.profilePositioning,
+    niches: voice.niches,
+    explicitInstructions: [additionalInstructions].filter((value): value is string => !!value?.trim()),
+  });
+  const [voiceContext, recentVoiceRows, loadedKnowledgeContext] = await Promise.all([
     getManualVoiceContext(userId, topic),
     prisma.post.findMany({ where: { userId, status: { in: ['REVIEW', 'DRAFT', 'SCHEDULED', 'PUBLISHED'] } }, orderBy: { createdAt: 'desc' }, take: RECENT_STYLE_POST_LIMIT, select: { content: true } }),
+    loadUserKnowledgeAuthorityContext(userId, {
+      niches: voice.niches,
+      explicitInstructions: [additionalInstructions].filter((value): value is string => !!value?.trim()),
+    }).catch((error) => {
+      console.warn('[user-authority] manual evidence load failed; using conservative profile-only boundaries', {
+        userId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }),
   ]);
+  if (loadedKnowledgeContext) knowledgeContext = loadedKnowledgeContext;
+  const manualAuthorityContext = buildGenerationAuthorityContext(knowledgeContext, 'MANUAL', [topic]);
   const recentPosts = recentVoiceRows.map((post) => post.content);
   const expressionMode = selectManualExpressionMode(topic, additionalInstructions, voice.strategy?.writingStyle, recentPosts);
   let recentFingerprints: Awaited<ReturnType<typeof getRecentManualFingerprints>> = [];
@@ -238,6 +275,7 @@ export async function generateManualPostV2(
   const budget = createManualProviderCallBudget();
 
   let generated;
+  let selectedPlan: Awaited<ReturnType<typeof runManualGenerationMultiStage>>['selectedPlan'];
   try {
     const result = await runManualGenerationMultiStage(
       contentService,
@@ -245,7 +283,8 @@ export async function generateManualPostV2(
         topic,
         additionalInstructions,
         supportingContext,
-        author: toAuthorContext(voice),
+        personalExperience,
+        author: toAuthorContext(voice, manualAuthorityContext),
         voiceContext,
         recentFingerprints,
         recentPosts,
@@ -256,6 +295,7 @@ export async function generateManualPostV2(
     );
     if (process.env.VOICE_DIVERSITY_DEBUG === 'true') console.info('[manual-expression-mode]', { expressionMode, recentPostsAnalyzed: recentPosts.length });
     generated = result.post;
+    selectedPlan = result.selectedPlan;
   } catch (error) {
     if (error instanceof ManualPostError) throw error;
     console.error('[manual-post-v2] generation failed', {
@@ -267,19 +307,35 @@ export async function generateManualPostV2(
 
   // Length and quality issues are combined into the multi-stage pipeline's
   // single targeted repair. Finalization performs the final safety/max check.
-  const normalized = finalizeManualGeneratedPostV2(generated, topic, { topic, voice });
+  let normalized = finalizeManualGeneratedPostV2(generated, topic, { topic, voice });
+  if (personalExperience) {
+    const boundedContent = enforcePersonalExperienceNumberBoundary(
+      normalized.content,
+      `${topic}\n${additionalInstructions ?? ''}\n${supportingContext ?? ''}\n${voice.description ?? ''}\n${personalExperience.rawText}`,
+    );
+    if (boundedContent && boundedContent !== normalized.content) normalized = { ...normalized, content: boundedContent };
+  }
   const normalizedStatus = evaluateGeneratedPostLength(normalized.content);
   if (normalizedStatus === 'TOO_LONG') {
     throw new ManualPostError(502, 'AI provider could not satisfy the final generated post length invariant');
   }
 
   await recordManualAiOperation(userId, 'generate');
+  const experienceUsed = Boolean(personalExperience && personalExperienceWasUsed(
+    normalized.content,
+    personalExperience.rawText,
+    selectedPlan.experienceRelevance ?? 'LOW',
+  ));
+  if (experienceUsed && personalExperience?.id) await markPersonalExperienceUsed(userId, personalExperience.id);
 
   return {
     content: normalized.content,
     hashtags: normalized.hashtags || null,
     topic,
     generatedBy: 'AI' as const,
+    experienceUsed,
+    savedExperienceId: personalExperience?.id ?? null,
+    mediaRecommendation: safeRecommendMediaForPost(normalized.content),
   };
 }
 
@@ -348,6 +404,7 @@ export async function rewriteUnsavedManualPostV2(
     hashtags: normalized.hashtags || null,
     topic,
     rewriteCount: usage.usedThisMonth + 1,
+    mediaRecommendation: safeRecommendMediaForPost(normalized.content),
   };
 }
 

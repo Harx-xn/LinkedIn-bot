@@ -2,90 +2,30 @@ import type { AuthorContext, BatchPostPlan, GeneratedPostContent, QualityIssue, 
 import { buildExpressionModePromptBlock } from './expressionModeService';
 import { resolvePostDepthMetadata } from './postDepth';
 
-export const TECHNICAL_DISTINCTIONS = `TECHNICAL ACCURACY DISTINCTIONS:
+export const LINKEDIN_LINE_FORMAT_RULES = `NATURAL LINKEDIN FORMATTING:
+- Use readable mobile paragraphs and varied sentence length; standalone lines are optional emphasis, not a default cadence.
+- Use bullets or numbering only when the idea is genuinely a checklist, comparison, or ordered process.
+- Avoid broad category openings, engagement bait, stock AI phrases, unnecessary emojis, and Markdown bold markers.
+- Do not repeat the headline, image copy, opening claim, or conclusion in different words.
+- Zero paragraphs, examples, lists, questions, conclusions, or CTAs are mandatory. Stop when the assigned thought is complete.`;
 
-- Authentication proves identity. Authorization determines allowed actions.
-- Tenant isolation requires tenant-scoped authorization and data access.
-- Client-side restrictions improve UX; they are not a security boundary.
-- Server-side entitlement checks enforce access. Audit trails require explicit logs.
-- Access controls may support compliance goals but do not establish compliance alone.
-- Environment parity does not require shared infrastructure or shared databases.
-- Environment consistency and scalability are not opposing goals.
-- Queue concurrency settings can reduce overlap but do not guarantee exactly-once execution.
-- Critical publishing actions should be idempotent.
-- Locks are safeguards, not substitutes for idempotency and atomic state transitions.
-- Usage limits should be validated and incremented atomically during protected actions.
-- Background tasks are suitable for reconciliation, resets, and aggregation.
-- Token authentication does not automatically solve tenant isolation or session management.`;
+export const SPECIFICITY_RULES = `DEPTH-PROPORTIONAL COMPLETENESS:
+- Add the smallest amount of concrete support needed to make the assigned claim useful and defensible.
+- Mechanism, consequence, qualification, trade-off and failure mode are optional reasoning dimensions, not mandatory sections of the final post. Examples, process details, and decision rules are optional too.
+- One strong supporting dimension may be sufficient. Prefer information gain over coverage or length.
+- Do not add specialist terminology, invented evidence, adjacent advice, or a checklist merely to appear specific.`;
 
-export const LINKEDIN_LINE_FORMAT_RULES = `FORMAT AND RHYTHM: Write in a clear, conversational LinkedIn format that is easy to scan on mobile.
- - Let the selected Expression Mode determine the opening, progression, cadence, and ending behavior.
- - Use natural paragraphs separated by whitespace; mix one-line, two-sentence, and occasional compact grouped explanations when useful.
- - Use short standalone lines selectively for emphasis without making every sentence dramatic.
- - Use numbered lists only for ordered steps or clearly separated reasons. 
- - Use hyphen bullets only for practical checks, actions, or examples.
- - Keep list items concise and structurally consistent.
- - Vary sentence length so the post does not feel robotic. 
- - Avoid repeating the headline, image text, or the same conclusion in different words.
- - The caption should add depth beyond what appears in the image.
- - Do not copy the wording or subject matter of any supplied example.
- - Do not invent personal stories, clients, incidents, metrics, or results.
+export const POST_QUALITY_CONTEXT = `QUALITY TARGET:
+- Preserve one narrow claim, serve the stated audience and objective, and use only evidence-backed authority.
+- A compact post is explicitly valid when it completes the thought with high information density.
+- Let the idea determine length. Never pad to a character target; LinkedIn's 3,000-character maximum is the only universal limit.`;
 
- The final post should feel written by an experienced practitioner, not like a textbook, documentation page, or generic AI summary.`;
-
-
- export const SPECIFICITY_RULES = `SPECIFICITY REQUIREMENTS:
-Ground the central claim with enough concrete detail to make it useful and credible.
-Choose the one to three specificity dimensions that most strengthen this claim: a mechanism, process detail, constraint, example, causal explanation, boundary, diagnostic observation, comparison, or decision rule. One strong dimension may be sufficient.
-Do not add multiple categories merely to demonstrate completeness, and do not turn specificity into a checklist.
-Do not add a failure scenario, consequence, action step, example, trade-off, or implementation boundary unless the idea genuinely needs it.
-Prefer one precise explanation over several generic supporting sections.
-When an example is useful, integrate it naturally into the reasoning rather than creating a separate essay-style scenario paragraph.
-Do not add specialist terminology only to appear specific.
-Do not repeat definitions that are already obvious from the headline or image. Do not invent metrics, customers, incidents, implementation history, or personal experience.`;
-
-export const POST_QUALITY_CONTEXT = `POST QUALITY CONTEXT:
-- Topic clarity: one specific topic, one central claim, and no mixed angles.
-- Clear niche match: use niche-specific context only when it materially strengthens the argument. Do not insert an industry paragraph merely to demonstrate relevance; implicit relevance is acceptable when the claim already naturally serves the audience.
-- Topic-audience match: connect the idea to the target audience's pain, goal, objection, or desired outcome.
-- Profile alignment: write from the author's saved positioning and expertise without inventing biography.
-- Original insight: include a useful mechanism, reframing, trade-off, or decision rule instead of generic advice.
-- Dwell quality: provide appropriate depth and concrete value without filler. A compact post can be complete without staged progression.
-- Conversational potential: make the idea worth discussing without requiring a question, CTA, or explicit conclusion.
-- Credibility/proof: use supplied proof when available; otherwise use sound technical reasoning. Use a concrete example or labeled hypothetical only when it materially helps.
-- Length: let idea complexity, completeness, and information density determine the natural stopping point. Follow any generation-mode depth or length contract supplied below. Never add repetition, filler, generic advice, or optional sections to reach a character target. LinkedIn's 3,000-character maximum remains hard.
-- Formatting: never use Markdown bold markers or double asterisks. Do not include ** anywhere in the output.`;
-
- export const VARIED_FORMAT_RULES = `POST WRITING REQUIREMENTS:
-- Write as a ghostwriter for the supplied author profile.
-- Write an original LinkedIn post, not a summary of the source article.
-- Use the assigned angle for what the post explores and the Expression Mode for how it is structured.
-- Treat hook, ending, and legacy layout as optional presentation hints. Ignore them when they conflict with the Expression Mode or the natural completion of the idea.
-- Respect the saved short/medium/long preference while letting content completeness determine exact length.
-- Prioritize substance over reaching a target length.
-- Do not use Markdown bold markers or double asterisks.
-
-Variation rules:
-- Not every post needs a problem statement, example, failure scenario, consequence, list, question, recommendation, or explicit conclusion.
-- Paragraph count and opening length should vary naturally. Some posts may start immediately with the claim.
-- Use as many paragraphs as the idea needs. A complete post may be one compact block, two short paragraphs, several standalone lines, a walkthrough, or a longer explanation.
-- Use a concrete example, failure mode, implementation detail, or hypothetical only when it materially improves the argument.
-- When an example is useful, state it directly and integrate it into the reasoning instead of introducing a separate generic scenario.
-
-Additional rules: - Use bullets only for genuine checklists, actions, or comparisons.
- - Use no more than four bullets unless the assigned layout requires ordered steps.
- - Do not use engagement bait.
- - Do not use phrases such as "In today's world", "game changer", or "unlock your potential".
- - Do not begin with broad phrases such as "When building a SaaS platform".
- - Use qualified technical language where appropriate: can, may, often, depending on, in some systems.
- - The body should complement the accompanying image rather than paraphrase it.   
-
-${LINKEDIN_LINE_FORMAT_RULES}`;
+export const VARIED_FORMAT_RULES = LINKEDIN_LINE_FORMAT_RULES;
 
 export const HASHTAG_RULES = `HASHTAG RULES:
 - Zero to three hashtags only. Target two specific hashtags.
 - Hashtags must match this exact post topic and angle.
-- No generic filler (#Growth, #Innovation, #Strategy).
+- No generic filler hashtags.
 - Put hashtags only in the JSON "hashtags" field, not in the body.
 - TitleCase formatting. Empty string is valid.`;
 
@@ -93,47 +33,44 @@ export const LANGUAGE_RULES = `LANGUAGE RULE:
 - English only unless the author configuration explicitly requests another language.`;
 
 export const DEFAULT_EDITORIAL_RULES = `EDITORIAL AUTHORITY — FINAL:
-- The selected Expression Mode and explicit user structure remain authoritative. A Walkthrough, listicle, checklist, or requested sequence may enumerate intentionally.
-- Do not prove depth by listing every reasonable cause, benefit, drawback, example, or recommendation.
-- Choose the strongest two or three observations, group symptoms that share one cause, then explain what they reveal.
-- Evidence says what happens. Cause explains why. Interpretation explains what it reveals. Consequence explains why it matters. Do not treat synonyms for one effect as separate insights.
-- A new paragraph should normally perform a different argumentative function: claim, evidence, observation, cause, mechanism, interpretation, contrast, qualification, consequence, application, supported personal shift, or resolution.
-- A strong LinkedIn post develops a thought; it does not exhaust a topic. Once the reader understands a point, move deeper instead of explaining it again.
-- Prefer a declarative claim, specific observation, pattern, or counterintuitive statement over a generic curiosity question unless the user's style genuinely favors questions.
-- End by sharpening, reframing, resolving, exposing a tension, or stopping. Do not summarize the opening thesis or append a generic recommendation.`;
+- Follow the assigned editorial form as a flexible rhetorical direction, not a section template.
+- Every added passage must contribute evidence, reasoning, qualification, implication, or application that changes what the reader understands.
+- End on the final substantive move. A question, conclusion, recommendation, or CTA is optional and must match the assigned ending and conversion objective.`;
 
-export const GHOSTWRITER_SYSTEM = `You are a ghostwriter for this author, not a news summarizer.
+export const GHOSTWRITER_SYSTEM = `You write original LinkedIn posts for the supplied author and return the requested JSON.
 
-Priority order:
-1. Author credibility and supplied profile
-2. Selected niches and audience
-3. Assigned batch angle
-4. Relevant insight from the source (inspiration only)
-5. Writing style
+Follow this hierarchy when instructions compete:
+1. Factual and authority safety.
+2. Fidelity to the selected claim.
+3. Audience relevance and content objective.
+4. Assigned editorial form.
+5. Supplied evidence.
+6. Depth-proportional completeness.
+7. Natural LinkedIn formatting.
 
-Never invent:
-- personal experiences
-- customer results, revenue, user numbers, benchmarks
-- project history or opinions attributed to the author
-- locations or communities the author did not mention
+Never invent or embellish personal experience, biography, clients, projects, results, numbers, dates, achievements, quotations, sources, or factual evidence. First-person experiential claims require explicit supplied evidence. A niche, job title, profile skill, or generated post does not prove that the author personally did something.
 
-Do not use first-person experience unless that exact experience exists in the supplied author context.
-Mentioning a project name from the profile does NOT authorize a debugging story or implementation anecdote.
-
-When personal evidence is unavailable:
-- ground the claim in the single most natural credible form: an observation, technical mechanism, conditional recommendation, constraint, or trade-off
-- do not include all of these forms merely to make the post appear comprehensive
-- let the selected Expression Mode determine whether the post explains, recommends, compares, or simply states a well-supported point
-
-Internally distinguish verified author facts, source facts, general technical knowledge, opinion, and conditional recommendations — but do NOT label them in the final post.
-
-${TECHNICAL_DISTINCTIONS}`;
+Keep source facts, author facts, general knowledge, opinion, hypothetical reasoning, and conditional recommendations distinct. Preserve uncertainty and authority boundaries. Do not present a possibility as a guarantee, a source claim as personal experience, or a general observation as verified evidence.`;
 
 export function buildAuthorBlock(author: AuthorContext, options: { includeQualityContext?: boolean } = {}): string {
-  const niches = (author.niches ?? []).join(', ') || 'general technology';
+  const niches = (author.niches ?? []).join(', ') || 'general professional topics';
   const intelligence = author.contentIntelligence;
-  const audience = (author.targetAudience ?? []).join(', ') || 'builders and operators';
+  const audience = (author.targetAudience ?? []).join(', ') || 'the intended readers';
   const strategy = author.strategy;
+  const authority = author.authorityContext;
+  const supportedAuthority = authority?.territories
+    .filter((entry) => entry.mode !== 'UNKNOWN' && entry.mode !== 'EXPLORATORY')
+    .slice(0, 10)
+    .map((entry) => `${entry.topic} (${entry.mode.toLowerCase()}, confidence ${entry.confidence.toFixed(2)})`)
+    .join('; ');
+  const authorityBlock = authority ? `
+USER KNOWLEDGE / AUTHORITY BOUNDARIES (${authority.scope}):
+- Evidence-supported familiarity: ${supportedAuthority || 'none established; use neutral or exploratory framing'}
+- Repeatedly discussed: ${authority.repeatedlyDiscussedTopics.join(', ') || 'none established'}
+- Exploring: ${authority.exploringTopics.slice(0, 12).join(', ') || 'none supplied'}
+- First-person boundary: ${authority.scope === 'BATCH' ? 'No anecdote permission; saved experiences and their details are withheld.' : 'Only a deliberately selected PERSONAL EXPERIENCE block permits experiential claims.'}
+- Boundaries: ${authority.boundaries.join(' ')}
+` : '';
   const strategyBlock = strategy ? `
 STRATEGY CONTEXT (use for topic angle and audience fit):
 - Positioning: ${strategy.profilePositioning.positioningStatement || strategy.legacy.description || 'Use the author profile above.'}
@@ -142,24 +79,11 @@ STRATEGY CONTEXT (use for topic angle and audience fit):
 - Audience pains: ${strategy.targetAudience.painPoints.join('; ') || 'infer only from supplied source facts and author context'}
 - Desired outcomes: ${strategy.targetAudience.desiredOutcomes.join('; ') || 'make the post useful to the target audience'}
 - Primary goal: ${strategy.contentGoals.primaryGoal}
-- Content pillars: ${[
-    ...strategy.contentPillars.primaryPillars.map((pillar) => pillar.name),
-    ...strategy.contentPillars.secondaryPillars.map((pillar) => pillar.name),
-  ].join(', ') || niches}
 ${intelligence ? `- Positioning promise: ${intelligence.identity.contentPromise}
 - Credibility boundaries: ${intelligence.identity.credibilityBoundaries.join('; ')}
 - Authority rule: a configured niche indicates intended subject matter, not personal experience or comprehensive expertise. Use neutral or exploratory framing unless explicit author evidence supports stronger authority.` : ''}
 - Excluded topics: ${strategy.contentPillars.excludedTopics.join(', ') || 'none specified'}
-- Rejected patterns: ${strategy.topicRules.rejectedPatterns.join(', ') || 'none specified'}
 - Writing style: ${strategy.writingStyle.tone.join(', ') || author.tone}; formality ${strategy.writingStyle.formality}; length ${strategy.writingStyle.postLength}; formats ${strategy.writingStyle.preferredFormats.join(', ') || 'use existing LinkedIn formatting rules'}
-
-STRATEGY RULES:
-- Do not write generic niche commentary.
-- Connect the topic to a target-audience pain, goal, objection, or desired outcome.
-- Make the angle fit the author's positioning and point of view.
-- Respect excluded topics and rejected patterns.
-- Use writing style only for tone, structure, and formatting. Do not let style replace strategy.
-- Avoid repeating recent topic angles supplied elsewhere in context.
 ` : '';
   return `
 AUTHOR PROFILE (highest priority):
@@ -169,6 +93,7 @@ NICHES: ${niches}
 AUDIENCE: ${audience}
 TONE: ${author.tone}
 ${strategyBlock}
+${authorityBlock}
 ${options.includeQualityContext === false ? '' : POST_QUALITY_CONTEXT}
 `;
 }
@@ -177,73 +102,40 @@ ${options.includeQualityContext === false ? '' : POST_QUALITY_CONTEXT}
 export function buildAngleSpecificityBlock(
   plan: BatchPostPlan,
 ): string {
+  const prefix = `ANGLE LENS (${plan.angle}): This selects what to examine, not a mandatory essay structure.`;
   switch (plan.angle) {
     case 'practical_tutorial':
-      return `ANGLE REQUIREMENTS (practical_tutorial):
-- Required thinking: a usable process or implementation approach and the details needed to carry it out in this domain.
-- Ordered steps are appropriate, but include only the steps the implementation needs.
-- Name relevant workflow stages, decisions, roles, tools, or system layers only when useful.
-- Mention an incorrect approach only if it clarifies a meaningful boundary.`;
+      return `${prefix} Explain a usable process or decision. Use ordered steps only when sequence is intrinsic to the idea.`;
 
     case 'architecture_tradeoff':
-      return `ANGLE REQUIREMENTS (architecture_tradeoff):
-- Required thinking: two genuinely different approaches and the condition that makes each appropriate.
-- Operational or maintenance risks are optional unless they affect the decision.
-- Do not declare a universal winner when the choice depends on context.
-- The Expression Mode determines presentation and order.`;
+      return `${prefix} Clarify a meaningful choice and the condition that changes it; comparison and qualification are optional when the claim already resolves the choice.`;
 
     case 'technical_mistake':
-      return `ANGLE REQUIREMENTS (technical_mistake):
-- Required thinking: identify one mistaken assumption, behavior, process, or mechanism and provide a domain-grounded correction.
-- Explain why it can appear reasonable only when that adds useful context.
-- A failure example is optional when the mechanism is already concrete.
-- The Expression Mode determines presentation and order.`;
+      return `${prefix} Identify one mistaken assumption or behavior and a credible correction. Cause, example, and failure mode are optional.`;
 
     case 'debugging_story':
-      return `ANGLE REQUIREMENTS (debugging_story):
-- Do not fabricate a personal experience.
-- Present it as a common or hypothetical debugging sequence.
-- Include the visible symptom.
-- Include the underlying cause.
-- Include one diagnostic check.
- - Include the fix; add prevention guidance only when useful.
-- Keep the sequence clear and easy to follow.`;
+      return `${prefix} Examine how a problem can be diagnosed. Do not imply a personal incident; symptom, cause, check, and response are available reasoning dimensions, not required sections.`;
 
     case 'product_lesson':
-      return `ANGLE REQUIREMENTS (product_lesson):
-- Required thinking: a meaningful product, process, or implementation decision and the domain reasoning that makes it useful.
-- A consequence, user impact, or broader principle is optional.
-- Avoid generic business lessons.
-- The Expression Mode determines presentation and order.`;
+      return `${prefix} Develop one meaningful decision or lesson with domain-relevant reasoning; consequence and broader principle are optional.`;
 
     case 'reflection':
-      return `ANGLE REQUIREMENTS (reflection):
-- Required thinking: a precise observation and its meaningful implication.
-- Examples and implementation decisions are optional when the observation is already concrete.
-- Lower specialist-detail density than a tutorial is acceptable.
-- The Expression Mode determines presentation and order.`;
+      return `${prefix} Develop a precise observation and only the implication needed to complete it. Advice and examples are optional.`;
 
     case 'defensible_opinion':
-      return `ANGLE REQUIREMENTS (defensible_opinion):
-- Required thinking: a clear position supported by credible, domain-grounded reasoning.
-- A qualification, counterargument, limitation, or example is optional.
-- Do not require a question, CTA, or artificial balance.
-- The Expression Mode determines presentation and order.`;
+      return `${prefix} State a clear position and enough credible reasoning to defend it. Qualification, counterargument, question, and CTA are optional.`;
 
     default:
-      return `ANGLE REQUIREMENTS (${plan.angle}):
-- Open with a specific idea.
-- Explain the mechanism or reasoning.
- - Add consequences or actions only when they are relevant to the selected angle.`;
+      return `${prefix} Develop the assigned claim with only the reasoning it needs.`;
   }
 }
 
 
-export function buildSourceEvidenceBlock(trend?: TrendCandidate | null): string {
+export function buildSourceEvidenceBlock(trend?: TrendCandidate | null, fallbackTitle?: string | null): string {
   if (!trend) {
     return `SOURCE EVIDENCE:
-Title: (evergreen author expertise)
-Summary: (none — write general technical guidance clearly labeled as general guidance)
+Title: ${fallbackTitle?.trim() || '(evergreen idea)'}
+Summary: (none — use careful general reasoning without implying a source)
 Key points: (none)`;
   }
 
@@ -261,56 +153,125 @@ ${keyPoints}
 Rules:
 - Use source evidence when present.
 - Do not invent article details.
-- General technical guidance is allowed when clearly phrased as general guidance.
+- General domain reasoning is allowed when clearly phrased as such.
 - When evidence is missing, do not imply the post summarizes the article.`;
+}
+
+type CandidateSafetyRule = { matches: RegExp; instruction: string };
+
+const CANDIDATE_SAFETY_RULES: CandidateSafetyRule[] = [
+  { matches: /\b(?:authentication|authorization|login|access control)\b/i, instruction: 'Authentication establishes identity; authorization determines permitted actions.' },
+  { matches: /\b(?:tenant|multi-tenant|cross-tenant)\b/i, instruction: 'Isolation claims require scoped authorization and data access, not identity checks alone.' },
+  { matches: /\b(?:client-side|frontend|entitlement|server-side)\b/i, instruction: 'User-interface restrictions are not a security boundary; enforcement claims must identify the authoritative control.' },
+  { matches: /\b(?:compliance|audit trail|audit log)\b/i, instruction: 'Access control, auditability, and legal compliance are distinct claims and need distinct evidence.' },
+  { matches: /\b(?:queue|concurrency|duplicate job|lock|idempotent)\b/i, instruction: 'Concurrency controls and locks do not by themselves guarantee duplicate prevention or exactly-once execution.' },
+  { matches: /\b(?:environment parity|staging|production database|shared database)\b/i, instruction: 'Environment consistency does not require shared infrastructure or shared data.' },
+  { matches: /\b(?:patient|clinical|diagnos|treatment|medical)\b/i, instruction: 'Do not convert general health information into a diagnosis, treatment promise, or unsupported patient outcome.' },
+  { matches: /\b(?:investment|financial return|tax|accounting)\b/i, instruction: 'Do not present uncertain financial, tax, or return claims as guaranteed or individually applicable.' },
+  { matches: /\b(?:legal|law|regulation|regulatory)\b/i, instruction: 'Distinguish general information from jurisdiction-specific legal conclusions and preserve stated uncertainty.' },
+];
+
+export function buildCandidateSafetyBlock(
+  plan: BatchPostPlan,
+  trend?: TrendCandidate | null,
+  body = '',
+): string {
+  const context = [
+    plan.sourceTopic,
+    plan.centralClaim,
+    plan.selectedCentralClaim,
+    plan.coreClaim,
+    ...(plan.mechanismFocus ?? []),
+    trend?.topic,
+    trend?.summary,
+    ...(trend?.keyPoints ?? []),
+    body,
+  ].filter(Boolean).join(' ');
+  const relevant = CANDIDATE_SAFETY_RULES.filter((rule) => rule.matches.test(context));
+  if (!relevant.length) return '';
+  return `CANDIDATE-RELEVANT SAFETY DISTINCTIONS:\n${relevant.map((rule) => `- ${rule.instruction}`).join('\n')}`;
 }
 
 export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?: TrendCandidate | null, recentPosts: string[] = [], author?: AuthorContext): string {
   const centralClaim = plan.centralClaim ?? plan.coreClaim ?? plan.sourceTopic ?? 'Develop one narrow claim from the source topic.';
   const depth = plan.depthPlan;
+  const editorial = plan.editorialDecision;
   const { depthClass, targetLengthRange } = resolvePostDepthMetadata(plan);
+  const audience = (author?.targetAudience ?? []).join(', ') || 'the intended readers';
+  const depthItems = [
+    depth?.strongestObservations.length ? `- Useful observations: ${depth.strongestObservations.join(' | ')}` : '',
+    depth?.underlyingCauseOrMechanism ? `- Possible mechanism: ${depth.underlyingCauseOrMechanism}` : '',
+    depth?.deeperInterpretation ? `- Possible interpretation: ${depth.deeperInterpretation}` : '',
+    depth?.meaningfulConsequence ? `- Possible consequence: ${depth.meaningfulConsequence}` : '',
+    depth?.usefulTensionOrQualification ? `- Possible qualification or tension: ${depth.usefulTensionOrQualification}` : '',
+    depth?.personalPerspective.supported && depth.personalPerspective.insight ? `- Supported personal perspective: ${depth.personalPerspective.insight}` : '',
+    depth?.endingInsight ? `- Possible ending insight: ${depth.endingInsight}` : '',
+    depth?.avoidIdeas.length ? `- Avoid: ${depth.avoidIdeas.join(' | ')}` : '',
+  ].filter(Boolean).join('\n');
   return `
-${buildSourceEvidenceBlock(trend)}
+CLAIM CONTRACT — SELECTED CENTRAL CLAIM — PRESERVE THIS MEANING:
+${centralClaim}
+Develop this claim only. Do not broaden it, replace its mechanism, reverse its conclusion, change its audience implication, or introduce a second thesis.
+
+AUDIENCE AND OBJECTIVE:
+- Audience: ${audience}
+- Content objective: ${editorial?.contentObjective?.toLowerCase().replace(/_/g, ' ') ?? 'develop one useful idea'}
+- Conversion objective: ${editorial?.conversionObjective ?? 'NONE'}. NONE means no CTA; a substantive final insight is not a CTA.
+
+ASSIGNED EDITORIAL FORM:
 ${buildAngleSpecificityBlock(plan)}
-ASSIGNED BATCH PLAN:
-- Claim provenance: ${plan.claimSource ?? 'LEGACY_TOPIC'}
-- SELECTED CENTRAL CLAIM — PRESERVE THIS MEANING: ${centralClaim}
-- This is the primary semantic contract for the post. Do not broaden it, substitute a different mechanism, reverse its conclusion, or change its audience implication.
-- Angle: ${plan.angle}
-- Optional hook hint: ${plan.hookStyle}
-- Optional ending preference: ${plan.endingStyle} (use only when the Expression Mode and completed idea benefit from an explicit ending)
-- Legacy layout hint: ${plan.layout} (subordinate to the Expression Mode; do not treat it as a required section sequence)
-- Source topic (inspiration only): ${plan.sourceTopic ?? 'evergreen author expertise'}
-- Rationale: ${plan.rationale}
-${sourceLink ? `- Reference link (do not summarize unless directly relevant): ${sourceLink}` : ''}
+${editorial ? `- Opening direction: ${editorial.hookFamily.toLowerCase().replace(/_/g, ' ')}; express the claim directly, without a stock formula or clickbait.
+- Rhetorical direction: ${editorial.rhetoricalStructure.toLowerCase().replace(/_/g, ' ')}; use it flexibly, without headings or a fixed paragraph count.
+- Ending direction: ${editorial.endingIntent.toLowerCase().replace(/_/g, ' ')}.
+- Reference/share value, when useful: ${editorial.referenceValueForm.toLowerCase().replace(/_/g, ' ')}.
+- Presentation goal: ${editorial.shareabilityProfile?.presentationGuidance ?? 'Present the central claim clearly without manufacturing a list, framework, controversy, or CTA.'}
+- Personal evidence: ${editorial.personalEvidenceAvailable ? 'use only explicitly supplied facts' : 'unavailable; do not use a first-person story, lesson, or result'}.
+` : '- Follow the assigned angle and expression mode without treating legacy layout labels as a template.\n'}
 
-DEPTH AND LENGTH CONTRACT:
+${buildSourceEvidenceBlock(trend, plan.sourceTopic)}
+${sourceLink ? `Reference link: ${sourceLink}` : ''}
+${buildCandidateSafetyBlock(plan, trend)}
+
+DEPTH-PROPORTIONAL COMPLETENESS:
 - Depth class: ${depthClass}
-- Soft guidance range: approximately ${targetLengthRange.min}–${targetLengthRange.max} characters
-- The range guides drafting; it is not a quota. Information density and claim completeness determine when to stop.
-- Do not add examples, checklists, qualifications, failure modes, CTAs, conclusions, or additional paragraphs merely to reach a target length.
-- A concise LinkedIn-native post is explicitly allowed for COMPACT ideas. STANDARD ideas should develop only their necessary reasoning. DEEP ideas may use longer treatment when the assigned substance justifies it.
+- Soft range: approximately ${targetLengthRange.min}–${targetLengthRange.max} characters; this is not a quota.
+- A compact post is explicitly valid when it completes the claim with high information density.
+- Mechanism, consequence, qualification, trade-off and failure mode are optional reasoning dimensions, not mandatory sections of the final post. Examples are optional too.
+- Use only the relevant items below. Omitted fields require no replacement:
+${depthItems || '- No supporting dimension is mandatory; add only what the claim needs.'}
 - Never exceed LinkedIn's hard 3,000-character maximum.
-
-DEPTH PLAN — use as intellectual backbone, not a mandatory section template:
-- Strongest observations (maximum three): ${depth?.strongestObservations.join(' | ') || '(none planned)'}
-- Cause/mechanism: ${depth?.underlyingCauseOrMechanism ?? '(not planned)'}
-- Deeper interpretation: ${depth?.deeperInterpretation ?? '(not planned)'}
-- Consequence: ${depth?.meaningfulConsequence ?? '(not planned)'}
-- Tension/qualification: ${depth?.usefulTensionOrQualification ?? '(not planned)'}
-- Supported personal shift: ${depth?.personalPerspective.supported ? depth.personalPerspective.insight : '(unsupported; do not invent)'}
-- Ending insight: ${depth?.endingInsight ?? '(natural stop allowed)'}
-- Avoid ideas: ${depth?.avoidIdeas.join(' | ') || '(none listed)'}
-
-The source is inspiration only. Transform it into an author-relevant ${plan.angle.replace(/_/g, ' ')} post.
-Develop the SELECTED CENTRAL CLAIM above. Do not broaden it, replace it with a general topic summary, or introduce a second thesis.
-This post exists to develop that claim, not to cover the broader category.
-Every major paragraph must support, explain, challenge, illustrate, qualify, or apply it.
-Do not turn it into a checklist of adjacent benefits, risks, best practices, or subtopics unless the selected angle, layout, or Expression Mode explicitly calls for a list or walkthrough. Depth on one relevant point is better than breadth.
-Avoid category-introduction openings such as "When it comes to...", "X plays a crucial role", or "The importance of X cannot be overstated." Open from the claim, an observation, distinction, outcome, behavior, problem, or direct position as the Expression Mode requires.
-Do NOT write a headline summary of the trend.
-Interpret, do not enumerate: choose the strongest observations, group related symptoms, and explain what they reveal. Do not independently redesign the argument when the Depth Plan already supplies its backbone.
 `;
+}
+
+/** Complete batch writer user prompt. Kept as a pure builder for prompt auditing and snapshots. */
+export function buildPlannedPostPrompt(
+  plan: BatchPostPlan,
+  author: AuthorContext,
+  sourceLink = '',
+  trend?: TrendCandidate | null,
+  recentPosts: string[] = [],
+): string {
+  return `${buildAuthorBlock(author, { includeQualityContext: false })}
+${buildPlanBlock(plan, sourceLink, trend, recentPosts, author)}
+
+${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author.strategy)}
+
+${LINKEDIN_LINE_FORMAT_RULES}
+${HASHTAG_RULES}
+${LANGUAGE_RULES}
+
+Output MUST be valid JSON with headline, subheadline, bulletPoints, body, and hashtags.`;
+}
+
+/** Audit representation of the system and user messages seen by the batch writer. */
+export function buildAssembledBatchWriterPrompt(
+  plan: BatchPostPlan,
+  author: AuthorContext,
+  sourceLink = '',
+  trend?: TrendCandidate | null,
+  recentPosts: string[] = [],
+): string {
+  return `${GHOSTWRITER_SYSTEM}\n\n${buildPlannedPostPrompt(plan, author, sourceLink, trend, recentPosts)}`;
 }
 
 function formatStructuredIssues(issues: Array<QualityIssue | TechnicalReviewIssue>): string {
@@ -342,42 +303,27 @@ export function buildRepairPrompt(
   );
   const isShortLengthRepair = structured.some((issue) => issue.code === 'generated_post_too_short');
 
-  return `${buildAuthorBlock(author)}
+  return `${buildAuthorBlock(author, { includeQualityContext: false })}
 ${plan ? buildPlanBlock(plan) : ''}
 
-Repair the post as a clean final draft while preserving its successful rhetorical shape.
-
-Preserve the SELECTED CENTRAL CLAIM and its meaning, assigned angle, and verified facts.
-Do not preserve sentence structure when it causes awkward or contradictory prose.
-Address every listed issue.
-Do not invent personal experiences, results, users, metrics, or project history.
-The repaired output must read as one coherent post, not as patched fragments.
-
-
-Fix the listed issues without normalizing the post into a standard essay structure.
-
-Specifically:
-- Remove repeated definitions and conclusions.
-- Replace broad statements with concrete mechanisms or consequences.
-- Preserve the selected Expression Mode, opening behavior, paragraph rhythm, and natural ending.
-- Change only the sections needed to resolve the listed issues, plus minimal edits for coherence.
-- Preserve natural whitespace and short paragraphs.
-- Do not create a list unless the content genuinely benefits from one.
-- Do not add a scenario, action steps, takeaway, CTA, question, or closing section unless a listed issue specifically requires it and the Expression Mode supports it.
-- Ensure the body adds information beyond the image headline and bullet points.
-
-
+TARGETED REPAIR:
+- Fix every listed issue and make only the additional edits needed for coherence.
+- Preserve the claim contract, verified facts, successful rhetorical movement, and natural stopping point.
+- Do not assume repair is an improvement merely because it is newer. Avoid collateral loss of density, evidence, qualification, or claim fidelity.
+- Do not normalize the draft into an essay or add a scenario, list, action step, conclusion, question, or CTA unless the issue requires it.
+- Never invent personal experience, biography, results, people, numbers, dates, sources, or project history.
 
 ISSUES:
 ${formatStructuredIssues(structured)}
 
 ${isShortLengthRepair && plan ? `LENGTH REPAIR DEPTH CHECK:
-Use the approved Depth Plan above. Identify which useful planned dimension is missing or underdeveloped, then add only that material. Do not invent a new adjacent argument or expand an idea that is already clear. Stop when the missing substance is complete; do not inflate the draft to reach the soft range.` : ''}
+Add only a genuinely missing planned dimension. Stop when the missing substance is complete; the soft range is not a quota.` : ''}
 
 ORIGINAL POST:
 ${post.body}
 
-${VARIED_FORMAT_RULES}
+${plan ? buildExpressionModePromptBlock(plan.expressionMode, []) : ''}
+${LINKEDIN_LINE_FORMAT_RULES}
 ${HASHTAG_RULES}
 
 Output valid JSON:
@@ -387,16 +333,7 @@ Output valid JSON:
   "bulletPoints": [],
   "body": "...",
   "hashtags": "..."
-}
-
-${SPECIFICITY_RULES}
-${LINKEDIN_LINE_FORMAT_RULES}
-
-REPAIR SCOPE:
-Fix only the identified issue. Preserve the rhetorical movement and stopping behavior of the selected Expression Mode. Do not add an example, action step, consequence, positive-outcome paragraph, or conclusion unless it is the specific missing element.
-${plan ? buildExpressionModePromptBlock(plan.expressionMode, []) : ''}
-
-${DEFAULT_EDITORIAL_RULES}`;
+}`;
 }
 
 export function buildExpandSpecificityPrompt(
@@ -405,30 +342,25 @@ export function buildExpandSpecificityPrompt(
   author: AuthorContext,
   plan: BatchPostPlan,
 ): string {
-  return `${buildAuthorBlock(author)}
+  return `${buildAuthorBlock(author, { includeQualityContext: false })}
 ${buildPlanBlock(plan, undefined)}
-${SPECIFICITY_RULES}
-${LINKEDIN_LINE_FORMAT_RULES}
 
-Make this post concretely useful without changing the SELECTED CENTRAL CLAIM or expanding its rhetorical structure.
+TARGETED SPECIFICITY REPAIR:
+Make the post concretely useful without changing the claim contract or expanding its rhetorical structure.
 
 Current signals: ${(specificity?.signals ?? []).join(', ') || 'none'}
 Missing signals: ${(specificity?.missing ?? []).join(', ') || 'unknown'}
 
-Identify and add the single most valuable concrete detail: one precise mechanism, implementation fact, constraint, diagnostic observation, or causal relationship may be enough.
-Preserve the selected Expression Mode, paragraph rhythm, opening, and ending behavior.
-Do not add a scenario, consequence, action step, takeaway, or conclusion unless it is necessary to clarify the central claim.
-Do not add a new paragraph when the detail can be integrated into an existing sentence.
-Replace vague supporting material with the precise detail; do not keep generic sections around it merely to preserve length.
-
-Do not invent metrics, customers, incidents, or personal experience.
+- Add or substitute the single most valuable concrete detail; one mechanism, fact, constraint, observation, or causal relationship may be enough.
+- Preserve evidence, expression mode, paragraph rhythm, opening, and ending behavior.
+- Do not add optional sections or retain vague material merely to preserve length.
+- Do not invent evidence, metrics, people, incidents, or personal experience.
 
 CURRENT POST:
 ${post.body}
 
-FINAL REPAIR AUTHORITY:
-Fix only the identified specificity issue. Preserve the rhetorical movement and stopping behavior of the selected Expression Mode. Do not add an example, action step, consequence, positive-outcome paragraph, or conclusion unless that is the exact missing detail.
 ${buildExpressionModePromptBlock(plan.expressionMode, [])}
+${LINKEDIN_LINE_FORMAT_RULES}
 
 Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 }
@@ -531,48 +463,33 @@ export function buildTechnicalReviewPrompt(
   author: AuthorContext,
   plan: BatchPostPlan,
 ): string {
-  return `Review the post as a senior technical editor and domain-generic argument reviewer.
+  const claim = plan.selectedCentralClaim ?? plan.centralClaim ?? plan.coreClaim ?? plan.sourceTopic ?? '(not supplied)';
+  const editorial = plan.editorialDecision;
+  const authorityBoundaries = author.authorityContext?.boundaries.join(' ') || 'Do not infer biography, experience, results, or authority beyond supplied author facts.';
+  return `Review this LinkedIn draft as a domain-generic factual and argument-quality editor.
 
-Identify conceptual errors, misleading simplifications, unsupported guarantees,
-and missing distinctions that materially affect technical accuracy.
+REVIEW HIERARCHY:
+1. Factual and authority safety: flag invented evidence, biography, experience, outcomes, numbers, guarantees, or claims beyond supported authority.
+2. Claim fidelity: the draft must preserve this meaning — ${claim}
+3. Audience and objective: ${((author.targetAudience ?? []).join(', ') || 'intended readers')}; ${editorial?.contentObjective ?? 'one useful idea'}.
+4. Editorial form: judge whether ${editorial?.rhetoricalStructure?.toLowerCase().replace(/_/g, ' ') ?? plan.expressionMode ?? 'the assigned form'} serves the idea; do not demand a template.
+5. Evidence: distinguish supplied facts, general knowledge, opinion, and hypothetical reasoning. Do not reward invented specificity.
+6. Depth-proportional completeness: compact drafts are valid. Longer drafts must earn their length with information gain.
+7. Natural LinkedIn formatting: CTA, question, list, example, conclusion, and long-form treatment are optional.
 
-Also judge information gain. A section advances the post only when it adds a new causal mechanism,
-constraint, consequence, counterpoint, evidence item, decision-relevant implication, implementation
-detail, or qualification that materially changes the claim. Transition words, synonym swaps, examples
-that merely prove the thesis again, and checklists that restate it do not count as progression.
+AUTHOR EVIDENCE BOUNDARY:
+- Profile: ${author.description.slice(0, 400) || '(none supplied)'}
+- ${authorityBoundaries}
 
-Distinguish claim → mechanism → new consequence → useful implication from an elaborated repetition of
-claim → paraphrase → generic example → paraphrase with "because" → generic checklist.
+${buildCandidateSafetyBlock(plan, undefined, post.body)}
 
-Detect generic discourse by rhetorical structure, not exact phrases: broad category intro → vague tension
-→ announced scenario → practical steps → balanced summary → engagement question. Do not penalize a concise,
-dense post merely because it has few paragraphs. Longer posts must earn their length with information gain.
-
-Do not reject a post merely because it is simplified.
-Reject or warn when simplification changes the meaning or teaches an unsafe design.
-
-Pay special attention to:
-- authentication versus authorization
-- tenant resolution and tenant isolation
-- client-side UX restrictions versus server-side security boundaries
-- entitlement enforcement versus audit logging or legal compliance
-- queue concurrency versus duplicate prevention
-- locks versus idempotency
-- atomic usage counters versus periodic reconciliation
-- environment parity versus shared infrastructure
-- scalability versus consistency
-- database isolation strategies
-- conditional claims presented as universal outcomes
-- unsupported personal implementation stories
-
-${TECHNICAL_DISTINCTIONS}
-
-AUTHOR CONTEXT:
-${author.description.slice(0, 400)}
-
-ASSIGNED ANGLE: ${plan.angle}
-SOURCE TOPIC: ${plan.sourceTopic ?? 'evergreen'}
-SELECTED CENTRAL CLAIM: ${plan.selectedCentralClaim ?? plan.centralClaim ?? plan.coreClaim ?? '(not supplied)'}
+SEMANTIC REVIEW:
+- A passage adds information only when it contributes material evidence, reasoning, constraint, consequence, counterpoint, implication, detail, or qualification.
+- Transition words, synonym swaps, thesis-restating examples, and generic checklists do not count as progression.
+- Mechanism, consequence, qualification, trade-off and failure mode are optional reasoning dimensions, not mandatory sections of the final post.
+- Penalize broad category setup and formulaic essay progression when they dilute this claim.
+- Do not penalize simplification unless it changes meaning, overstates certainty, or becomes unsafe.
+- Score claim fidelity independently from reviewer preference for length or structure.
 
 POST:
 ${post.body}
@@ -588,12 +505,21 @@ Output JSON only:
   "claimFidelity": integer 0-100,
   "issues": [
     {
-      "code": "auth_vs_authorization" | "tenant_isolation_confusion" | "token_auth_overclaim" | "frontend_security_claim" | "compliance_overclaim" | "audit_trail_overclaim" | "false_architecture_tradeoff" | "environment_isolation_error" | "idempotency_omitted" | "locking_overclaim" | "atomic_usage_omitted" | "background_job_overclaim" | "guaranteed_outcome" | "unsupported_personal_claim" | "REDUNDANT_EXPLANATION" | "LOW_INFORMATION_DENSITY" | "GENERIC_SCENARIO_STRUCTURE" | "GENERIC_CHECKLIST_EXPANSION" | "THESIS_RESTATEMENT" | "WEAK_ARGUMENT_PROGRESSION" | "GENERIC_ENGAGEMENT_ENDING" | "CLAIM_DRIFT" | "other",
+      "code": "short_machine_code such as CLAIM_DRIFT, UNSUPPORTED_FACT, LOW_INFORMATION_DENSITY, or REDUNDANT_EXPLANATION",
       "severity": "warning" | "error",
       "excerpt": "short quote from post",
-      "explanation": "why this is inaccurate or unsafe",
+      "explanation": "why this materially harms safety, fidelity, or quality",
       "repairInstruction": "how to fix without inventing facts"
     }
   ]
 }`;
+}
+
+/** Audit representation of the system and user messages seen by the batch reviewer. */
+export function buildAssembledTechnicalReviewPrompt(
+  post: { body: string },
+  author: AuthorContext,
+  plan: BatchPostPlan,
+): string {
+  return `${GHOSTWRITER_SYSTEM}\n\n${buildTechnicalReviewPrompt(post, author, plan)}`;
 }

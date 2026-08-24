@@ -26,6 +26,7 @@ import {
   buildImageRepairPrompt,
   buildJsonRepairPrompt,
   buildPlanBlock,
+  buildPlannedPostPrompt,
   buildRepairPrompt,
   buildTechnicalReviewPrompt,
 } from './ghostwriterPrompts';
@@ -54,6 +55,11 @@ import {
   resolveClaimSource,
 } from './claimNarrowingService';
 import { buildExpressionModePromptBlock, buildExpressionModeSystemInstruction, expressionModeFromPrompt } from './expressionModeService';
+import {
+  FALLBACK_PROVENANCE,
+  logFallbackProvenance,
+  type FallbackProvenance,
+} from './fallbackProvenanceService';
 
 dotenv.config();
 
@@ -168,12 +174,21 @@ export class ContentService {
     provider: 'GEMINI' | 'OPENAI',
     temperature: number,
     maxOutputTokens?: number,
+    fallbackProvenance?: Extract<FallbackProvenance, 'PLANNER_FALLBACK' | 'WRITER_FALLBACK'>,
+    fallbackAlreadyReported = false,
   ): Promise<string> {
     try {
       if (provider === 'GEMINI') return await this.generateGeminiPost(prompt, temperature, 0, maxOutputTokens);
       return await this.generateOpensAiPost(prompt, temperature, maxOutputTokens);
     } catch (error) {
       console.warn(`[ghostwriter] Primary provider ${provider} failed, attempting fallback`);
+      if (fallbackProvenance && !fallbackAlreadyReported) {
+        logFallbackProvenance({
+          provenance: fallbackProvenance,
+          stage: 'provider_failover',
+          reason: `primary_${provider.toLowerCase()}_failed`,
+        });
+      }
       if (provider === 'GEMINI' && this.openai) {
         return await this.generateOpensAiPost(prompt, temperature, maxOutputTokens);
       }
@@ -307,7 +322,7 @@ Output JSON array only:
 ]`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS);
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK);
       const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const json = JSON.parse(cleaned);
       const validated = batchPlanSchema.safeParse(json);
@@ -316,8 +331,10 @@ Output JSON array only:
         return validated.data.slice(0, count) as BatchPostPlan[];
       }
       console.warn('[ghostwriter] AI batch plan invalid; using deterministic plan');
+      logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.PLANNER_FALLBACK, stage: 'batch_plan', reason: 'invalid_planner_output' });
     } catch (err) {
       console.warn('[ghostwriter] AI batch plan failed; using deterministic plan', err);
+      logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.PLANNER_FALLBACK, stage: 'batch_plan', reason: 'planner_call_failed' });
     }
 
     return deterministic;
@@ -431,7 +448,7 @@ Output one JSON object only:
 {"claims":[{"index":0,"centralClaim":"preserved or faithfully corrected claim","correctionReason":"null or concise reason","depthPlan":{"centralClaim":"same claim","strongestObservations":["optional; maximum three"],"underlyingCauseOrMechanism":"optional string","meaningfulConsequence":"optional string"}}]}`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS);
+      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK);
       const parsed = JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim());
       const items = Array.isArray(parsed)
         ? parsed
@@ -440,7 +457,10 @@ Output one JSON object only:
           : Array.isArray(parsed?.centralClaims)
             ? parsed.centralClaims
             : null;
-      if (!items) return fallback();
+      if (!items) {
+        logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.PLANNER_FALLBACK, stage: 'claim_planning', reason: 'invalid_claim_plan' });
+        return fallback();
+      }
       return preparedPlans.map((plan, index) => {
         const item = items.find((candidate: unknown) => Number((candidate as { index?: unknown })?.index) === index);
         const candidate = typeof item?.centralClaim === 'string' ? item.centralClaim.trim() : '';
@@ -477,6 +497,7 @@ Output one JSON object only:
       });
     } catch (error) {
       console.warn('[ghostwriter] central claim planning failed; using non-blocking fallback', { message: error instanceof Error ? error.message : String(error) });
+      logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.PLANNER_FALLBACK, stage: 'claim_planning', reason: 'claim_planner_failed' });
       return fallback();
     }
   }
@@ -489,21 +510,7 @@ Output one JSON object only:
     trend?: TrendCandidate | null,
     recentPosts: string[] = [],
   ): Promise<GeneratedPostContent> {
-    const prompt = `${buildAuthorBlock(author)}
-${buildPlanBlock(plan, sourceLink, trend, recentPosts, author)}
-
-${SPECIFICITY_RULES}
-${VARIED_FORMAT_RULES}
-${HASHTAG_RULES}
-${LANGUAGE_RULES}
-
-EXPRESSION MODE:
-The SELECTED CENTRAL CLAIM controls what the post argues. The following mode contract controls how the thought unfolds when it does not conflict with explicit user controls.
-${buildExpressionModePromptBlock(plan.expressionMode, recentPosts, author.strategy)}
-
-${DEFAULT_EDITORIAL_RULES}
-
-Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic, angle, layout.`;
+    const prompt = buildPlannedPostPrompt(plan, author, sourceLink, trend, recentPosts);
 
     const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
     const parsed = await this.parseWithRepair(raw, provider, prompt);
@@ -532,6 +539,7 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
     provider: 'GEMINI' | 'OPENAI',
     temperature: number,
   ): Promise<string> {
+    let fallbackAlreadyReported = false;
     if (provider === 'OPENAI' && this.openai) {
       try {
         return await this.generateOpenAiStructuredPost(prompt, temperature);
@@ -539,9 +547,18 @@ Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashta
         console.warn('[ghostwriter] OpenAI structured output failed; falling back', {
           message: err instanceof Error ? err.message : String(err),
         });
+        logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.WRITER_FALLBACK, stage: 'structured_writer', reason: 'structured_output_failed' });
+        fallbackAlreadyReported = true;
       }
     }
-    return this.generateWithFallback(prompt, provider, temperature, POST_MAX_OUTPUT_TOKENS);
+    return this.generateWithFallback(
+      prompt,
+      provider,
+      temperature,
+      POST_MAX_OUTPUT_TOKENS,
+      FALLBACK_PROVENANCE.WRITER_FALLBACK,
+      fallbackAlreadyReported,
+    );
   }
 
   hasProvider(provider: 'GEMINI' | 'OPENAI'): boolean {
@@ -584,8 +601,7 @@ Requirements:
 - Avoid repetitive generic AI phrasing.
 - Let the complexity of the idea determine the natural length. Do not pad the post.
 - Do not use Markdown bold markers or double asterisks.
-- Target approximately 1,800–2,500 characters. The completed post should normally contain at least 1,600 characters and must remain below LinkedIn's 3,000-character limit.
-- Add length only through useful reasoning, examples, specificity, contrast, practical implications, or narrative development. Do not pad with repetition, filler, redundant conclusions, or generic advice.
+- A compact post is valid when it completes the idea with high information density; LinkedIn's 3,000-character maximum remains hard.
 - Use hashtags only when they add value.
 
 ${SPECIFICITY_RULES}
@@ -593,7 +609,7 @@ ${VARIED_FORMAT_RULES}
 ${HASHTAG_RULES}
 ${LANGUAGE_RULES}
 
-Output MUST be valid JSON with headline, subheadline, bulletPoints, body, hashtags, sourceTopic.`;
+Output MUST be valid JSON with headline, subheadline, bulletPoints, body, and hashtags.`;
 
     const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
     const parsed = await this.parseWithRepair(raw, provider, prompt);
@@ -961,7 +977,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
         },
       },
       messages: [
-        { role: 'system', content: `${GHOSTWRITER_SYSTEM}\n\n${buildExpressionModeSystemInstruction(expressionModeFromPrompt(prompt))}` },
+        { role: 'system', content: GHOSTWRITER_SYSTEM },
         { role: 'user', content: prompt },
       ],
     });
