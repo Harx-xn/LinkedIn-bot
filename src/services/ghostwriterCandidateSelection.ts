@@ -36,6 +36,10 @@ export type CandidateObservation = {
   technicalReview: TechnicalReviewResult;
   issues: QualityIssue[];
   plan: BatchPostPlan;
+  ideaCandidateId?: string;
+  ideaAttemptIndex?: number;
+  freshGenerationAttempt?: number;
+  contentRepairAttempt?: number;
 };
 
 export type CandidateTier = 'REVIEWER_VALIDATED' | 'DETERMINISTIC_VALID' | 'HARD_USABLE' | 'EMERGENCY';
@@ -154,6 +158,17 @@ export class SlotCandidatePool {
 
   best(): RankedSlotCandidate | null {
     return this.candidates.filter((candidate) => candidate.eligible).sort(compareSlotCandidates).at(-1) ?? null;
+  }
+
+  bestForIdea(candidateId: string): RankedSlotCandidate | null {
+    return this.candidates
+      .filter((candidate) => candidate.eligible && candidate.ideaCandidateId === candidateId)
+      .sort(compareSlotCandidates)
+      .at(-1) ?? null;
+  }
+
+  snapshot(): RankedSlotCandidate[] {
+    return [...this.candidates];
   }
 
   summary() {

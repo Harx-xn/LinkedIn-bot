@@ -34,6 +34,7 @@ import {
 } from './trendPreviewScore';
 import type { EffectiveBotStrategy } from './botStrategyService';
 import { scoreTrendForStrategy } from './botStrategyTrendService';
+import { evaluateSearchCandidateAdmission } from './searchCandidateAdmissionService';
 
 const MIN_GENERATION_RELEVANCE = Math.max(1, Number(process.env.TREND_MIN_RELEVANCE ?? 65) || 65);
 const MIN_CLASSIFICATION_CONFIDENCE = Math.max(0.01, Number(process.env.TREND_MIN_CLASSIFICATION_CONFIDENCE ?? 0.65) || 0.65);
@@ -250,12 +251,19 @@ function rankGenerationCandidate(
   const relevance = strategyScore?.nicheMatch?.relevanceScore
     ?? strategyScore?.score
     ?? relevanceScore(trend, author, plan);
-  const totalScore =
-    relevance * 0.45
-    + (strategyScore?.score ?? relevance) * 0.25
-    + sourceQ * 0.12
-    + novelty.score * 0.10
-    + recency * 0.08;
+  const admission = author.strategy ? evaluateSearchCandidateAdmission({
+    candidate: trend, strategy: author.strategy, profile: plan,
+    subjectRelevance: relevance, sourceQuality: sourceQ, nicheMatch: strategyScore?.nicheMatch,
+  }) : null;
+  const totalScore = admission
+    ? admission.subjectRelevance * .18
+      + admission.creatorContentFit * .18
+      + admission.audienceIdeaNaturalness * .08
+      + admission.sourceClaimTransformability * .16
+      + admission.candidateCoherence.overall * .05
+      + admission.candidateCoherence.authorityFramingFit * .05
+      + sourceQ * .12 + recency * .08 + novelty.score * .10
+    : relevance * .45 + relevance * .25 + sourceQ * .12 + novelty.score * .10 + recency * .08;
 
   const adjustedTotalScore = totalScore;
 
@@ -271,6 +279,8 @@ function rankGenerationCandidate(
       strategyReasons: strategyScore?.reasons,
       strategyRiskFlags: strategyScore?.riskFlags,
       qualificationConfidence: strategyScore?.nicheMatch?.confidence,
+      ...(admission ?? {}),
+      searchRelevanceBreakdown: strategyScore?.breakdown,
     },
     fingerprint,
     relevanceScore: relevance,
@@ -354,7 +364,7 @@ export async function processTrendCandidates(params: {
   mode?: 'preview' | 'batch' | 'generation';
   pipelineMode?: TrendPipelineMode;
   strategy?: EffectiveBotStrategy;
-}): Promise<{ ranked: RankedTrendCandidate[]; selected: RankedTrendCandidate[]; stats: TrendSelectionStats }> {
+}): Promise<{ ranked: RankedTrendCandidate[]; evidenceOnlyRanked: RankedTrendCandidate[]; rejectedSearchRanked: RankedTrendCandidate[]; selected: RankedTrendCandidate[]; stats: TrendSelectionStats }> {
   const pipelineMode = params.pipelineMode ?? toPipelineMode(params.mode ?? 'generation');
   const cfg = getPipelineConfig(pipelineMode);
   const exclusions = params.plan.exclusions ?? [];
@@ -404,6 +414,8 @@ export async function processTrendCandidates(params: {
   const strategyRejectionFlags: Record<string, number> = {};
   const acceptancePathCounts: Record<string, number> = {};
   const fallbackEligible: Array<{ trend: TrendCandidate; match: CandidateNicheMatch }> = [];
+  const evidenceOnlyTrends: TrendCandidate[] = [];
+  const rejectedSearchTrends: TrendCandidate[] = [];
 
   if (strategy && pipelineMode === 'preview') {
     const strategyAccepted = candidates.filter((candidate) => {
@@ -467,9 +479,22 @@ export async function processTrendCandidates(params: {
         const eligibility = score.nicheMatch
           ? decideCandidateEligibility(score.nicheMatch, true)
           : { eligible: false, rejectionCodes: ['niche_classification_failed'] };
-        if (!eligibility.eligible) {
+        const admission = evaluateSearchCandidateAdmission({
+          candidate, strategy, profile: params.plan, subjectRelevance: score.score,
+          sourceQuality: sourceQualityScore(candidate), nicheMatch: score.nicheMatch,
+        });
+        Object.assign(candidate, admission, { searchRelevanceBreakdown: score.breakdown });
+        const standaloneEligible = eligibility.eligible && admission.searchDisposition === 'NEW_IDEA_CANDIDATE';
+        if (admission.searchDisposition === 'EVIDENCE_ONLY'
+          && (eligibility.hardRejectionCodes?.length ?? 0) === 0) evidenceOnlyTrends.push(candidate);
+        if (admission.searchDisposition === 'REJECTED_FOR_CREATOR_FIT'
+          || admission.searchDisposition === 'REJECTED_FOR_WEAK_TRANSFORMABILITY') rejectedSearchTrends.push(candidate);
+        if (!standaloneEligible) {
           for (const flag of eligibility.rejectionCodes) {
             strategyRejectionFlags[flag] = (strategyRejectionFlags[flag] ?? 0) + 1;
+          }
+          if (admission.searchRejectionReason) {
+            strategyRejectionFlags[admission.searchRejectionReason] = (strategyRejectionFlags[admission.searchRejectionReason] ?? 0) + 1;
           }
           console.info('[trend-selection] candidate rejected before fingerprint', {
             userId: params.userId, niche: params.niche, title: candidate.topic.slice(0, 120),
@@ -504,9 +529,16 @@ export async function processTrendCandidates(params: {
             evidenceStrength: score.nicheMatch?.activeNicheEvidence?.strength ?? 0,
             ambiguityResolutionReason: score.nicheMatch?.activeNicheEvidence?.ambiguityResolutionReason ?? null,
             finalRelevanceScore: score.score,
-            decision: 'rejected',
+            creatorContentFit: admission.creatorContentFit,
+            audienceIdeaNaturalness: admission.audienceIdeaNaturalness,
+            sourceClaimTransformability: admission.sourceClaimTransformability,
+            candidateCoherence: admission.candidateCoherence.overall,
+            searchDisposition: admission.searchDisposition,
+            searchRejectionReason: admission.searchRejectionReason,
+            evidenceOnly: admission.evidenceOnly,
+            decision: admission.evidenceOnly ? 'evidence_only' : 'rejected',
           });
-          if (score.nicheMatch
+          if (admission.searchDisposition === 'NEW_IDEA_CANDIDATE' && score.nicheMatch
             && (score.nicheMatch.directEvidence?.length ?? 0) > 0
             && (eligibility.hardRejectionCodes?.length ?? 0) === 0
             && score.nicheMatch.relevanceScore >= 50
@@ -518,7 +550,7 @@ export async function processTrendCandidates(params: {
         } else if (eligibility.acceptancePath) {
           acceptancePathCounts[eligibility.acceptancePath] = (acceptancePathCounts[eligibility.acceptancePath] ?? 0) + 1;
         }
-        return eligibility.eligible;
+        return standaloneEligible;
       });
       rejectedByStrategy += beforeStrategy - strategyAccepted.length;
       toFingerprint.length = 0;
@@ -595,6 +627,19 @@ export async function processTrendCandidates(params: {
     }
   }
 
+  const evidenceOnlyRanked = pipelineMode === 'generation'
+    ? evidenceOnlyTrends.map((trend) => {
+      const fp = buildFallbackFingerprint(trend, params.plan);
+      return rankGenerationCandidate(trend, fp, params.author, params.plan, generationHistory);
+    })
+    : [];
+  const rejectedSearchRanked = pipelineMode === 'generation'
+    ? rejectedSearchTrends.map((trend) => {
+      const fp = buildFallbackFingerprint(trend, params.plan);
+      return rankGenerationCandidate(trend, fp, params.author, params.plan, generationHistory);
+    })
+    : [];
+
   if (pipelineMode === 'generation' && ranked.length < params.limit) {
     ranked.push(...deriveGroundedSourceAngles(ranked, generationHistory, 2).slice(0, params.limit - ranked.length));
   }
@@ -647,6 +692,8 @@ export async function processTrendCandidates(params: {
 
   return {
     ranked: ranked.sort((a, b) => b.totalScore - a.totalScore),
+    evidenceOnlyRanked: evidenceOnlyRanked.sort((a, b) => b.totalScore - a.totalScore),
+    rejectedSearchRanked: rejectedSearchRanked.sort((a, b) => b.totalScore - a.totalScore),
     selected,
     stats: {
       rawCount: params.rawTrends.length,
@@ -703,8 +750,11 @@ export async function upgradePreviewPoolForGeneration(params: {
     ranked.push(rankGenerationCandidate(candidate.trend, fp, params.author, plan, history));
   }
 
-  ranked.sort((a, b) => b.totalScore - a.totalScore);
-  const selected = selectDiverseRankedCandidates(ranked, params.slotCount, {
+  const standaloneRanked = ranked
+    .filter((candidate) => candidate.trend.searchDisposition == null
+      || candidate.trend.searchDisposition === 'NEW_IDEA_CANDIDATE')
+    .sort((a, b) => b.totalScore - a.totalScore);
+  const selected = selectDiverseRankedCandidates(standaloneRanked, params.slotCount, {
     caps: { maxPerSemanticCluster: TOPIC_DIVERSITY_CONFIG.maxPerClusterInBatch },
   });
 

@@ -75,7 +75,8 @@ USER KNOWLEDGE / AUTHORITY BOUNDARIES (${authority.scope}):
 STRATEGY CONTEXT (use for topic angle and audience fit):
 - Positioning: ${strategy.profilePositioning.positioningStatement || strategy.legacy.description || 'Use the author profile above.'}
 - Point of view: ${strategy.profilePositioning.uniquePointOfView || 'Choose a defensible, specific point of view from the supplied topic.'}
-- Target audience: ${strategy.targetAudience.primaryAudience || audience}
+- Configured audiences: ${audience}
+- Audience use: the idea-level claim contract resolves which audience, if any, is natural. Use that context silently; never insert an audience label merely to manufacture relevance.
 - Audience pains: ${strategy.targetAudience.painPoints.join('; ') || 'infer only from supplied source facts and author context'}
 - Desired outcomes: ${strategy.targetAudience.desiredOutcomes.join('; ') || 'make the post useful to the target audience'}
 - Primary goal: ${strategy.contentGoals.primaryGoal}
@@ -90,7 +91,7 @@ AUTHOR PROFILE (highest priority):
 ${author.description.trim() || 'Professional operator in the selected niches.'}
 
 NICHES: ${niches}
-AUDIENCE: ${audience}
+CONFIGURED AUDIENCE OPTIONS: ${audience}
 TONE: ${author.tone}
 ${strategyBlock}
 ${authorityBlock}
@@ -197,7 +198,9 @@ export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?:
   const depth = plan.depthPlan;
   const editorial = plan.editorialDecision;
   const { depthClass, targetLengthRange } = resolvePostDepthMetadata(plan);
-  const audience = (author?.targetAudience ?? []).join(', ') || 'the intended readers';
+  const audience = plan.resolvedAudience?.length
+    ? plan.resolvedAudience.join(', ')
+    : 'broadly relevant readers; do not insert a configured audience label';
   const depthItems = [
     depth?.strongestObservations.length ? `- Useful observations: ${depth.strongestObservations.join(' | ')}` : '',
     depth?.underlyingCauseOrMechanism ? `- Possible mechanism: ${depth.underlyingCauseOrMechanism}` : '',
@@ -471,7 +474,7 @@ export function buildTechnicalReviewPrompt(
 REVIEW HIERARCHY:
 1. Factual and authority safety: flag invented evidence, biography, experience, outcomes, numbers, guarantees, or claims beyond supported authority.
 2. Claim fidelity: the draft must preserve this meaning — ${claim}
-3. Audience and objective: ${((author.targetAudience ?? []).join(', ') || 'intended readers')}; ${editorial?.contentObjective ?? 'one useful idea'}.
+3. Audience and objective: ${(plan.resolvedAudience?.length ? plan.resolvedAudience.join(', ') : 'broadly relevant readers without forced audience naming')}; ${editorial?.contentObjective ?? 'one useful idea'}.
 4. Editorial form: judge whether ${editorial?.rhetoricalStructure?.toLowerCase().replace(/_/g, ' ') ?? plan.expressionMode ?? 'the assigned form'} serves the idea; do not demand a template.
 5. Evidence: distinguish supplied facts, general knowledge, opinion, and hypothetical reasoning. Do not reward invented specificity.
 6. Depth-proportional completeness: compact drafts are valid. Longer drafts must earn their length with information gain.

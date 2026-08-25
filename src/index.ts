@@ -32,6 +32,7 @@ import { handleStripeWebhook } from './routes/stripeWebhook';
 import { handleSafepayWebhook } from './routes/safepayWebhook';
 import path from 'path';
 import { startScheduler } from './services/schedulerService';
+import { reconcileStaleBatchGenerationJobs } from './services/batchGenerationJobLifecycleService';
 
 const app = express();
 
@@ -39,7 +40,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   // add your deployed frontend domain too:
   "https://frontend-bx09.onrender.com",
-  "https://veyra.innovariatech.space"
+  "https://veyrais.innovariatech.space"
 ];
 
 app.post(
@@ -122,7 +123,15 @@ app.use((err: any, _req: any, res: any, _next: any) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(config.port, () => {
+app.listen(config.port, async () => {
   console.log(`Backend running on http://localhost:${config.port}`);
+  try {
+    const recovered = await reconcileStaleBatchGenerationJobs();
+    if (recovered > 0) {
+      console.warn('[batch-job] marked interrupted jobs as failed on startup', { recovered });
+    }
+  } catch (err) {
+    console.error('[batch-job] startup reconciliation failed', err);
+  }
   startScheduler();
 });

@@ -19,6 +19,14 @@ import {
   logFallbackProvenance,
   type FallbackProvenance,
 } from './fallbackProvenanceService';
+import {
+  evaluateCandidateCoherence,
+  type CandidateCoherence,
+  type CandidateCoherenceContext,
+} from './candidateCoherenceService';
+import type { SearchDisposition } from './searchCandidateAdmissionService';
+import { classifyConceptualMotif } from './conceptualMotifService';
+import { createHash } from 'node:crypto';
 
 export type UnifiedCandidateOrigin = Extract<IdeaOrigin,
   | 'STRATEGY_DERIVED'
@@ -57,6 +65,19 @@ export type NormalizedBatchCandidate = {
   requiresSearch: boolean;
   publishabilityIssues: string[];
   criticalIssues: string[];
+  audienceIdeaNaturalness: number;
+  creatorContentFit: number;
+  candidateCoherence: CandidateCoherence;
+  coherencePenalty: number;
+  coherenceRejectionReason: string | null;
+  resolvedAudience: string[];
+  subjectRelevance: number | null;
+  sourceClaimTransformability: number | null;
+  searchDisposition: SearchDisposition | null;
+  searchRejectionReason: string | null;
+  evidenceOnly: boolean;
+  conceptualMotif: string | null;
+  reasoningArchetype: string | null;
   ranked: RankedTrendCandidate;
 };
 
@@ -68,6 +89,23 @@ export type UnifiedSelectionResult = {
   evidenceEnriched: number;
   provenanceCounts: Partial<Record<FallbackProvenance, number>>;
 };
+
+export type UnifiedSelectionEvaluation = {
+  candidate: NormalizedBatchCandidate;
+  selectionStep: number;
+  tier: number;
+  adjustedScore: number;
+  memoryPenalty: number;
+  performanceAdjustment: number;
+  selected: boolean;
+  disposition: 'SELECTED' | 'HARD_REJECTED' | 'BATCH_DUPLICATE' | 'LOST_RANKING';
+  collisionCandidate?: NormalizedBatchCandidate;
+  motifSimilarity: number;
+  motifPenalty: number;
+  motifCollisionCandidateId: string | null;
+};
+
+export type UnifiedSelectionObserver = (evaluation: UnifiedSelectionEvaluation) => void;
 
 const TIMELY_INTENTS = new Set(['recent_development', 'official_update', 'industry_change', 'research_or_data', 'emerging_opportunity']);
 const CRITICAL_ISSUE = /unsupported_authority|authority_boundary|prohibited|factual_safety|unsafe_evidence|excluded_topic|hard_platform/i;
@@ -108,9 +146,10 @@ function stableCandidateId(candidate: RankedTrendCandidate): string {
   ].join('|').toLowerCase();
 }
 
-export function normalizeBatchCandidate(candidate: RankedTrendCandidate): NormalizedBatchCandidate {
-  const issues = [...candidate.novelty.reasons, ...(candidate.trend.strategyRiskFlags ?? [])];
-  const criticalIssues = issues.filter((issue) => CRITICAL_ISSUE.test(issue));
+export function normalizeBatchCandidate(
+  candidate: RankedTrendCandidate,
+  coherenceContext?: CandidateCoherenceContext,
+): NormalizedBatchCandidate {
   const pillar = candidate.matchedPillar ?? candidate.trend.matchedPillar ?? candidate.trend.originNiche ?? candidate.trend.niche ?? 'general';
   const territory = candidate.trend.territory ?? candidate.fingerprint.topicCluster ?? pillar;
   const mechanism = candidate.fingerprint.mechanisms.join(' ').trim();
@@ -118,6 +157,90 @@ export function normalizeBatchCandidate(candidate: RankedTrendCandidate): Normal
     candidate.totalScore * .40 + candidate.relevanceScore * .25 + candidate.technicalDepthScore * .20 + candidate.noveltyScore * .15
   ));
   const origin = normalizedOrigin(candidate);
+  const existingCoherence: CandidateCoherence = candidate.trend.candidateCoherence ?? {
+    audienceIdeaNaturalness: candidate.trend.audienceIdeaNaturalness ?? 50,
+    creatorContentFit: candidate.trend.creatorContentFit ?? 50,
+    pillarClaimFit: 50,
+    sourceClaimFit: 50,
+    authorityFramingFit: 50,
+    overall: 50,
+  };
+  const coherence = coherenceContext ? evaluateCandidateCoherence({
+    pillar,
+    territory,
+    coreClaim: candidate.fingerprint.coreClaim || candidate.trend.summary || candidate.trend.topic,
+    mechanism,
+    perspective: candidate.audienceRelevance ?? candidate.trend.audienceRelevance,
+    audienceConsequence: candidate.trend.audienceConsequence,
+    authorityMode: candidate.trend.authorityMode ?? (sourceReferences(candidate).length ? 'EXPLORATORY' : 'UNKNOWN'),
+    origin,
+    sourceType: candidate.trend.sourceType,
+    sourceText: [
+      candidate.trend.rawTitle,
+      candidate.trend.topic,
+      candidate.trend.summary,
+      ...(candidate.trend.keyPoints ?? []),
+    ].filter(Boolean).join(' '),
+    semanticAudienceIdeaNaturalness: candidate.trend.ideaGenerationMode === 'SEMANTIC'
+      ? candidate.trend.audienceIdeaNaturalness : null,
+    semanticCreatorContentFit: candidate.trend.ideaGenerationMode === 'SEMANTIC'
+      ? candidate.trend.creatorContentFit : null,
+  }, coherenceContext) : {
+    audienceIdeaNaturalness: candidate.trend.audienceIdeaNaturalness ?? existingCoherence.audienceIdeaNaturalness,
+    creatorContentFit: candidate.trend.creatorContentFit ?? existingCoherence.creatorContentFit,
+    candidateCoherence: existingCoherence,
+    coherencePenalty: candidate.trend.coherencePenalty ?? 0,
+    coherenceRejectionReason: candidate.trend.coherenceRejectionReason ?? null,
+    resolvedAudience: candidate.trend.resolvedAudience ?? [],
+  };
+  const issues = [...candidate.novelty.reasons, ...(candidate.trend.strategyRiskFlags ?? [])];
+  if (coherence.coherenceRejectionReason) issues.push(coherence.coherenceRejectionReason);
+  const isSearch = origin === 'SEARCH_DISCOVERED' || origin === 'RECENT_DEVELOPMENT';
+  const subjectRelevance = candidate.trend.subjectRelevance ?? (isSearch ? candidate.relevanceScore : null);
+  const sourceClaimTransformability = candidate.trend.sourceClaimTransformability ?? null;
+  let searchDisposition = candidate.trend.searchDisposition ?? null;
+  let searchRejectionReason = candidate.trend.searchRejectionReason ?? null;
+  let evidenceOnly = Boolean(candidate.trend.evidenceOnly || searchDisposition === 'EVIDENCE_ONLY');
+  if (isSearch && searchDisposition === 'NEW_IDEA_CANDIDATE') {
+    if ((subjectRelevance ?? 100) < 45) {
+      searchDisposition = 'REJECTED_FOR_CREATOR_FIT';
+      searchRejectionReason = 'SEARCH_SUBJECT_RELEVANCE_SUPERFICIAL';
+    } else if (coherence.creatorContentFit < 22) {
+      searchDisposition = 'REJECTED_FOR_CREATOR_FIT';
+      searchRejectionReason = 'SEARCH_CREATOR_CONTENT_FIT_TOO_LOW';
+    } else if ((sourceClaimTransformability ?? 100) < 30) {
+      searchDisposition = 'EVIDENCE_ONLY';
+      searchRejectionReason = 'SEARCH_SOURCE_CLAIM_TRANSFORMABILITY_TOO_LOW';
+      evidenceOnly = true;
+    }
+  }
+  if (searchRejectionReason && !evidenceOnly) issues.push(searchRejectionReason);
+  const criticalIssues = issues.filter((issue) => CRITICAL_ISSUE.test(issue) || issue.startsWith('COHERENCE_') || issue.startsWith('SEARCH_'));
+  const motif = candidate.trend.conceptualMotif || candidate.trend.reasoningArchetype
+    ? { conceptualMotif: candidate.trend.conceptualMotif ?? null, reasoningArchetype: candidate.trend.reasoningArchetype ?? null }
+    : classifyConceptualMotif({
+      claim: candidate.fingerprint.coreClaim || candidate.trend.summary || candidate.trend.topic,
+      mechanism,
+      perspective: candidate.audienceRelevance ?? candidate.trend.audienceRelevance,
+      audienceConsequence: candidate.trend.audienceConsequence,
+      ideaFamily: candidate.trend.ideaFamily ?? candidate.trend.suggestedAngle,
+    });
+  const ranked = {
+    ...candidate,
+    trend: {
+      ...candidate.trend,
+      audienceIdeaNaturalness: coherence.audienceIdeaNaturalness,
+      creatorContentFit: coherence.creatorContentFit,
+      candidateCoherence: coherence.candidateCoherence,
+      coherencePenalty: coherence.coherencePenalty,
+      coherenceRejectionReason: coherence.coherenceRejectionReason,
+      resolvedAudience: coherence.resolvedAudience,
+      searchDisposition: searchDisposition ?? undefined,
+      searchRejectionReason,
+      evidenceOnly,
+      ...motif,
+    },
+  };
   return {
     id: stableCandidateId(candidate),
     origin,
@@ -145,7 +268,14 @@ export function normalizeBatchCandidate(candidate: RankedTrendCandidate): Normal
     requiresSearch: Boolean(candidate.trend.searchRequired),
     publishabilityIssues: issues,
     criticalIssues,
-    ranked: candidate,
+    ...coherence,
+    subjectRelevance,
+    sourceClaimTransformability,
+    searchDisposition,
+    searchRejectionReason,
+    evidenceOnly,
+    ...motif,
+    ranked,
   };
 }
 
@@ -171,12 +301,28 @@ function toMemoryFingerprint(candidate: NormalizedBatchCandidate): RecentContent
     contentIntent: candidate.ranked.trend.discoveryIntent ?? candidate.ranked.trend.ideaFamily,
     authorityMode: candidate.authorityMode,
     origin: candidate.origin === 'STRATEGY_DERIVED' ? 'STRATEGY_DERIVED' : 'SEARCH_DERIVED',
+    conceptualMotif: candidate.conceptualMotif,
+    reasoningArchetype: candidate.reasoningArchetype,
+    candidateId: `candidate:${createHash('sha256').update(candidate.id).digest('hex').slice(0, 16)}`,
   };
 }
 
 function qualityScore(candidate: NormalizedBatchCandidate): number {
   const authorityPenalty = candidate.authorityMode === 'UNKNOWN' ? 5 : candidate.authorityMode === 'EXPLORATORY' ? 2 : 0;
   const evidenceBonus = Math.min(5, candidate.evidence.sources.length * 2);
+  if ((candidate.origin === 'SEARCH_DISCOVERED' || candidate.origin === 'RECENT_DEVELOPMENT')
+    && candidate.subjectRelevance != null && candidate.sourceClaimTransformability != null) {
+    return candidate.subjectRelevance * .14
+      + candidate.creatorContentFit * .16
+      + candidate.audienceIdeaNaturalness * .07
+      + candidate.sourceClaimTransformability * .14
+      + candidate.candidateCoherence.overall * .10
+      + candidate.sourceQuality * .13
+      + candidate.freshness * .09
+      + candidate.ranked.noveltyScore * .10
+      + candidate.candidateCoherence.authorityFramingFit * .07
+      - candidate.saturationPenalty - candidate.coherencePenalty - authorityPenalty;
+  }
   return candidate.ideaQuality * .42
     + candidate.ranked.relevanceScore * .18
     + candidate.sourceQuality * .14
@@ -185,11 +331,14 @@ function qualityScore(candidate: NormalizedBatchCandidate): number {
     + candidate.ranked.noveltyScore * .08
     + evidenceBonus
     - candidate.saturationPenalty
+    - candidate.coherencePenalty
     - authorityPenalty;
 }
 
 function tier(candidate: NormalizedBatchCandidate): number {
-  if (candidate.criticalIssues.length || !candidate.topic.trim() || !candidate.coreClaim.trim()) return 0;
+  if (candidate.evidenceOnly || candidate.searchDisposition === 'REJECTED_FOR_CREATOR_FIT'
+    || candidate.searchDisposition === 'REJECTED_FOR_WEAK_TRANSFORMABILITY'
+    || candidate.criticalIssues.length || !candidate.topic.trim() || !candidate.coreClaim.trim()) return 0;
   if (candidate.ranked.novelty.allowed && qualityScore(candidate) >= 70) return 3;
   if (candidate.ranked.novelty.allowed) return 2;
   return 1;
@@ -201,8 +350,9 @@ export function selectUnifiedBatchCandidates(
   count: number,
   memory: RecentContentMemory = createRecentContentMemory(),
   performanceProfile?: AccountPerformanceProfile,
+  diagnostics?: { observer?: UnifiedSelectionObserver; selectionStepOffset?: number; coherenceContext?: CandidateCoherenceContext },
 ): NormalizedBatchCandidate[] {
-  const remaining = candidates.map((candidate) => 'ranked' in candidate ? candidate : normalizeBatchCandidate(candidate));
+  const remaining = candidates.map((candidate) => 'ranked' in candidate ? candidate : normalizeBatchCandidate(candidate, diagnostics?.coherenceContext));
   const selected: NormalizedBatchCandidate[] = [];
   while (selected.length < count && remaining.length) {
     const evaluated = remaining.map((candidate) => {
@@ -222,6 +372,26 @@ export function selectUnifiedBatchCandidates(
     }).sort((a, b) => b.tier - a.tier || b.adjusted - a.adjusted);
     const choice = evaluated.find(({ candidate, tier: candidateTier }) => candidateTier > 0
       && !selected.some((prior) => areHardBatchDuplicates(prior.ranked, candidate.ranked)));
+    const selectionStep = (diagnostics?.selectionStepOffset ?? 0) + selected.length + 1;
+    for (const evaluation of evaluated) {
+      const collisionCandidate = selected.find((prior) => areHardBatchDuplicates(prior.ranked, evaluation.candidate.ranked));
+      diagnostics?.observer?.({
+        candidate: evaluation.candidate,
+        selectionStep,
+        tier: evaluation.tier,
+        adjustedScore: evaluation.adjusted,
+        memoryPenalty: evaluation.memoryPenalty.total,
+        performanceAdjustment: evaluation.performance.adjustment,
+        selected: evaluation === choice,
+        disposition: evaluation === choice ? 'SELECTED'
+          : evaluation.tier <= 0 ? 'HARD_REJECTED'
+            : collisionCandidate ? 'BATCH_DUPLICATE' : 'LOST_RANKING',
+        collisionCandidate,
+        motifSimilarity: evaluation.memoryPenalty.motifSimilarity,
+        motifPenalty: evaluation.memoryPenalty.motifPenalty,
+        motifCollisionCandidateId: evaluation.memoryPenalty.motifCollisionCandidateId,
+      });
+    }
     if (!choice) break;
     const selectedCandidate: NormalizedBatchCandidate = {
       ...choice.candidate,
@@ -294,24 +464,29 @@ export async function buildUnifiedCandidateSelection(params: {
   search?: (candidateCount: number) => Promise<RankedTrendCandidate[]>;
   legacyFallbackCandidates?: RankedTrendCandidate[];
   performanceProfile?: AccountPerformanceProfile;
+  selectionObserver?: UnifiedSelectionObserver;
+  coherenceContext?: CandidateCoherenceContext;
 }): Promise<UnifiedSelectionResult> {
   const memory = params.memory ?? createRecentContentMemory();
-  let strategy = params.strategyCandidates.map(normalizeBatchCandidate);
-  const viableStrategy = selectUnifiedBatchCandidates(
-    strategy.filter((candidate) => tier(candidate) >= 2),
+  let strategy = params.strategyCandidates.map((candidate) => normalizeBatchCandidate(candidate, params.coherenceContext));
+  // Only genuinely strong strategy candidates earn protected retention. Usable
+  // tier-2 fallback remains in the common pool and can lose to stronger search.
+  const strongStrategy = selectUnifiedBatchCandidates(
+    strategy.filter((candidate) => tier(candidate) >= 3),
     params.count,
     createRecentContentMemory(memory.fingerprints),
     params.performanceProfile,
+    { coherenceContext: params.coherenceContext },
   );
-  const viableStrategyIds = new Set(viableStrategy.map((candidate) => candidate.id));
-  const deficit = Math.max(0, params.count - viableStrategy.length);
-  const evidenceNeeds = viableStrategy.filter((candidate) => candidate.requiresSearch).length;
+  const strongStrategyIds = new Set(strongStrategy.map((candidate) => candidate.id));
+  const deficit = Math.max(0, params.count - strongStrategy.length);
+  const evidenceNeeds = strongStrategy.filter((candidate) => candidate.requiresSearch).length;
   const searchRequested = params.search ? bufferedSearchCandidateCount(deficit, evidenceNeeds) : 0;
   let searched: NormalizedBatchCandidate[] = [];
   let searchFailed = false;
   if (searchRequested > 0 && params.search) {
     try {
-      searched = (await params.search(searchRequested)).map(normalizeBatchCandidate);
+      searched = (await params.search(searchRequested)).map((candidate) => normalizeBatchCandidate(candidate, params.coherenceContext));
     } catch {
       searchFailed = true;
     }
@@ -320,9 +495,12 @@ export async function buildUnifiedCandidateSelection(params: {
   const consumedEvidence = new Set<string>();
   let evidenceEnriched = 0;
   strategy = strategy.map((candidate) => {
-    if (!candidate.requiresSearch || !viableStrategyIds.has(candidate.id)) return candidate;
+    if (!candidate.requiresSearch || !strongStrategyIds.has(candidate.id)) return candidate;
     const match = searched
-      .filter((searchedCandidate) => searchedCandidate.evidence.sources.length && !consumedEvidence.has(searchedCandidate.id))
+      .filter((searchedCandidate) => searchedCandidate.evidence.sources.length
+        && searchedCandidate.searchDisposition !== 'REJECTED_FOR_CREATOR_FIT'
+        && searchedCandidate.searchDisposition !== 'REJECTED_FOR_WEAK_TRANSFORMABILITY'
+        && !consumedEvidence.has(searchedCandidate.id))
       .map((searchedCandidate) => ({ searchedCandidate, score: evidenceMatch(candidate, searchedCandidate) }))
       .sort((a, b) => b.score - a.score)[0];
     if (!match || match.score < .45) return candidate;
@@ -332,30 +510,36 @@ export async function buildUnifiedCandidateSelection(params: {
   });
 
   const legacy = (params.legacyFallbackCandidates ?? []).map((candidate) => ({
-    ...normalizeBatchCandidate(candidate),
+    ...normalizeBatchCandidate(candidate, params.coherenceContext),
     provenance: FALLBACK_PROVENANCE.LEGACY_DISCOVERY as Extract<FallbackProvenance, 'LEGACY_DISCOVERY'>,
   }));
   const primaryObserved = [
     ...strategy,
-    ...searched.filter((candidate) => !consumedEvidence.has(candidate.id)),
+    ...searched,
   ];
   // Strong strategy work is retained first. Search expands the option set for
   // the actual deficit; buffered search results cannot evict already-selected
   // strategy ideas merely because fallback discovery ran.
   const retainedStrategy = selectUnifiedBatchCandidates(
-    strategy.filter((candidate) => viableStrategyIds.has(candidate.id)),
+    strategy.filter((candidate) => strongStrategyIds.has(candidate.id)),
     params.count,
     createRecentContentMemory(memory.fingerprints),
     params.performanceProfile,
+    { observer: params.selectionObserver, coherenceContext: params.coherenceContext },
   );
   const fillMemory = createRecentContentMemory(memory.fingerprints);
   for (const candidate of retainedStrategy) updateRecentContentMemory(fillMemory, { ...toMemoryFingerprint(candidate), origin: 'CURRENT_BATCH' });
-  const fillCandidates = primaryObserved.filter((candidate) => !retainedStrategy.some((retained) => retained.id === candidate.id));
+  const fillCandidates = primaryObserved.filter((candidate) => !candidate.evidenceOnly
+    && !consumedEvidence.has(candidate.id)
+    && candidate.searchDisposition !== 'REJECTED_FOR_CREATOR_FIT'
+    && candidate.searchDisposition !== 'REJECTED_FOR_WEAK_TRANSFORMABILITY'
+    && !retainedStrategy.some((retained) => retained.id === candidate.id));
   const primaryFill = selectUnifiedBatchCandidates(
     fillCandidates,
     params.count - retainedStrategy.length,
     fillMemory,
     params.performanceProfile,
+    { observer: params.selectionObserver, selectionStepOffset: retainedStrategy.length, coherenceContext: params.coherenceContext },
   ).filter((candidate) => !retainedStrategy.some((prior) => areHardBatchDuplicates(prior.ranked, candidate.ranked)));
   const primarySelected = [...retainedStrategy, ...primaryFill].slice(0, params.count);
   let selected = primarySelected;
@@ -367,6 +551,7 @@ export async function buildUnifiedCandidateSelection(params: {
       params.count - selected.length,
       fillMemory,
       params.performanceProfile,
+      { observer: params.selectionObserver, selectionStepOffset: selected.length, coherenceContext: params.coherenceContext },
     ).filter((candidate) => !selected.some((prior) => areHardBatchDuplicates(prior.ranked, candidate.ranked)));
     selected = [...selected, ...legacyFill].slice(0, params.count);
   }

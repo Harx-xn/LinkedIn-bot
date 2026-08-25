@@ -99,6 +99,34 @@ function derivedReviewIssue(
   };
 }
 
+function moreUsefulReviewText(current: string, incoming: string): string {
+  const currentValue = current.trim();
+  const incomingValue = incoming.trim();
+  if (!currentValue) return incoming;
+  if (!incomingValue) return current;
+  return incomingValue.length > currentValue.length ? incoming : current;
+}
+
+/** Keep one issue per code while preserving the strongest available severity and detail. */
+function mergeTechnicalReviewIssues(issues: TechnicalReviewIssue[]): TechnicalReviewIssue[] {
+  const merged = new Map<TechnicalReviewIssue['code'], TechnicalReviewIssue>();
+  for (const issue of issues) {
+    const existing = merged.get(issue.code);
+    if (!existing) {
+      merged.set(issue.code, { ...issue });
+      continue;
+    }
+    merged.set(issue.code, {
+      code: issue.code,
+      severity: existing.severity === 'error' || issue.severity === 'error' ? 'error' : 'warning',
+      excerpt: moreUsefulReviewText(existing.excerpt, issue.excerpt),
+      explanation: moreUsefulReviewText(existing.explanation, issue.explanation),
+      repairInstruction: moreUsefulReviewText(existing.repairInstruction, issue.repairInstruction),
+    });
+  }
+  return [...merged.values()];
+}
+
 /** Parse direct, fenced, or prose-wrapped reviewer JSON without another model call. */
 export function parseTechnicalReviewOutput(raw: string, postExcerpt = ''): TechnicalReviewResult {
   const cleaned = raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
@@ -111,11 +139,12 @@ export function parseTechnicalReviewOutput(raw: string, postExcerpt = ''): Techn
       const parsed = technicalReviewSchema.safeParse(JSON.parse(candidate));
       if (!parsed.success) continue;
       const data = parsed.data;
-      const issues = [...data.issues] as TechnicalReviewIssue[];
+      let issues = mergeTechnicalReviewIssues(data.issues as TechnicalReviewIssue[]);
       const add = (code: TechnicalReviewIssue['code'], explanation: string) => {
-        if (!issues.some((issue) => issue.code === code)) {
-          issues.push(derivedReviewIssue(code, explanation, postExcerpt.slice(0, 180)));
-        }
+        issues = mergeTechnicalReviewIssues([
+          ...issues,
+          derivedReviewIssue(code, explanation, postExcerpt.slice(0, 180)),
+        ]);
       };
       if (data.informationDensity < 55) add('LOW_INFORMATION_DENSITY', 'Too much of the draft repeats or frames the idea without adding a material element.');
       if (data.progressionQuality < 55) add('WEAK_ARGUMENT_PROGRESSION', 'Major sections do not advance from claim into distinct reasoning and implication.');

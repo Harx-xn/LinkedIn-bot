@@ -3,6 +3,8 @@ import { normalizeTrendTitle } from './trendTitleUtils';
 import type { RankedTrendCandidate } from './generationTypes';
 import { areHardBatchDuplicates } from './trendRankingService';
 import { classifyHookType } from './finalPostFingerprintClassifier';
+import { createHash } from 'node:crypto';
+import { classifyConceptualMotif } from './conceptualMotifService';
 
 export type RecentContentFingerprint = {
   pillar?: string | null;
@@ -18,6 +20,9 @@ export type RecentContentFingerprint = {
   endingType?: string | null;
   ctaType?: string | null;
   contentIntent?: string | null;
+  conceptualMotif?: string | null;
+  reasoningArchetype?: string | null;
+  candidateId?: string | null;
   authorityMode?: string | null;
   origin?: 'HISTORICAL' | 'CURRENT_BATCH' | 'SEARCH_DERIVED' | 'STRATEGY_DERIVED';
 };
@@ -40,6 +45,9 @@ export type ContentMemoryPenalty = {
   light: string[];
   maxClaimSimilarity: number;
   maxMechanismSimilarity: number;
+  motifSimilarity: number;
+  motifPenalty: number;
+  motifCollisionCandidateId: string | null;
 };
 
 const TOKEN_EQUIVALENTS: Record<string, string> = {
@@ -79,12 +87,16 @@ function increment(map: Map<string, number>, value?: string | null): void {
   if (normalized) map.set(normalized, (map.get(normalized) ?? 0) + 1);
 }
 
-function metadataFromKeywords(value: unknown): { endingType?: string; ideaFamily?: string } {
+function metadataFromKeywords(value: unknown): { endingType?: string; ideaFamily?: string; conceptualMotif?: string; reasoningArchetype?: string } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const data = value as Record<string, unknown>;
   return {
     endingType: typeof data.endingType === 'string' ? data.endingType : undefined,
     ideaFamily: typeof data.ideaFamily === 'string' ? data.ideaFamily : undefined,
+    conceptualMotif: typeof data.finalConceptualMotif === 'string' ? data.finalConceptualMotif
+      : typeof data.conceptualMotif === 'string' ? data.conceptualMotif : undefined,
+    reasoningArchetype: typeof data.finalReasoningArchetype === 'string' ? data.finalReasoningArchetype
+      : typeof data.reasoningArchetype === 'string' ? data.reasoningArchetype : undefined,
   };
 }
 
@@ -115,6 +127,9 @@ export function scoreAgainstRecentContentMemory(
   let maxClaimSimilarity = 0;
   let maxMechanismSimilarity = 0;
   let sameClaimPerspective = false;
+  let motifSimilarity = 0;
+  let motifPenalty = 0;
+  let motifCollisionCandidateId: string | null = null;
   for (const recent of memory.fingerprints) {
     const claimSimilarity = semanticMemorySimilarity(candidate.coreClaim, recent.coreClaim);
     const mechanismSimilarity = semanticMemorySimilarity(candidate.mechanism, recent.mechanism);
@@ -122,6 +137,21 @@ export function scoreAgainstRecentContentMemory(
     maxMechanismSimilarity = Math.max(maxMechanismSimilarity, mechanismSimilarity);
     if (claimSimilarity >= 0.58 && key(candidate.perspective) && key(candidate.perspective) === key(recent.perspective)) {
       sameClaimPerspective = true;
+    }
+    const sameMotif = key(candidate.conceptualMotif)
+      && key(candidate.conceptualMotif) === key(recent.conceptualMotif);
+    const sameArchetype = key(candidate.reasoningArchetype)
+      && key(candidate.reasoningArchetype) === key(recent.reasoningArchetype);
+    const samePerspective = key(candidate.perspective)
+      && key(candidate.perspective) === key(recent.perspective);
+    const candidateMotifPenalty = sameMotif
+      ? samePerspective ? 28 : mechanismSimilarity < .45 ? 16 : 20
+      : sameArchetype && samePerspective ? 3 : 0;
+    const candidateMotifSimilarity = sameMotif ? 1 : sameArchetype ? .55 : 0;
+    if (candidateMotifPenalty > motifPenalty || (candidateMotifPenalty === motifPenalty && candidateMotifSimilarity > motifSimilarity)) {
+      motifPenalty = candidateMotifPenalty;
+      motifSimilarity = candidateMotifSimilarity;
+      motifCollisionCandidateId = recent.candidateId ?? null;
     }
   }
 
@@ -132,6 +162,9 @@ export function scoreAgainstRecentContentMemory(
   if (maxClaimSimilarity >= 0.62) { total += 36; strong.push('recent_core_claim'); }
   if (maxMechanismSimilarity >= 0.45) { total += 34; strong.push('recent_mechanism'); }
   if (sameClaimPerspective) { total += 12; strong.push('recent_claim_and_perspective'); }
+  if (motifPenalty >= 28) { total += motifPenalty; strong.push('conceptual_motif_and_perspective'); }
+  else if (motifPenalty >= 16) { total += motifPenalty; medium.push('conceptual_motif_reuse'); }
+  else if (motifPenalty > 0) { total += motifPenalty; light.push('reasoning_archetype_reuse'); }
 
   const territoryCount = memory.recentTerritoryUsage.get(key(candidate.territory)) ?? 0;
   const pillarCount = memory.recentPillarUsage.get(key(candidate.pillar)) ?? 0;
@@ -155,7 +188,7 @@ export function scoreAgainstRecentContentMemory(
   if (perspectiveCount) { total += Math.min(6, perspectiveCount * 2); light.push(`perspective_reuse:${perspectiveCount}`); }
   if (authorityCount) { total += Math.min(4, authorityCount); light.push(`authority_mode_reuse:${authorityCount}`); }
 
-  return { total: Math.min(90, total), strong, medium, light, maxClaimSimilarity, maxMechanismSimilarity };
+  return { total: Math.min(90, total), strong, medium, light, maxClaimSimilarity, maxMechanismSimilarity, motifSimilarity, motifPenalty, motifCollisionCandidateId };
 }
 
 export async function loadRecentContentMemory(userId: string, limit = 80): Promise<RecentContentMemory> {
@@ -164,7 +197,7 @@ export async function loadRecentContentMemory(userId: string, limit = 80): Promi
     orderBy: { createdAt: 'desc' },
     take: limit,
     select: {
-      primaryTopic: true, pillar: true, territory: true, coreClaim: true, mechanism: true, perspective: true,
+      postId: true, primaryTopic: true, pillar: true, territory: true, coreClaim: true, mechanism: true, perspective: true,
       argumentPattern: true, structure: true, hookType: true, ctaType: true, authorityMode: true, contentIntent: true, keywords: true,
     },
   });
@@ -185,12 +218,24 @@ export async function loadRecentContentMemory(userId: string, limit = 80): Promi
       ctaType: row.ctaType,
       authorityMode: row.authorityMode,
       contentIntent: row.contentIntent,
+      conceptualMotif: metadata.conceptualMotif,
+      reasoningArchetype: metadata.reasoningArchetype,
+      candidateId: `post:${row.postId}`,
       origin: 'HISTORICAL' as const,
     };
   }));
 }
 
 function rankedToMemoryFingerprint(candidate: RankedTrendCandidate): RecentContentFingerprint {
+  const motif = candidate.trend.conceptualMotif || candidate.trend.reasoningArchetype
+    ? { conceptualMotif: candidate.trend.conceptualMotif ?? null, reasoningArchetype: candidate.trend.reasoningArchetype ?? null }
+    : classifyConceptualMotif({
+      claim: candidate.fingerprint.coreClaim,
+      mechanism: candidate.fingerprint.mechanisms.join(' '),
+      perspective: candidate.trend.audienceRelevance,
+      audienceConsequence: candidate.trend.audienceConsequence,
+      ideaFamily: candidate.trend.ideaFamily ?? candidate.trend.suggestedAngle,
+    });
   return {
     topic: candidate.fingerprint.normalizedTopic,
     pillar: candidate.trend.matchedPillar ?? candidate.trend.originNiche ?? candidate.trend.niche,
@@ -204,6 +249,8 @@ function rankedToMemoryFingerprint(candidate: RankedTrendCandidate): RecentConte
     authorityMode: candidate.trend.authorityMode,
     hookType: classifyHookType(candidate.fingerprint.coreClaim),
     origin: candidate.trend.sourceType === 'strategy_derived' ? 'STRATEGY_DERIVED' : 'SEARCH_DERIVED',
+    ...motif,
+    candidateId: `candidate:${createHash('sha256').update(`${candidate.trend.sourceType ?? ''}|${candidate.fingerprint.normalizedTopic}|${candidate.fingerprint.coreClaim}`).digest('hex').slice(0, 16)}`,
   };
 }
 

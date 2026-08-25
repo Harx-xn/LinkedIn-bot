@@ -12,6 +12,7 @@ import {
 import type { RecentContentMemory } from './recentContentMemoryService';
 import { semanticMemorySimilarity } from './recentContentMemoryService';
 import type { TopicHistoryRow } from './topicHistoryService';
+import { evaluateCandidateCoherence } from './candidateCoherenceService';
 
 const evidenceNeedSchema = z.enum(['NONE', 'CURRENT_FACTS', 'EXTERNAL_VERIFICATION', 'USER_EXPERIENCE']);
 const authoritySchema = z.enum(['EXPLICIT_EXPERTISE', 'SUPPORTED_PRACTITIONER', 'INFERRED_FAMILIARITY', 'EXPLORATORY', 'UNKNOWN']);
@@ -22,6 +23,7 @@ const critiqueSchema = z.object({
   authorOwnership: score, authorityFit: score, practicalConsequence: score, valueDensity: score,
   shareability: score, discussionPotential: score, noveltyVsRecentContent: score,
   mechanismNovelty: score, defensibility: score,
+  audienceIdeaNaturalness: score.optional(), creatorContentFit: score.optional(),
 });
 const semanticIdeaSchema = z.object({
   pillar: z.string().min(1).max(160), territory: z.string().min(1).max(200),
@@ -41,6 +43,22 @@ export type SemanticIdeaProvider = (request: {
 
 export type SemanticIdeaPoolResult = {
   candidates: ContentIdeaCandidate[];
+  observations: Array<{
+    id: string;
+    pillar: string;
+    territory: string;
+    topicNormalized: string;
+    ideaFamily: string;
+    authorityMode: AuthorityMode | null;
+    ideaQuality: number | null;
+    strategyFit: number | null;
+    audienceValue: number | null;
+    authorityFit: number | null;
+    audienceIdeaNaturalness: number | null;
+    creatorContentFit: number | null;
+    novelty: number | null;
+    rejectedReasons: string[];
+  }>;
   source: 'semantic' | 'fallback';
   modelCalls: 0 | 1;
   error?: string;
@@ -145,7 +163,7 @@ export async function buildStrategyIdeaCandidatePool(params: {
 }): Promise<SemanticIdeaPoolResult> {
   const fallback = buildStrategyIdeaCandidates(params.profile, params.strategy, params.history, params.count);
   const key = params.apiKey || process.env.OPENAI_API_KEY;
-  if (!params.provider && !key) return { candidates: fallback, source: 'fallback', modelCalls: 0, error: 'semantic_idea_provider_unavailable' };
+  if (!params.provider && !key) return { candidates: fallback, observations: [], source: 'fallback', modelCalls: 0, error: 'semantic_idea_provider_unavailable' };
   const territories = selectTerritoriesForSemanticIdeas(params.profile);
   const desiredIdeas = Math.min(36, Math.max(params.count * 4, territories.length * 2, 8));
   const recentMemory = params.recentMemory.fingerprints.slice(0, 24).map((item) => ({
@@ -161,6 +179,8 @@ export async function buildStrategyIdeaCandidatePool(params: {
     'Idea-family names may be niche-native and do not need to match a fixed taxonomy.',
     'Value density means useful insight per unit of attention, never length. Shareability means the idea is useful or identity-relevant enough to save/send/repost; do not reward controversy, fear, sensationalism, fake certainty, or engagement bait.',
     'personalEvidencePotential only says whether real user evidence could strengthen the idea. It never licenses invented experience.',
+    'Score audienceIdeaNaturalness for whether this exact idea creates a native problem, consequence, or decision for a configured audience; an audience label mention is not evidence.',
+    'Score creatorContentFit for whether this exact subject belongs to the creator positioning and intended content ownership; do not infer biography or equate a niche keyword with ownership.',
     'Critique honestly on 0-100 scales; generic ideas should score poorly.',
   ].join(' ');
   try {
@@ -185,12 +205,26 @@ export async function buildStrategyIdeaCandidatePool(params: {
     const generated = parseProviderResponse(raw).ideas;
     const territoryLookup = new Map(territories.map((item) => [`${item.pillar.toLowerCase()}|${item.territory.toLowerCase()}`, item]));
     const semantic: ContentIdeaCandidate[] = [];
+    const observations: SemanticIdeaPoolResult['observations'] = [];
     for (const [index, idea] of generated.entries()) {
+      const observationId = `semantic:${idea.pillar}:${idea.territory}:${index}`;
       const territory = territoryLookup.get(`${idea.pillar.toLowerCase()}|${idea.territory.toLowerCase()}`);
-      if (!territory) continue;
+      if (!territory) {
+        observations.push({
+          id: observationId, pillar: idea.pillar, territory: idea.territory,
+          topicNormalized: idea.coreClaim.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, 240),
+          ideaFamily: idea.ideaFamily, authorityMode: null, ideaQuality: null,
+          strategyFit: null, audienceValue: null, authorityFit: idea.critique.authorityFit,
+          audienceIdeaNaturalness: idea.critique.audienceIdeaNaturalness ?? null,
+          creatorContentFit: idea.critique.creatorContentFit ?? null,
+          novelty: idea.critique.noveltyVsRecentContent,
+          rejectedReasons: ['INVALID_TERRITORY'],
+        });
+        continue;
+      }
       const saturationPenalty = Math.min(28, params.history.filter((item) => `${item.normalizedTopic} ${item.topicCluster}`.toLowerCase().includes(idea.territory.toLowerCase())).length * 7);
       const base = {
-        id: `semantic:${idea.pillar}:${idea.territory}:${index}`,
+        id: observationId,
         pillar: idea.pillar, territory: idea.territory, coreClaim: idea.coreClaim.trim(), mechanism: idea.mechanism.trim(),
         perspective: idea.perspective.trim(), ideaFamily: idea.ideaFamily.trim() || 'niche-native insight',
         origin: 'STRATEGY_DERIVED' as const, authorityMode: territory.authorityMode,
@@ -200,7 +234,13 @@ export async function buildStrategyIdeaCandidatePool(params: {
         authorityRequirement: idea.authorityRequirement, personalEvidencePotential: idea.personalEvidencePotential,
         generationMode: 'SEMANTIC' as const, semanticCritique: idea.critique,
       };
-      const deterministic = scoreContentIdea(base, params.history);
+      const coherence = evaluateCandidateCoherence({
+        ...base,
+        sourceType: 'strategy_derived',
+        semanticAudienceIdeaNaturalness: idea.critique.audienceIdeaNaturalness ?? idea.critique.audienceRelevance,
+        semanticCreatorContentFit: idea.critique.creatorContentFit ?? idea.critique.authorOwnership,
+      }, { strategy: params.strategy, profile: params.profile, recentContent: params.recentMemory.fingerprints });
+      const deterministic = scoreContentIdea(base, params.history, coherence);
       const repeatedMechanism = Math.max(0, ...recentMemory.map((recent) => semanticMemorySimilarity(idea.mechanism, recent.mechanism)));
       const clickbait = CLICKBAIT.test(`${idea.coreClaim} ${idea.audienceConsequence}`);
       const inventedExperience = PERSONAL_ACHIEVEMENT.test(`${idea.coreClaim} ${idea.perspective} ${idea.audienceConsequence}`);
@@ -212,6 +252,9 @@ export async function buildStrategyIdeaCandidatePool(params: {
       if (clickbait) reasons.push('clickbait_or_exaggerated_certainty');
       if (repeatedMechanism >= .45) reasons.push('recent_claim_or_mechanism_similarity');
       const quality = criticToQuality(idea.critique, deterministic.score, clickbait);
+      quality.strategyFit = coherence.creatorContentFit;
+      quality.audienceValue = coherence.audienceIdeaNaturalness;
+      if (coherence.coherenceRejectionReason) quality.composite = Math.min(quality.composite, 32);
       if (deterministic.rejectedReasons.some((reason) => reason === 'obvious_or_generic' || reason === 'too_broad')) {
         quality.nonObviousness = Math.min(quality.nonObviousness, 35);
         quality.specificityPotential = Math.min(quality.specificityPotential, 35);
@@ -227,12 +270,22 @@ export async function buildStrategyIdeaCandidatePool(params: {
         quality.recentSimilarityRisk = Math.max(quality.recentSimilarityRisk, Math.round(repeatedMechanism * 100));
         quality.composite -= penalty;
       }
-      semantic.push({ ...base, score: quality, rejectedReasons: [...new Set(reasons)] });
+      semantic.push({ ...base, ...coherence, score: quality, rejectedReasons: [...new Set(reasons)] });
+      observations.push({
+        id: observationId, pillar: idea.pillar, territory: idea.territory,
+        topicNormalized: idea.coreClaim.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, 240),
+        ideaFamily: idea.ideaFamily, authorityMode: territory.authorityMode,
+        ideaQuality: quality.composite, strategyFit: quality.strategyFit,
+        audienceValue: quality.audienceValue, authorityFit: quality.authorityFit,
+        audienceIdeaNaturalness: coherence.audienceIdeaNaturalness,
+        creatorContentFit: coherence.creatorContentFit,
+        novelty: quality.novelty, rejectedReasons: [...new Set(reasons)],
+      });
     }
     if (!semantic.length) throw new Error('semantic_idea_response_had_no_valid_territories');
     const safeSemantic = balancedCandidates(semantic, Math.max(params.count * 5, params.count));
-    return { candidates: [...safeSemantic, ...fallback], source: 'semantic', modelCalls: 1 };
+    return { candidates: [...safeSemantic, ...fallback], observations, source: 'semantic', modelCalls: 1 };
   } catch (error) {
-    return { candidates: fallback, source: 'fallback', modelCalls: 1, error: error instanceof Error ? error.message : String(error) };
+    return { candidates: fallback, observations: [], source: 'fallback', modelCalls: 1, error: error instanceof Error ? error.message : String(error) };
   }
 }

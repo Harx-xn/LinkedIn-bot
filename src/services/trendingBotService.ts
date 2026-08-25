@@ -9,11 +9,14 @@ import {
   resolveBotImageMode,
 } from "./botImageModeService";
 import {
+  buildReplacementPlan,
+  generateSlotPostWithIdeaRecovery,
   generateSlotPostUntilSuccess,
   planBatchForGeneration,
   prepareBatchContextV2,
   type GhostwriterBotConfig,
 } from "./ghostwriterPipeline";
+import { candidateTraceId, selectReplacementIdea, type SlotIdeaPool } from './ideaRecoveryService';
 import { safeRecommendMediaForPost, type MediaRecommendationResult } from './mediaRecommendationService';
 import {
   inferActualShareabilityPresentation,
@@ -47,6 +50,15 @@ import {
 } from "./botStrategyTrendService";
 import { consumeInventoryTopic, releaseInventoryTopic, availableInventoryByNiche, INVENTORY_LOW_WATERMARK, enqueueLowInventoryReplenishment } from './topicInventoryService';
 import { persistGeneratedPostWithMemory } from './generatedPostPersistenceService';
+import {
+  BatchGenerationTraceRecorder,
+  createBatchTraceId,
+  clearExpiredGenerationTracesSafe,
+  diagnosticFingerprint,
+  diagnosticTraceId,
+  persistGenerationTraceSafe,
+} from './batchGenerationTraceService';
+import { classifyPostDepthWithTrace } from './postDepth';
 
 function resolveBrandNameFromWebsite(websiteUrl?: string | null): string | undefined {
   if (!websiteUrl?.trim()) return undefined;
@@ -371,6 +383,20 @@ export class TrendingBotService {
     }
 
     console.log(`Generating batch for user ${userId}, slots: ${slots.length}`);
+    const batchTraceId = createBatchTraceId(jobId);
+    const traceRecorder = new BatchGenerationTraceRecorder({
+      batchTraceId,
+      strategyFingerprint: diagnosticFingerprint({
+        profilePositioning: strategy.profilePositioning,
+        targetAudience: strategy.targetAudience,
+        contentGoals: strategy.contentGoals,
+        contentPillars: strategy.contentPillars,
+        topicRules: strategy.topicRules,
+        writingStyle: strategy.writingStyle,
+      }),
+      requestedPostCount: slots.length,
+    });
+    await persistGenerationTraceSafe(jobId, traceRecorder);
 
     const niches = getStrategyNiches(strategy);
     if (niches.length === 0) {
@@ -425,7 +451,7 @@ export class TrendingBotService {
      });
 
     const inventoryJobId = jobId ?? `batch-${userId}-${Date.now()}`;
-    const { author, eligible, ranked, editorialMemory, performanceProfile } = await prepareBatchContextV2({
+    const { author, eligible, ranked, editorialMemory, performanceProfile, slotIdeaPools, ideaRecoveryMemory } = await prepareBatchContextV2({
       userId,
       niches,
       config: botConfig,
@@ -435,6 +461,7 @@ export class TrendingBotService {
       previewId: options?.previewId,
       configHash,
       generationJobId: inventoryJobId,
+      traceRecorder,
     });
 
     const provider: "OPENAI" = "OPENAI";
@@ -448,9 +475,43 @@ export class TrendingBotService {
       editorialMemory,
       performanceProfile,
     );
+    batchPlan.forEach((plan, slotIndex) => {
+      const slotTraceId = diagnosticTraceId('slot', batchTraceId, slotIndex);
+      const depth = classifyPostDepthWithTrace(plan, eligible[slotIndex]);
+      traceRecorder.recordSlot({
+        slotTraceId,
+        slotIndex,
+        candidateTraceId: ranked[slotIndex] ? candidateTraceId(ranked[slotIndex]) : null,
+        selectedCentralClaim: plan.selectedCentralClaim ?? plan.centralClaim ?? plan.coreClaim ?? null,
+        claimSource: plan.claimSource ?? null,
+        depth: {
+          depthClass: plan.depthClass ?? depth.depthClass,
+          targetLengthRange: plan.targetLengthRange ?? depth.targetLengthRange,
+          depthScore: depth.depthScore,
+          rawDepthSignals: depth.rawDepthSignals,
+          independentSubstanceUnits: depth.independentSubstanceUnits,
+          discountedRedundantSignals: depth.discountedRedundantSignals,
+          signalsContributing: depth.signalsContributing,
+        },
+        editorial: {
+          shareabilityPotential: plan.editorialDecision?.shareabilityProfile?.overallPotential ?? null,
+          valueType: plan.editorialDecision?.shareabilityProfile?.valueType ?? null,
+          recommendedPresentation: plan.editorialDecision?.shareabilityProfile?.recommendedPresentation ?? null,
+          contentObjective: plan.editorialDecision?.contentObjective ?? null,
+          conversionObjective: plan.editorialDecision?.conversionObjective ?? null,
+          hookFamily: plan.editorialDecision?.hookFamily ?? null,
+          rhetoricalStructure: plan.editorialDecision?.rhetoricalStructure ?? null,
+          endingIntent: plan.editorialDecision?.endingIntent ?? null,
+        },
+        alternateCandidateTraceIds: slotIdeaPools[slotIndex]?.alternates.map((candidate) => candidate.id) ?? [],
+      });
+    });
+    await persistGenerationTraceSafe(jobId, traceRecorder);
 
     const acceptedBodies: string[] = [];
+    const acceptedCandidateTraceIds: string[] = [];
     const batchFingerprints: TopicFingerprint[] = [];
+    const acceptedPlans: import('./generationTypes').BatchPostPlan[] = [];
     const [history, linkedInAccount, recentVoicePosts] = await Promise.all([
       loadRecentTopicHistory(userId),
       prisma.linkedInAccount.findFirst({
@@ -478,15 +539,95 @@ export class TrendingBotService {
       );
       const contextBodies = [...acceptedBodies];
       const contextFingerprints = [...batchFingerprints];
+      const contextPlans = [...acceptedPlans];
       const waveResults = await Promise.all(waveIndexes.map(async (slotIndex) => {
+        const slotTraceId = diagnosticTraceId('slot', batchTraceId, slotIndex);
         const plan = batchPlan[slotIndex];
         const trend: TrendCandidate | null = eligible[slotIndex] ?? null;
+        const ideaPool: SlotIdeaPool = slotIdeaPools[slotIndex] ?? {
+          selected: { id: candidateTraceId(ranked[slotIndex]), ranked: ranked[slotIndex] },
+          alternates: [],
+        };
         try {
-          const result = await generateSlotPostUntilSuccess(
-            contentService, plan, trend, author, botConfig, contextBodies, provider,
-            { batchFingerprints: contextFingerprints, recentTopicHistory: history, recentPosts: [...contextBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT) },
+          const recovery = await generateSlotPostWithIdeaRecovery(
+            contentService,
+            { candidateId: ideaPool.selected.id, plan, trend, origin: trend?.ideaOrigin ?? trend?.sourceType },
+            author,
+            botConfig,
+            contextBodies,
+            provider,
+            {
+              batchFingerprints: contextFingerprints,
+              recentTopicHistory: history,
+              recentPosts: [...contextBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT),
+              traceRecorder,
+              slotTraceId,
+            },
+            (_failure, attemptedCandidateIds) => {
+              const replacement = selectReplacementIdea({
+                pool: ideaPool,
+                attemptedCandidateIds,
+                acceptedBatchFingerprints: contextFingerprints,
+                recentMemory: ideaRecoveryMemory,
+                performanceProfile,
+              });
+              if (!replacement) {
+                traceRecorder.recordIdeaReplacement(slotTraceId, {
+                  exhaustionReason: _failure.exhaustionReason,
+                  replacementCandidateTraceId: null,
+                  replacementSelectionReason: 'no_safe_alternate',
+                });
+                return null;
+              }
+              const replacementPlan = buildReplacementPlan({
+                candidate: replacement,
+                slotIndex,
+                author,
+                config: botConfig,
+                editorialMemory,
+                performanceProfile,
+                acceptedPlans: contextPlans,
+              });
+              const replacementDepth = classifyPostDepthWithTrace(replacementPlan, replacement.ranked.trend);
+              traceRecorder.recordIdeaReplacement(slotTraceId, {
+                exhaustionReason: _failure.exhaustionReason,
+                replacementCandidateTraceId: replacement.id,
+                replacementSelectionReason: 'highest_ranked_safe_current_batch_alternate',
+                replacementDepth: {
+                  depthClass: replacementDepth.depthClass,
+                  targetLengthRange: replacementDepth.targetLengthRange,
+                  depthScore: replacementDepth.depthScore,
+                  rawDepthSignals: replacementDepth.rawDepthSignals,
+                  independentSubstanceUnits: replacementDepth.independentSubstanceUnits,
+                  discountedRedundantSignals: replacementDepth.discountedRedundantSignals,
+                  signalsContributing: replacementDepth.signalsContributing,
+                },
+              });
+              return {
+                candidateId: replacement.id,
+                trend: replacement.ranked.trend,
+                plan: replacementPlan,
+                origin: replacement.ranked.trend.ideaOrigin ?? replacement.ranked.trend.sourceType,
+              };
+            },
           );
-          return { slotIndex, plan, trend, result };
+          traceRecorder.recordFinal(
+            slotTraceId,
+            recovery.finalIdea.candidateId,
+            recovery.result.fallbackProvenance ?? ['NORMAL_ACCEPTANCE'],
+          );
+          if (trend?.inventoryId && trend.inventoryId !== recovery.finalIdea.trend?.inventoryId) {
+            await releaseInventoryTopic(trend.inventoryId, inventoryJobId);
+          }
+          return {
+            slotIndex,
+            plan: recovery.finalIdea.plan,
+            trend: recovery.finalIdea.trend,
+            initialTrend: trend,
+            ideaPool,
+            slotTraceId,
+            result: recovery.result,
+          };
         } catch (error) {
           if (trend?.inventoryId) await releaseInventoryTopic(trend.inventoryId, inventoryJobId);
           throw error;
@@ -500,10 +641,10 @@ export class TrendingBotService {
           sourceTitle,
           item.plan.angle,
         );
-        const conflictsWithAccepted = acceptedBodies.some(
+        const bodyCollisionIndex = acceptedBodies.findIndex(
           (body) => jaccardSimilarity(item.result.finalized.body, body) > 0.55,
         );
-        const conflictsByFingerprint = batchFingerprints.some(
+        const fingerprintCollisionIndex = batchFingerprints.findIndex(
           (fingerprint) =>
             fingerprint.normalizedTopic === candidateFingerprint.normalizedTopic
             || (
@@ -511,15 +652,26 @@ export class TrendingBotService {
               && jaccardSimilarity(fingerprint.coreClaim, candidateFingerprint.coreClaim) > 0.55
             ),
         );
+        const conflictsWithAccepted = bodyCollisionIndex >= 0;
+        const conflictsByFingerprint = fingerprintCollisionIndex >= 0;
         if (conflictsWithAccepted || conflictsByFingerprint) {
+          const collisionIndex = bodyCollisionIndex >= 0 ? bodyCollisionIndex : fingerprintCollisionIndex;
+          traceRecorder.recordCollision(
+            item.result.finalIdeaUsed ?? item.ideaPool.selected.id,
+            acceptedCandidateTraceIds[collisionIndex] ?? null,
+          );
           console.info('[ghostwriter] regenerating concurrent batch collision', {
             slotIndex: item.slotIndex,
             sourceTitle,
           });
-          item.result = await generateSlotPostUntilSuccess(
+          const collisionRecovery = await generateSlotPostWithIdeaRecovery(
             contentService,
-            item.plan,
-            item.trend,
+            {
+              candidateId: item.result.finalIdeaUsed ?? candidateTraceId(item.ideaPool.selected.ranked),
+              plan: item.plan,
+              trend: item.trend,
+              origin: item.trend?.ideaOrigin ?? item.trend?.sourceType,
+            },
             author,
             botConfig,
             acceptedBodies,
@@ -530,13 +682,76 @@ export class TrendingBotService {
               recentPosts: [...acceptedBodies, ...recentPosts].slice(0, RECENT_STYLE_POST_LIMIT),
               retainedCollisionCandidate: item.result,
               originOverride: 'collision_regeneration',
+              traceRecorder,
+              slotTraceId: item.slotTraceId,
             },
+            (_failure, attemptedCandidateIds) => {
+              const replacement = selectReplacementIdea({
+                pool: item.ideaPool,
+                attemptedCandidateIds,
+                acceptedBatchFingerprints: batchFingerprints,
+                recentMemory: ideaRecoveryMemory,
+                performanceProfile,
+              });
+              if (!replacement) {
+                traceRecorder.recordIdeaReplacement(item.slotTraceId, {
+                  exhaustionReason: _failure.exhaustionReason,
+                  replacementCandidateTraceId: null,
+                  replacementSelectionReason: 'no_safe_alternate',
+                });
+                return null;
+              }
+              const replacementPlan = buildReplacementPlan({
+                candidate: replacement,
+                slotIndex: item.slotIndex,
+                author,
+                config: botConfig,
+                editorialMemory,
+                performanceProfile,
+                acceptedPlans,
+              });
+              const replacementDepth = classifyPostDepthWithTrace(replacementPlan, replacement.ranked.trend);
+              traceRecorder.recordIdeaReplacement(item.slotTraceId, {
+                exhaustionReason: _failure.exhaustionReason,
+                replacementCandidateTraceId: replacement.id,
+                replacementSelectionReason: 'highest_ranked_safe_current_batch_alternate',
+                replacementDepth: {
+                  depthClass: replacementDepth.depthClass,
+                  targetLengthRange: replacementDepth.targetLengthRange,
+                  depthScore: replacementDepth.depthScore,
+                  rawDepthSignals: replacementDepth.rawDepthSignals,
+                  independentSubstanceUnits: replacementDepth.independentSubstanceUnits,
+                  discountedRedundantSignals: replacementDepth.discountedRedundantSignals,
+                  signalsContributing: replacementDepth.signalsContributing,
+                },
+              });
+              return {
+                candidateId: replacement.id,
+                trend: replacement.ranked.trend,
+                plan: replacementPlan,
+                origin: replacement.ranked.trend.ideaOrigin ?? replacement.ranked.trend.sourceType,
+              };
+            },
+          );
+          if (item.trend?.inventoryId && item.trend.inventoryId !== collisionRecovery.finalIdea.trend?.inventoryId) {
+            await releaseInventoryTopic(item.trend.inventoryId, inventoryJobId);
+          }
+          item.result = collisionRecovery.result;
+          item.plan = collisionRecovery.finalIdea.plan;
+          item.trend = collisionRecovery.finalIdea.trend;
+          traceRecorder.recordFinal(
+            item.slotTraceId,
+            collisionRecovery.finalIdea.candidateId,
+            collisionRecovery.result.fallbackProvenance ?? ['COLLISION_REGENERATION', 'NORMAL_ACCEPTANCE'],
           );
         }
         acceptedBodies.push(item.result.finalized.body);
+        acceptedPlans.push(item.plan);
+        acceptedCandidateTraceIds.push(item.result.finalIdeaUsed ?? item.ideaPool.selected.id);
+        const finalSourceTitle = item.trend?.topic ?? item.plan.sourceTopic ?? undefined;
         batchFingerprints.push(fingerprintFromBody(
           item.result.finalized.body,
-          sourceTitle,
+          finalSourceTitle,
           item.plan.angle,
         ));
       }
@@ -563,6 +778,8 @@ export class TrendingBotService {
             argumentPattern: plan.layout,
             authorityMode: trend?.authorityMode,
             contentIntent: trend?.ideaFamily ?? plan.angle,
+            plannedConceptualMotif: trend?.conceptualMotif,
+            plannedReasoningArchetype: trend?.reasoningArchetype,
             contentObjective: plan.editorialDecision?.contentObjective,
             conversionObjective: plan.editorialDecision?.conversionObjective,
             hookFamily: plan.editorialDecision?.hookFamily,
@@ -592,6 +809,7 @@ export class TrendingBotService {
         for (const result of waveResults) await persistResult(result);
       }
       postsCreated += waveResults.length;
+      await persistGenerationTraceSafe(jobId, traceRecorder);
     }
 
     console.log(`Batch complete. Created ${postsCreated} posts.`);
@@ -604,6 +822,8 @@ export class TrendingBotService {
       userId, niches: niches.filter((niche) => (inventoryAvailableAfterBatch[niche] ?? 0) < INVENTORY_LOW_WATERMARK),
       author, strategy, sources, openaiApiKey: openaiKey,
     });
+    await persistGenerationTraceSafe(jobId, traceRecorder, { completed: true });
+    void clearExpiredGenerationTracesSafe();
   }
 
   private async saveReviewPost(
@@ -633,6 +853,8 @@ export class TrendingBotService {
       argumentPattern?: string;
       authorityMode?: string;
       contentIntent?: string;
+      plannedConceptualMotif?: string | null;
+      plannedReasoningArchetype?: string | null;
       contentObjective?: string;
       conversionObjective?: string;
       hookFamily?: string;
@@ -722,6 +944,10 @@ export class TrendingBotService {
             endingType: finalClassification.endingIntent,
             endingClassifierDetail: finalClassification.endingType,
             ideaFamily: finalClassification.ideaFamily,
+            plannedConceptualMotif: topicMeta.plannedConceptualMotif,
+            finalConceptualMotif: finalClassification.conceptualMotif,
+            plannedReasoningArchetype: topicMeta.plannedReasoningArchetype,
+            finalReasoningArchetype: finalClassification.reasoningArchetype,
             contentObjective: finalClassification.contentIntent ?? topicMeta.contentObjective,
             plannedContentObjective: topicMeta.contentObjective,
             conversionObjective: topicMeta.conversionObjective,

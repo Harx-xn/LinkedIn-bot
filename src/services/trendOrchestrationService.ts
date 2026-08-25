@@ -31,6 +31,8 @@ export type OrchestratedTrendPool = {
   stats: TrendPoolStats & { openAiCalls?: number; sourceRequestCount?: number; cacheHits?: number; cacheMisses?: number };
   timingMs?: ReturnType<PipelineTimer['finish']>;
   qualifiedRanked?: RankedTrendCandidate[];
+  evidenceOnlyRanked?: RankedTrendCandidate[];
+  rejectedSearchRanked?: RankedTrendCandidate[];
 };
 
 export type RankedTrendPoolParams = {
@@ -193,6 +195,8 @@ export class TrendOrchestrationService {
     type NicheResult = {
       plan: NicheExpansionPlan;
       ranked: RankedTrendCandidate[];
+      evidenceOnlyRanked: RankedTrendCandidate[];
+      rejectedSearchRanked: RankedTrendCandidate[];
       stats: TrendPoolStats & { openAiCalls?: number };
       rawFetched: number;
       queryCount: number;
@@ -280,7 +284,7 @@ export class TrendOrchestrationService {
         });
         if (nicheExhausted) {
           params.exhaustedNiches?.add(niche);
-          return { plan, ranked: [], stats: { rawCount: 0, rejectedLowValue: 0, rejectedByExclusions: 0, exactDuplicatesRemoved: 0, nearDuplicatesRemoved: 0, historyMatchesRemoved: 0, fingerprinted: 0, selected: 0, evergreenFilled: 0 }, rawFetched: 0, queryCount: 0, durationMs: Math.round(performance.now() - nicheTimer), fetchMetrics: trendsService.getLastFetchMetrics() };
+          return { plan, ranked: [], evidenceOnlyRanked: [], rejectedSearchRanked: [], stats: { rawCount: 0, rejectedLowValue: 0, rejectedByExclusions: 0, exactDuplicatesRemoved: 0, nearDuplicatesRemoved: 0, historyMatchesRemoved: 0, fingerprinted: 0, selected: 0, evergreenFilled: 0 }, rawFetched: 0, queryCount: 0, durationMs: Math.round(performance.now() - nicheTimer), fetchMetrics: trendsService.getLastFetchMetrics() };
         }
 
         let rawTrends: Trend[] = [];
@@ -329,7 +333,7 @@ export class TrendOrchestrationService {
           });
         }
 
-        const { ranked, stats } = await processTrendCandidates({
+        const { ranked, evidenceOnlyRanked, rejectedSearchRanked, stats } = await processTrendCandidates({
           userId: params.userId,
           rawTrends,
           niche,
@@ -369,6 +373,8 @@ export class TrendOrchestrationService {
         return {
           plan,
           ranked,
+          evidenceOnlyRanked,
+          rejectedSearchRanked,
           stats,
           rawFetched: rawTrends.length,
           queryCount: plan.queries.length,
@@ -392,6 +398,8 @@ export class TrendOrchestrationService {
 
     const expansionPlans = nicheResults.map((r) => r.plan);
     const allRanked = nicheResults.flatMap((r) => r.ranked);
+    const allEvidenceOnlyRanked = nicheResults.flatMap((r) => r.evidenceOnlyRanked ?? []);
+    const allRejectedSearchRanked = nicheResults.flatMap((r) => r.rejectedSearchRanked ?? []);
 
     const aggregateStats: TrendPoolStats & {
       openAiCalls?: number;
@@ -505,6 +513,8 @@ export class TrendOrchestrationService {
       stats: aggregateStats,
       timingMs,
       qualifiedRanked: dedupeCrossNicheQualifiedTopics(allRanked),
+      evidenceOnlyRanked: dedupeCrossNicheQualifiedTopics(allEvidenceOnlyRanked),
+      rejectedSearchRanked: dedupeCrossNicheQualifiedTopics(allRejectedSearchRanked),
     };
   }
 
@@ -523,6 +533,8 @@ export class TrendOrchestrationService {
     };
     const exhaustedNiches = new Set<string>();
     let accumulated: RankedTrendCandidate[] = [];
+    let accumulatedEvidenceOnly: RankedTrendCandidate[] = [];
+    let accumulatedRejectedSearch: RankedTrendCandidate[] = [];
     let latest: OrchestratedTrendPool | null = null;
     const totals = {
       rawCount: 0,
@@ -550,6 +562,8 @@ export class TrendOrchestrationService {
       });
       latest = pass;
       accumulated = dedupeCrossNicheQualifiedTopics([...accumulated, ...(pass.qualifiedRanked ?? pass.ranked)]);
+      accumulatedEvidenceOnly = dedupeCrossNicheQualifiedTopics([...accumulatedEvidenceOnly, ...(pass.evidenceOnlyRanked ?? [])]);
+      accumulatedRejectedSearch = dedupeCrossNicheQualifiedTopics([...accumulatedRejectedSearch, ...(pass.rejectedSearchRanked ?? [])]);
       for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
         if (key === 'selected' || key === 'evergreenFilled') continue;
         totals[key] += Number(pass.stats[key] ?? 0);
@@ -576,6 +590,8 @@ export class TrendOrchestrationService {
       ranked: finalSelection.selected,
       eligible: rankedToTrendCandidates(finalSelection.selected),
       qualifiedRanked: accumulated,
+      evidenceOnlyRanked: accumulatedEvidenceOnly,
+      rejectedSearchRanked: accumulatedRejectedSearch,
       stats: totals,
     };
   }

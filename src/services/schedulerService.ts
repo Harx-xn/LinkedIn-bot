@@ -13,8 +13,22 @@ import { canPublish } from "./entitlementService";
 import { canPublishToLinkedIn } from "./planEntitlementService";
 
 import { TrendingBotService } from "./trendingBotService";
+import { reconcileStaleBatchGenerationJobs } from "./batchGenerationJobLifecycleService";
 
 export function startScheduler() {
+  // A generation runs in-process, so an expired heartbeat means its worker was
+  // lost. Reconcile these leases independently of whether a browser is polling.
+  cron.schedule("* * * * *", async () => {
+    try {
+      const recovered = await reconcileStaleBatchGenerationJobs();
+      if (recovered > 0) {
+        console.warn('[batch-job] marked interrupted jobs as failed', { recovered });
+      }
+    } catch (err) {
+      console.error('[batch-job] stale-job reconciliation failed', err);
+    }
+  });
+
   // Run Trending Bot daily at 9:00 AM.
   // This should create drafts, not publish directly.
   cron.schedule("0 9 * * *", async () => {

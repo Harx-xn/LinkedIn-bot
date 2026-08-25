@@ -4,15 +4,18 @@ import { summarizeBatchPlan, buildDeterministicBatchPlan, buildTopicDiverseBatch
 import type { Trend } from './trendsService';
 import {
   generateSlotPost as generateSlotPostImpl,
+  generateSlotPostWithIdeaRecovery as generateSlotPostWithIdeaRecoveryImpl,
   generateSlotPostUntilSuccess as generateSlotPostUntilSuccessImpl,
   type GeneratedSlotResult,
+  type SlotIdeaAttempt,
+  type SlotIdeaRecoveryResult,
   type SlotGenerationOptions,
 } from './ghostwriterGenerationService';
 import { TrendOrchestrationService } from './trendOrchestrationService';
 import { validatePlanTopicDiversity } from './trendDiversityService';
 import { BatchScheduleError } from './batchScheduleService';
 import { inventoryFingerprint, reserveValidInventoryTopics, storeQualifiedTopics, unselectedQualifiedTopics } from './topicInventoryService';
-import { getOrBuildContentIntelligence } from './contentIntelligenceService';
+import { buildFallbackContentIntelligence, getOrBuildContentIntelligence } from './contentIntelligenceService';
 import { ideaToRankedCandidate } from './contentIdeaService';
 import { buildStrategyIdeaCandidatePool } from './semanticIdeaGenerationService';
 import { loadRecentTopicHistory } from './topicHistoryService';
@@ -20,7 +23,12 @@ import {
   createRecentContentMemory,
   loadRecentContentMemory,
 } from './recentContentMemoryService';
-import { buildUnifiedCandidateSelection, selectUnifiedBatchCandidates } from './unifiedBatchCandidateService';
+import {
+  buildUnifiedCandidateSelection,
+  normalizeBatchCandidate,
+  selectUnifiedBatchCandidates,
+  type UnifiedSelectionEvaluation,
+} from './unifiedBatchCandidateService';
 import { loadAccountPerformanceProfileSafe, type AccountPerformanceProfile } from './accountPerformanceLearningService';
 import {
   applyKnowledgeAuthorityToContentIntelligence,
@@ -32,6 +40,14 @@ import {
   FALLBACK_PROVENANCE,
   logFallbackProvenance,
 } from './fallbackProvenanceService';
+import { buildSlotIdeaPools, candidateTraceId, type IdeaFailureState, type SlotIdeaPool } from './ideaRecoveryService';
+import type { RecentContentFingerprint } from './recentContentMemoryService';
+import {
+  diagnosticCandidateOrigin,
+  diagnosticFingerprint,
+  diagnosticTraceId,
+  type BatchGenerationTraceRecorder,
+} from './batchGenerationTraceService';
 
 export type { GeneratedSlotResult };
 
@@ -110,6 +126,7 @@ export async function prepareBatchContextV2(params: {
   configHash?: string;
   allowPartial?: boolean;
   generationJobId?: string;
+  traceRecorder?: BatchGenerationTraceRecorder;
 }) {
   const requireCompleteTrendPool = <T extends { ranked: RankedTrendCandidate[]; eligible: TrendCandidate[] }>(pool: T): T => {
     if (!params.allowPartial && (pool.ranked.length < params.slotCount || pool.eligible.length < params.slotCount)) {
@@ -150,6 +167,14 @@ export async function prepareBatchContextV2(params: {
     });
   }
   author.authorityContext = buildGenerationAuthorityContext(knowledgeContext, 'BATCH', params.niches);
+  params.traceRecorder?.updateStrategyContext({
+    authorityProfileFingerprint: diagnosticFingerprint({
+      territories: author.authorityContext.territories,
+      knowledgeableTopics: author.authorityContext.knowledgeableTopics,
+      exploringTopics: author.authorityContext.exploringTopics,
+      boundaries: author.authorityContext.boundaries,
+    }),
+  });
 
   const orchestrator = new TrendOrchestrationService(params.openaiApiKey);
   let recentContentMemory = createRecentContentMemory();
@@ -165,6 +190,13 @@ export async function prepareBatchContextV2(params: {
   // needs the historical snapshot so it can add form decisions slot-by-slot itself.
   const editorialMemory = createRecentContentMemory(recentContentMemory.fingerprints);
   const performanceProfile = await loadAccountPerformanceProfileSafe(params.userId);
+  params.traceRecorder?.updateStrategyContext({
+    recentMemoryWindowSize: recentContentMemory.fingerprints.length,
+    performanceLearningAvailable: performanceProfile.postCount > 0 && performanceProfile.preferences.length > 0,
+    performanceLearningConfidence: performanceProfile.preferences.length
+      ? Math.max(...performanceProfile.preferences.map((preference) => preference.confidence))
+      : null,
+  });
 
   let strategyRanked: RankedTrendCandidate[] = [];
   let strategyCandidateCount = 0;
@@ -185,10 +217,42 @@ export async function prepareBatchContextV2(params: {
         apiKey: params.openaiApiKey,
       });
       const candidates = ideaPool.candidates;
+      const materialCandidateIds = new Set(candidates.map((candidate) => candidate.id));
+      for (const observation of ideaPool.observations.filter((item) => !materialCandidateIds.has(item.id))) {
+        params.traceRecorder?.recordCandidate({
+          candidateTraceId: diagnosticTraceId('candidate', observation.id),
+          origin: 'SEMANTIC_STRATEGY', generationMode: 'SEMANTIC', pillar: observation.pillar,
+          territory: observation.territory, topicNormalized: observation.topicNormalized,
+          ideaFamily: observation.ideaFamily, authorityMode: observation.authorityMode,
+          ideaQuality: observation.ideaQuality, strategyFit: observation.strategyFit,
+          audienceValue: observation.audienceValue, authorityFit: observation.authorityFit,
+          practicalValue: null, discussionPotential: null, specificity: null,
+          nonObviousness: null, fallbackFamily: null,
+          subjectRelevance: null, sourceClaimTransformability: null,
+          searchDisposition: null, searchRejectionReason: null, evidenceOnly: false,
+          searchRelevanceBreakdown: null,
+          conceptualMotif: null, reasoningArchetype: null, motifSimilarity: null,
+          motifPenalty: null, motifCollisionCandidateId: null,
+          audienceIdeaNaturalness: observation.audienceIdeaNaturalness,
+          creatorContentFit: observation.creatorContentFit,
+          candidateCoherence: null, coherencePenalty: null,
+          coherenceRejectionReason: observation.rejectedReasons[0] ?? 'SEMANTIC_OUTPUT_INVALID',
+          resolvedAudience: [],
+          sourceQuality: null, freshness: null, novelty: observation.novelty,
+          saturationPenalty: null, memoryPenalty: null, performanceAdjustment: null,
+          unifiedQuality: null, adjustedScore: null, tier: 'REJECTED',
+          rejectionReason: observation.rejectedReasons[0] ?? 'SEMANTIC_OUTPUT_INVALID',
+          selected: false, selectionOrder: null, disposition: 'HARD_REJECTED', collisionCandidateTraceId: null,
+        });
+      }
       strategyCandidateCount = candidates.length;
       strategyRanked = candidates.map(ideaToRankedCandidate);
       intelligenceOpenAiCalls = (intelligence.semanticEnrichmentSucceeded ? 1 : 0) + ideaPool.modelCalls;
       author.contentIntelligence = evidenceGroundedProfile;
+      params.traceRecorder?.updateStrategyContext({
+        contentIntelligenceFingerprint: diagnosticFingerprint(evidenceGroundedProfile),
+        contentIntelligenceVersion: evidenceGroundedProfile.version,
+      });
       author.authorityContext = buildGenerationAuthorityContext(
         knowledgeContext,
         'BATCH',
@@ -222,7 +286,13 @@ export async function prepareBatchContextV2(params: {
 
   void params.previewId;
   void params.configHash;
+  const coherenceContext = params.config.strategy ? {
+    strategy: params.config.strategy,
+    profile: author.contentIntelligence ?? buildFallbackContentIntelligence(params.config.strategy),
+    recentContent: recentContentMemory.fingerprints,
+  } : undefined;
   let discoveryPool: Awaited<ReturnType<TrendOrchestrationService['buildTrendPoolForBatch']>> | undefined;
+  const mixedSelectionEvaluations: UnifiedSelectionEvaluation[] = [];
   const mixed = await buildUnifiedCandidateSelection({
     strategyCandidates: strategyRanked,
     count: params.slotCount,
@@ -237,9 +307,15 @@ export async function prepareBatchContextV2(params: {
         slotCount: candidateCount,
         mode: 'generation',
       });
-      return discoveryPool.qualifiedRanked ?? discoveryPool.ranked;
+      return [
+        ...(discoveryPool.qualifiedRanked ?? discoveryPool.ranked),
+        ...(discoveryPool.evidenceOnlyRanked ?? []),
+        ...(discoveryPool.rejectedSearchRanked ?? []),
+      ];
     },
     performanceProfile,
+    coherenceContext,
+    selectionObserver: (evaluation) => mixedSelectionEvaluations.push(evaluation),
   });
   const freshSelected = mixed.selected.map((candidate) => candidate.ranked);
   const searchQualified = discoveryPool?.qualifiedRanked ?? discoveryPool?.ranked ?? [];
@@ -253,18 +329,184 @@ export async function prepareBatchContextV2(params: {
         activeProfileFingerprints: new Map((discoveryPool?.expansionPlans ?? []).map((plan) => [plan.niche, plan.inputFingerprint ?? ''])),
       })
     : [];
-  const selected = inventorySelected.length
+  const inventorySelectionEvaluations: UnifiedSelectionEvaluation[] = [];
+  const finalNormalizedSelection = inventorySelected.length
     ? selectUnifiedBatchCandidates(
         [...mixed.observed.map((candidate) => candidate.ranked), ...inventorySelected],
         params.slotCount,
         createRecentContentMemory(recentContentMemory.fingerprints),
         performanceProfile,
-      ).map((candidate) => candidate.ranked)
-    : freshSelected;
+        { observer: (evaluation) => inventorySelectionEvaluations.push(evaluation), coherenceContext },
+      )
+    : mixed.selected;
+  const finalSelectionEvaluations = inventorySelected.length ? inventorySelectionEvaluations : mixedSelectionEvaluations;
+  const selected = finalNormalizedSelection.map((candidate) => candidate.ranked);
   const selectedSearchFingerprints = new Set(selected
     .filter((item) => item.trend.sourceType !== 'strategy_derived')
     .map((item) => inventoryFingerprint(item.fingerprint)));
-  const excessFresh = unselectedQualifiedTopics(searchQualified, selected.filter((item) => selectedSearchFingerprints.has(inventoryFingerprint(item.fingerprint))));
+  const slotIdeaPools = buildSlotIdeaPools({
+    selected,
+    observed: [...mixed.observed.map((candidate) => candidate.ranked), ...inventorySelected],
+    recentMemory: recentContentMemory.fingerprints,
+    performanceProfile,
+  });
+  if (params.traceRecorder) {
+    const finalIds = new Map(selected.map((candidate, index) => [candidateTraceId(candidate), index + 1]));
+    const selectedDiagnostics = new Map(finalNormalizedSelection.map((candidate) => [candidateTraceId(candidate.ranked), candidate]));
+    const latestEvaluation = new Map<string, UnifiedSelectionEvaluation>();
+    for (const evaluation of finalSelectionEvaluations) {
+      const traceId = candidateTraceId(evaluation.candidate.ranked);
+      latestEvaluation.set(traceId, evaluation);
+      params.traceRecorder.recordSelectionEvaluation({
+        selectionStep: evaluation.selectionStep,
+        candidateTraceId: traceId,
+        adjustedScore: evaluation.adjustedScore,
+        memoryPenalty: evaluation.memoryPenalty,
+        performanceAdjustment: evaluation.performanceAdjustment,
+        tier: evaluation.tier,
+        disposition: evaluation.disposition,
+        collisionCandidateTraceId: evaluation.collisionCandidate
+          ? candidateTraceId(evaluation.collisionCandidate.ranked)
+          : null,
+        motifSimilarity: evaluation.motifSimilarity,
+        motifPenalty: evaluation.motifPenalty,
+        motifCollisionCandidateId: evaluation.motifCollisionCandidateId,
+      });
+    }
+    const normalizedObserved = [...mixed.observed];
+    for (const inventory of inventorySelected) {
+      if (!normalizedObserved.some((candidate) => candidateTraceId(candidate.ranked) === candidateTraceId(inventory))) {
+        normalizedObserved.push(normalizeBatchCandidate(inventory, coherenceContext));
+      }
+    }
+    for (const candidate of normalizedObserved) {
+      const traceId = candidateTraceId(candidate.ranked);
+      const order = finalIds.get(traceId) ?? null;
+      const diagnosticCandidate = selectedDiagnostics.get(traceId) ?? candidate;
+      const evaluation = latestEvaluation.get(traceId);
+      const hardReason = diagnosticCandidate.criticalIssues[0]
+        ?? (!diagnosticCandidate.topic.trim() || !diagnosticCandidate.coreClaim.trim() ? 'SEMANTIC_OUTPUT_INVALID' : null)
+        ?? (!diagnosticCandidate.ranked.novelty.allowed ? diagnosticCandidate.ranked.novelty.reasons[0] ?? 'RECENT_MECHANISM_DUPLICATE' : null);
+      params.traceRecorder.recordCandidate({
+        candidateTraceId: traceId,
+        origin: diagnosticCandidateOrigin({
+          ideaGenerationMode: diagnosticCandidate.ranked.trend.ideaGenerationMode,
+          ideaOrigin: diagnosticCandidate.ranked.trend.ideaOrigin,
+          sourceType: diagnosticCandidate.ranked.trend.sourceType,
+          inventoryId: diagnosticCandidate.ranked.trend.inventoryId,
+          provenance: diagnosticCandidate.provenance,
+          evidenceEnriched: Boolean(diagnosticCandidate.evidence.enrichedCandidateId),
+        }),
+        generationMode: diagnosticCandidate.ranked.trend.ideaGenerationMode ?? null,
+        pillar: diagnosticCandidate.pillar || null,
+        territory: diagnosticCandidate.territory || null,
+        topicNormalized: diagnosticCandidate.ranked.fingerprint.normalizedTopic || null,
+        ideaFamily: diagnosticCandidate.ranked.trend.ideaFamily ?? diagnosticCandidate.ranked.trend.suggestedAngle ?? null,
+        authorityMode: diagnosticCandidate.authorityMode,
+        ideaQuality: diagnosticCandidate.ideaQuality,
+        strategyFit: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.strategyFit ?? null,
+        audienceValue: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.audienceValue ?? null,
+        practicalValue: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.practicalValue ?? null,
+        discussionPotential: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.discussionPotential ?? null,
+        specificity: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.specificity ?? null,
+        nonObviousness: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.nonObviousness ?? null,
+        fallbackFamily: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.fallbackFamily ?? null,
+        subjectRelevance: diagnosticCandidate.subjectRelevance,
+        sourceClaimTransformability: diagnosticCandidate.sourceClaimTransformability,
+        searchDisposition: diagnosticCandidate.searchDisposition,
+        searchRejectionReason: diagnosticCandidate.searchRejectionReason,
+        evidenceOnly: diagnosticCandidate.evidenceOnly,
+        searchRelevanceBreakdown: diagnosticCandidate.ranked.trend.searchRelevanceBreakdown ?? null,
+        conceptualMotif: diagnosticCandidate.conceptualMotif,
+        reasoningArchetype: diagnosticCandidate.reasoningArchetype,
+        motifSimilarity: evaluation?.motifSimilarity ?? null,
+        motifPenalty: evaluation?.motifPenalty ?? null,
+        motifCollisionCandidateId: evaluation?.motifCollisionCandidateId ?? null,
+        authorityFit: diagnosticCandidate.ranked.trend.ideaScoreBreakdown?.authorityFit ?? null,
+        audienceIdeaNaturalness: diagnosticCandidate.audienceIdeaNaturalness,
+        creatorContentFit: diagnosticCandidate.creatorContentFit,
+        candidateCoherence: diagnosticCandidate.candidateCoherence,
+        coherencePenalty: diagnosticCandidate.coherencePenalty,
+        coherenceRejectionReason: diagnosticCandidate.coherenceRejectionReason,
+        resolvedAudience: diagnosticCandidate.resolvedAudience,
+        sourceQuality: diagnosticCandidate.sourceQuality,
+        freshness: diagnosticCandidate.freshness,
+        novelty: diagnosticCandidate.ranked.noveltyScore,
+        saturationPenalty: diagnosticCandidate.saturationPenalty,
+        memoryPenalty: evaluation?.memoryPenalty ?? (order ? diagnosticCandidate.similarityPenalty : null),
+        performanceAdjustment: evaluation?.performanceAdjustment ?? (order ? diagnosticCandidate.performanceAdjustment : null),
+        unifiedQuality: diagnosticCandidate.ranked.totalScore,
+        adjustedScore: evaluation?.adjustedScore ?? (order ? diagnosticCandidate.ranked.totalScore : null),
+        tier: diagnosticCandidate.evidenceOnly ? 'EVIDENCE_ONLY' : evaluation ? String(evaluation.tier) : diagnosticCandidate.criticalIssues.length ? 'REJECTED' : diagnosticCandidate.ranked.novelty.allowed ? 'ELIGIBLE' : 'NOVELTY_REJECTED',
+        rejectionReason: diagnosticCandidate.searchRejectionReason ?? hardReason ?? (order ? null : evaluation?.disposition ?? 'NOT_NEEDED_AFTER_BATCH_FILLED'),
+        selected: Boolean(order),
+        selectionOrder: order,
+        disposition: order ? 'SELECTED' : diagnosticCandidate.evidenceOnly ? 'EVIDENCE_ONLY' : hardReason ? 'HARD_REJECTED'
+          : evaluation?.disposition === 'BATCH_DUPLICATE' ? 'BATCH_DUPLICATE'
+            : evaluation ? 'LOST_RANKING' : 'NOT_NEEDED_AFTER_BATCH_FILLED',
+        collisionCandidateTraceId: evaluation?.collisionCandidate
+          ? candidateTraceId(evaluation.collisionCandidate.ranked)
+          : null,
+      });
+    }
+    slotIdeaPools.forEach((pool, slotIndex) => {
+      for (const alternate of pool.alternates) {
+        const normalized = normalizeBatchCandidate(alternate.ranked, coherenceContext);
+        params.traceRecorder!.recordCandidate({
+          candidateTraceId: alternate.id,
+          origin: diagnosticCandidateOrigin({
+            ideaGenerationMode: normalized.ranked.trend.ideaGenerationMode,
+            ideaOrigin: normalized.ranked.trend.ideaOrigin,
+            sourceType: normalized.ranked.trend.sourceType,
+            inventoryId: normalized.ranked.trend.inventoryId,
+            provenance: normalized.provenance,
+          }),
+          generationMode: normalized.ranked.trend.ideaGenerationMode ?? null,
+          pillar: normalized.pillar, territory: normalized.territory,
+          topicNormalized: normalized.ranked.fingerprint.normalizedTopic,
+          ideaFamily: normalized.ranked.trend.ideaFamily ?? null,
+          authorityMode: normalized.authorityMode,
+          ideaQuality: normalized.ideaQuality,
+          strategyFit: normalized.ranked.trend.ideaScoreBreakdown?.strategyFit ?? null,
+          audienceValue: normalized.ranked.trend.ideaScoreBreakdown?.audienceValue ?? null,
+          practicalValue: normalized.ranked.trend.ideaScoreBreakdown?.practicalValue ?? null,
+          discussionPotential: normalized.ranked.trend.ideaScoreBreakdown?.discussionPotential ?? null,
+          specificity: normalized.ranked.trend.ideaScoreBreakdown?.specificity ?? null,
+          nonObviousness: normalized.ranked.trend.ideaScoreBreakdown?.nonObviousness ?? null,
+          fallbackFamily: normalized.ranked.trend.ideaScoreBreakdown?.fallbackFamily ?? null,
+          subjectRelevance: normalized.subjectRelevance,
+          sourceClaimTransformability: normalized.sourceClaimTransformability,
+          searchDisposition: normalized.searchDisposition,
+          searchRejectionReason: normalized.searchRejectionReason,
+          evidenceOnly: normalized.evidenceOnly,
+          searchRelevanceBreakdown: normalized.ranked.trend.searchRelevanceBreakdown ?? null,
+          conceptualMotif: normalized.conceptualMotif,
+          reasoningArchetype: normalized.reasoningArchetype,
+          motifSimilarity: null, motifPenalty: null, motifCollisionCandidateId: null,
+          authorityFit: normalized.ranked.trend.ideaScoreBreakdown?.authorityFit ?? null,
+          audienceIdeaNaturalness: normalized.audienceIdeaNaturalness,
+          creatorContentFit: normalized.creatorContentFit,
+          candidateCoherence: normalized.candidateCoherence,
+          coherencePenalty: normalized.coherencePenalty,
+          coherenceRejectionReason: normalized.coherenceRejectionReason,
+          resolvedAudience: normalized.resolvedAudience,
+          sourceQuality: normalized.sourceQuality, freshness: normalized.freshness,
+          novelty: normalized.ranked.noveltyScore, saturationPenalty: normalized.saturationPenalty,
+          memoryPenalty: normalized.similarityPenalty || null, performanceAdjustment: normalized.performanceAdjustment || null,
+          unifiedQuality: normalized.ranked.totalScore, adjustedScore: normalized.ranked.totalScore,
+          tier: 'ELIGIBLE_ALTERNATE', rejectionReason: 'LOST_RANKING', selected: false,
+          selectionOrder: null, disposition: 'ALTERNATE', collisionCandidateTraceId: null,
+        });
+      }
+      void slotIndex;
+    });
+  }
+  const reservedAlternateFingerprints = new Set(slotIdeaPools
+    .flatMap((pool) => pool.alternates)
+    .filter((candidate) => candidate.ranked.trend.sourceType !== 'strategy_derived')
+    .map((candidate) => inventoryFingerprint(candidate.ranked.fingerprint)));
+  const excessFresh = unselectedQualifiedTopics(searchQualified, selected.filter((item) => selectedSearchFingerprints.has(inventoryFingerprint(item.fingerprint))))
+    .filter((candidate) => !reservedAlternateFingerprints.has(inventoryFingerprint(candidate.fingerprint)));
   if (selected.length > params.slotCount) throw new Error('final_selection_invariant:total_exceeds_requested');
   if (excessFresh.some((item) => selectedSearchFingerprints.has(inventoryFingerprint(item.fingerprint)))) throw new Error('final_selection_invariant:selected_stored_as_excess');
   const excessStored = await storeQualifiedTopics(params.userId, excessFresh);
@@ -327,6 +569,8 @@ export async function prepareBatchContextV2(params: {
     stats,
     editorialMemory,
     performanceProfile,
+    slotIdeaPools,
+    ideaRecoveryMemory: recentContentMemory.fingerprints,
   });
 }
 
@@ -374,6 +618,58 @@ export async function generateSlotPostUntilSuccess(
   );
 }
 
+export async function generateSlotPostWithIdeaRecovery(
+  contentService: ContentService,
+  initialIdea: SlotIdeaAttempt,
+  author: AuthorContext,
+  config: GhostwriterBotConfig,
+  acceptedBodies: string[],
+  provider: 'OPENAI' | 'GEMINI' = 'OPENAI',
+  options?: SlotGenerationOptions,
+  selectReplacement?: (
+    failure: IdeaFailureState,
+    attemptedCandidateIds: Set<string>,
+  ) => Promise<SlotIdeaAttempt | null> | SlotIdeaAttempt | null,
+): Promise<SlotIdeaRecoveryResult> {
+  return generateSlotPostWithIdeaRecoveryImpl(
+    contentService,
+    initialIdea,
+    author,
+    config,
+    acceptedBodies,
+    provider,
+    options,
+    selectReplacement,
+  );
+}
+
+export function buildReplacementPlan(params: {
+  candidate: SlotIdeaPool['selected'];
+  slotIndex: number;
+  author: AuthorContext;
+  config: GhostwriterBotConfig;
+  editorialMemory?: NonNullable<Parameters<typeof buildTopicDiverseBatchPlan>[3]>['recentMemory'];
+  performanceProfile?: AccountPerformanceProfile;
+  acceptedPlans?: BatchPostPlan[];
+}): BatchPostPlan {
+  const replacement = buildTopicDiverseBatchPlan(
+    [params.candidate.ranked],
+    1,
+    params.config.strategy?.writingStyle,
+    {
+      recentMemory: params.editorialMemory,
+      audience: params.author.targetAudience,
+      primaryGoal: params.config.strategy?.contentGoals.primaryGoal,
+      personalEvidenceAvailable: false,
+      performanceProfile: params.performanceProfile,
+      currentBatch: (params.acceptedPlans ?? []).flatMap((plan) => plan.editorialDecision ? [plan.editorialDecision] : []),
+    },
+  )[0];
+  return { ...replacement, trendIndex: params.slotIndex };
+}
+
+export type { SlotIdeaAttempt, SlotIdeaPool, RecentContentFingerprint };
+
 export async function planBatchForGeneration(
   contentService: ContentService,
   eligible: TrendCandidate[],
@@ -403,7 +699,7 @@ export async function planBatchForGeneration(
     if (diversityIssues.length) {
       console.warn('[ghostwriter] batch plan diversity warnings', { issues: diversityIssues });
     }
-    console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author));
+    console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author, ranked.slice(0, count).map((item) => item.trend)));
     return plan;
   }
 
@@ -436,8 +732,9 @@ export async function planBatchForGeneration(
     layout: editorialPlan[index]?.layout ?? plan.layout,
     expressionMode: editorialPlan[index]?.expressionMode ?? plan.expressionMode,
     editorialDecision: editorialPlan[index]?.editorialDecision,
+    resolvedAudience: editorialPlan[index]?.resolvedAudience ?? [],
   }));
   const plan = await contentService.narrowBatchClaims(basePlan, eligible, author, provider);
-  console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author));
+  console.log('[ghostwriter] batch plan', summarizeBatchPlan(plan, author, eligible.slice(0, count)));
   return plan;
 }

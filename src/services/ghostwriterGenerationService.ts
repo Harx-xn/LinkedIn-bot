@@ -33,6 +33,7 @@ import { resolvePostDepthMetadata } from './postDepth';
 import {
   SlotCandidatePool,
   type CandidateObservation,
+  type RankedSlotCandidate,
   type SlotCandidateOrigin,
 } from './ghostwriterCandidateSelection';
 import {
@@ -40,10 +41,18 @@ import {
   logFallbackProvenance,
   type FallbackProvenance,
 } from './fallbackProvenanceService';
+import {
+  IDEA_EXHAUSTION_FRESH_GENERATIONS,
+  IdeaFailureTracker,
+  type IdeaFailureState,
+} from './ideaRecoveryService';
+import { diagnosticTraceId, type BatchGenerationTraceRecorder } from './batchGenerationTraceService';
 
 export const MAX_FRESH_GENERATIONS = 3;
 export const MAX_TARGETED_REPAIRS_PER_GENERATION = 2;
 export const MAX_QUOTA_FILL_ROUNDS = 2;
+export const MAX_SLOT_WRITER_OPERATIONS = 9;
+export const MAX_SLOT_IDEA_ATTEMPTS = 2;
 
 export type GeneratedSlotResult =
   | {
@@ -56,13 +65,36 @@ export type GeneratedSlotResult =
       attempts: number;
       acceptance: SlotAcceptanceDecision;
       fallbackProvenance?: FallbackProvenance[];
+      ideaFailureState?: IdeaFailureState;
+      freshGenerationsUsed?: number;
+      writerOperationsUsed?: number;
+      finalIdeaUsed?: string;
+      ideaAttemptIndex?: number;
     }
   | {
       ok: false;
       reason: string;
       sourceTitle?: string;
       acceptance?: SlotAcceptanceDecision;
+      ideaFailureState?: IdeaFailureState;
+      freshGenerationsUsed?: number;
+      writerOperationsUsed?: number;
+      finalIdeaUsed?: string;
+      ideaAttemptIndex?: number;
     };
+
+export type SlotIdeaAttempt = {
+  candidateId: string;
+  plan: BatchPostPlan;
+  trend: TrendCandidate | null;
+  origin?: string;
+};
+
+export type SlotIdeaRecoveryResult = {
+  result: Extract<GeneratedSlotResult, { ok: true }>;
+  finalIdea: SlotIdeaAttempt;
+  attemptedCandidateIds: string[];
+};
 
 type AttemptCounters = {
   freshGenerationAttempt: number;
@@ -78,20 +110,83 @@ export type SlotGenerationOptions = {
   candidatePool?: SlotCandidatePool;
   retainedCollisionCandidate?: Extract<GeneratedSlotResult, { ok: true }>;
   originOverride?: SlotCandidateOrigin;
+  ideaCandidateId?: string;
+  ideaAttemptIndex?: number;
+  ideaFailureTracker?: IdeaFailureTracker;
+  freshGenerationLimit?: number;
+  freshGenerationOffset?: number;
+  stopWhenIdeaExhausted?: boolean;
+  deferBestUsableReturn?: boolean;
+  writerOperationLimit?: number;
+  traceRecorder?: BatchGenerationTraceRecorder;
+  slotTraceId?: string;
 };
 
-function mergeIssues(...groups: QualityIssue[][]): QualityIssue[] {
-  const seen = new Set<string>();
-  const out: QualityIssue[] = [];
+function diagnosticDraftOrigin(origin: SlotCandidateOrigin): string {
+  if (origin === 'initial_draft') return 'INITIAL';
+  if (origin === 'targeted_repair' || origin === 'specificity_expansion') return 'REPAIR';
+  if (origin === 'fresh_regeneration' || origin === 'collision_regeneration') return 'FRESH_REGENERATION';
+  if (origin === 'late_retry') return 'LATE_RETRY';
+  if (origin === 'emergency_fallback') return 'DETERMINISTIC_FALLBACK';
+  return origin.toUpperCase();
+}
+
+function recordDraftTrace(
+  options: SlotGenerationOptions | undefined,
+  candidate: RankedSlotCandidate,
+  flags: { becameBestCandidate?: boolean; acceptedNormally?: boolean; returnedAsFallback?: boolean } = {},
+): void {
+  if (!options?.traceRecorder || !options.slotTraceId) return;
+  const candidateTraceId = candidate.ideaCandidateId ?? options.ideaCandidateId ?? 'unknown-candidate';
+  const ideaAttemptIndex = candidate.ideaAttemptIndex ?? options.ideaAttemptIndex ?? 0;
+  const fresh = candidate.freshGenerationAttempt ?? 0;
+  const repair = candidate.contentRepairAttempt ?? 0;
+  const draftAttemptKey = candidate.freshGenerationAttempt == null ? candidate.origin : fresh;
+  options.traceRecorder.recordDraft({
+    draftAttemptId: diagnosticTraceId('draft', options.slotTraceId, candidateTraceId, ideaAttemptIndex, draftAttemptKey, repair),
+    slotTraceId: options.slotTraceId,
+    candidateTraceId,
+    ideaAttemptId: diagnosticTraceId('idea', options.slotTraceId, candidateTraceId, ideaAttemptIndex),
+    ideaAttemptIndex,
+    origin: diagnosticDraftOrigin(candidate.origin),
+    charLength: candidate.finalized.content.length,
+    deterministicScore: candidate.acceptance.deterministicScore,
+    specificityScore: candidate.acceptance.specificityScore,
+    reviewerPassed: candidate.technicalReview.available !== false && candidate.technicalReview.passed,
+    claimFidelity: candidate.technicalReview.claimFidelity ?? null,
+    informationDensity: candidate.technicalReview.informationDensity ?? null,
+    progressionQuality: candidate.technicalReview.progressionQuality ?? null,
+    redundancyRisk: candidate.technicalReview.redundancyRisk ?? null,
+    genericDiscourseRisk: candidate.technicalReview.genericDiscourseRisk ?? null,
+    issueCodes: candidate.issues.map((issue) => issue.code),
+    candidateTier: candidate.tier,
+    becameBestCandidate: flags.becameBestCandidate ?? false,
+    acceptedNormally: flags.acceptedNormally ?? false,
+    returnedAsFallback: flags.returnedAsFallback ?? false,
+  });
+}
+
+export function mergeQualityIssues(...groups: QualityIssue[][]): QualityIssue[] {
+  const merged = new Map<string, QualityIssue>();
   for (const group of groups) {
     for (const issue of group) {
-      const key = `${issue.code}:${issue.evidence?.join('|') ?? ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(issue);
+      const existing = merged.get(issue.code);
+      if (!existing) {
+        merged.set(issue.code, { ...issue, evidence: issue.evidence ? [...issue.evidence] : undefined });
+        continue;
+      }
+      const evidence = [...new Set([...(existing.evidence ?? []), ...(issue.evidence ?? [])])];
+      merged.set(issue.code, {
+        code: issue.code,
+        severity: existing.severity === 'error' || issue.severity === 'error' ? 'error' : 'warning',
+        evidence: evidence.length ? evidence : undefined,
+        instruction: (issue.instruction?.trim().length ?? 0) > (existing.instruction?.trim().length ?? 0)
+          ? issue.instruction
+          : existing.instruction,
+      });
     }
   }
-  return out;
+  return [...merged.values()];
 }
 
 function technicalToQuality(issues: TechnicalReviewResult['issues']): QualityIssue[] {
@@ -237,6 +332,7 @@ export function buildBoundedSafeWriterFallback(params: {
   batchFingerprints?: TopicFingerprint[];
   recentTopicHistory?: TopicHistoryRow[];
   candidatePool?: SlotCandidatePool;
+  traceOptions?: SlotGenerationOptions;
 }): Extract<GeneratedSlotResult, { ok: true }> | null {
   const sourceTitle = params.trend?.topic ?? params.plan.sourceTopic ?? 'Author expertise';
   const claim = (
@@ -292,15 +388,20 @@ export function buildBoundedSafeWriterFallback(params: {
   const linkedInIssues: QualityIssue[] = validateLinkedInFormatting(finalized.body)
     .filter((issue) => issue.severity === 'error')
     .map((issue) => ({ code: issue.code, severity: 'error' as const }));
-  const issues = mergeIssues(deterministic.issues, formatIssues, authorityIssues, linkedInIssues);
+  const issues = mergeQualityIssues(deterministic.issues, formatIssues, authorityIssues, linkedInIssues);
   if (issues.some((issue) => isCriticalCandidateIssueCode(issue.code))) return null;
   const blocking = issues.filter((issue) => issue.severity === 'error');
   const warnings = issues.filter((issue) => issue.severity === 'warning');
   const technicalReview: TechnicalReviewResult = { available: false, passed: false, confidence: 0, issues: [] };
   const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
   const pool = params.candidatePool ?? new SlotCandidatePool();
-  const ranked = pool.add({ origin: 'emergency_fallback', generated, finalized, acceptance, technicalReview, issues, plan: params.plan });
+  const ranked = pool.add({
+    origin: 'emergency_fallback', generated, finalized, acceptance, technicalReview, issues, plan: params.plan,
+    ideaCandidateId: params.traceOptions?.ideaCandidateId,
+    ideaAttemptIndex: params.traceOptions?.ideaAttemptIndex,
+  });
   if (!ranked.eligible) return null;
+  recordDraftTrace(params.traceOptions, ranked, { becameBestCandidate: pool.best() === ranked, returnedAsFallback: true });
   logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.WRITER_FALLBACK, stage: 'bounded_safe_writer', reason: 'writer_attempts_exhausted' });
   logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE, stage: 'bounded_safe_writer', metadata: { tier: ranked.tier } });
   return {
@@ -322,8 +423,18 @@ function logSlotDecision(
   counters: AttemptCounters,
   acceptance: SlotAcceptanceDecision,
   extra?: { imageValidationIssues?: string[] },
+  slotOptions?: SlotGenerationOptions,
 ) {
   console.log('[ghostwriter] slot validation', {
+    batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+    slotTraceId: slotOptions?.slotTraceId,
+    candidateTraceId: slotOptions?.ideaCandidateId,
+    ideaAttemptId: slotOptions?.slotTraceId
+      ? diagnosticTraceId('idea', slotOptions.slotTraceId, slotOptions.ideaCandidateId ?? 'unknown', slotOptions.ideaAttemptIndex ?? 0)
+      : undefined,
+    draftAttemptId: slotOptions?.slotTraceId
+      ? diagnosticTraceId('draft', slotOptions.slotTraceId, slotOptions.ideaCandidateId ?? 'unknown', slotOptions.ideaAttemptIndex ?? 0, counters.freshGenerationAttempt, counters.contentRepairAttempt)
+      : undefined,
     sourceTitle: sourceTitle.slice(0, 60),
     planAngle: plan.angle,
     freshGenerationAttempt: counters.freshGenerationAttempt,
@@ -394,7 +505,7 @@ async function tryAcceptPost(
   const linkedInIssues = validateLinkedInFormatting(finalized.body)
     .filter((issue) => issue.severity === 'error')
     .map((issue) => ({ code: issue.code, severity: 'error' as const }));
-  const allIssues = mergeIssues(
+  const allIssues = mergeQualityIssues(
     deterministic.issues,
     technicalToQuality(technicalReview.issues),
     formatIssues,
@@ -406,22 +517,33 @@ async function tryAcceptPost(
   const blocking = filterBlockingIssues(allIssues, slotAttemptIndex(counters));
   const warnings = allIssues.filter((i) => i.severity === 'warning');
   const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
-  const observation = { generated, finalized, acceptance, technicalReview, issues: allIssues, plan };
+  const observation = {
+    generated,
+    finalized,
+    acceptance,
+    technicalReview,
+    issues: allIssues,
+    plan,
+    ideaCandidateId: slotOptions?.ideaCandidateId,
+    ideaAttemptIndex: slotOptions?.ideaAttemptIndex,
+    freshGenerationAttempt: counters.freshGenerationAttempt,
+    contentRepairAttempt: counters.contentRepairAttempt,
+  };
 
-  if (blocking.length > 0 || formatIssues.length || authorityIssues.length) {
-    logSlotDecision(sourceTitle, plan, counters, acceptance);
+  if (!acceptance.accepted || blocking.length > 0 || formatIssues.length || authorityIssues.length) {
+    logSlotDecision(sourceTitle, plan, counters, acceptance, undefined, slotOptions);
     return { accepted: false, acceptance, deterministic, technicalReview, issues: allIssues, observation };
   }
 
   if (linkedInIssues.length) {
-    logSlotDecision(sourceTitle, plan, counters, acceptance);
+    logSlotDecision(sourceTitle, plan, counters, acceptance, undefined, slotOptions);
     return { accepted: false, acceptance, deterministic, technicalReview, issues: allIssues, observation };
   }
 
   const { imageContent, issues: imageIssues } = config.imageMode === 'providedBackground'
     ? await resolveImageContent(contentService, finalized, plan, provider)
     : { imageContent: null, issues: [] };
-  logSlotDecision(sourceTitle, plan, counters, acceptance, { imageValidationIssues: imageIssues.map((i) => i.code) });
+  logSlotDecision(sourceTitle, plan, counters, acceptance, { imageValidationIssues: imageIssues.map((i) => i.code) }, slotOptions);
 
   return {
     accepted: true,
@@ -452,12 +574,22 @@ export async function generateSlotPost(
   const sourceTitle = trend?.topic ?? plan.sourceTopic ?? 'Author expertise';
   const sourceLink = trend?.link ?? '';
   const candidatePool = slotOptions?.candidatePool ?? new SlotCandidatePool();
+  const freshGenerationLimit = Math.max(1, Math.min(
+    MAX_FRESH_GENERATIONS,
+    slotOptions?.freshGenerationLimit ?? MAX_FRESH_GENERATIONS,
+  ));
+  const freshGenerationOffset = Math.max(0, slotOptions?.freshGenerationOffset ?? 0);
+  const ideaCandidateId = slotOptions?.ideaCandidateId ?? 'untracked-idea';
+  const ideaFailureTracker = slotOptions?.ideaFailureTracker ?? new IdeaFailureTracker(ideaCandidateId);
+  let ideaFailureState = ideaFailureTracker.state();
+  let freshGenerationsUsed = 0;
+  let writerOperationsUsed = 0;
   let lastAcceptance: SlotAcceptanceDecision | undefined;
   let initialLength = 0;
 
   if (slotOptions?.retainedCollisionCandidate) {
     const retained = slotOptions.retainedCollisionCandidate;
-    candidatePool.add({
+    const retainedCandidate = candidatePool.add({
       origin: 'collision_prior',
       generated: {
         headline: retained.finalized.headline,
@@ -471,12 +603,18 @@ export async function generateSlotPost(
       technicalReview: { available: false, passed: false, confidence: 0, issues: [] },
       issues: [{ code: 'batch_similarity', severity: 'error' }],
       plan,
+      ideaCandidateId,
+      ideaAttemptIndex: slotOptions?.ideaAttemptIndex,
     });
+    recordDraftTrace(slotOptions, retainedCandidate, { becameBestCandidate: candidatePool.best() === retainedCandidate });
   }
 
-  for (let fresh = 1; fresh <= MAX_FRESH_GENERATIONS; fresh++) {
+  generationLoop: for (let fresh = 1; fresh <= freshGenerationLimit; fresh++) {
+    if (writerOperationsUsed >= (slotOptions?.writerOperationLimit ?? MAX_SLOT_WRITER_OPERATIONS)) break;
+    freshGenerationsUsed = fresh;
+    const globalFreshAttempt = freshGenerationOffset + fresh;
     const counters: AttemptCounters = {
-      freshGenerationAttempt: fresh,
+      freshGenerationAttempt: globalFreshAttempt,
       contentRepairAttempt: 0,
       jsonRepairAttempt: 0,
       provider,
@@ -484,6 +622,7 @@ export async function generateSlotPost(
 
     let generated: GeneratedPostContent;
     try {
+      writerOperationsUsed += 1;
       generated = applyLinkedInFormatting(
         await contentService.generatePlannedPost(plan, author, sourceLink, provider, trend, slotOptions?.recentPosts ?? []),
         sourceTitle,
@@ -492,7 +631,7 @@ export async function generateSlotPost(
       if (err instanceof GeneratedOutputParseError) counters.jsonRepairAttempt = 2;
       console.error('[ghostwriter] generation failed', {
         sourceTitle: sourceTitle.slice(0, 60),
-        freshGenerationAttempt: fresh,
+        freshGenerationAttempt: globalFreshAttempt,
         stage: err instanceof GeneratedOutputParseError ? err.stage : undefined,
         message: err instanceof Error ? err.message : String(err),
       });
@@ -511,7 +650,7 @@ export async function generateSlotPost(
     }
 
     let currentOrigin: SlotCandidateOrigin = slotOptions?.originOverride
-      ?? (fresh === 1 ? 'initial_draft' : 'fresh_regeneration');
+      ?? (globalFreshAttempt === 1 ? 'initial_draft' : 'fresh_regeneration');
 
     for (let repairRound = 0; repairRound <= MAX_TARGETED_REPAIRS_PER_GENERATION; repairRound++) {
       const attempt = await tryAcceptPost(
@@ -530,15 +669,45 @@ export async function generateSlotPost(
         ? 'late_retry'
         : currentOrigin;
       const rankedCandidate = candidatePool.add({ ...attempt.observation, origin: observedOrigin });
+      const becameBestCandidate = candidatePool.best() === rankedCandidate;
+      recordDraftTrace(slotOptions, rankedCandidate, {
+        becameBestCandidate,
+        acceptedNormally: attempt.accepted && becameBestCandidate,
+      });
       lastAcceptance = attempt.accepted ? attempt.result.acceptance : attempt.acceptance;
+      ideaFailureState = ideaFailureTracker.recordAttempt({
+        kind: repairRound === 0 ? 'fresh' : 'repair',
+        issues: attempt.observation.issues,
+        bestTier: candidatePool.bestForIdea(ideaCandidateId)?.tier,
+      });
+      if (repairRound === 0 && slotOptions?.ideaCandidateId) {
+        console.info('[idea-recovery] idea evidence updated', {
+          batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+          slotTraceId: slotOptions?.slotTraceId,
+          ideaAttemptId: diagnosticTraceId('idea', slotOptions.slotTraceId ?? 'untracked-slot', slotOptions.ideaCandidateId, slotOptions.ideaAttemptIndex ?? 0),
+          initialIdea: slotOptions.ideaCandidateId,
+          ideaAttemptIndex: slotOptions.ideaAttemptIndex ?? 0,
+          freshGenerationCount: ideaFailureState.independentGenerationCount,
+          recurringFailureCodes: [
+            ...ideaFailureState.recurringBlockingCodes,
+            ...ideaFailureState.recurringWarningCodes,
+          ],
+          ideaExhausted: ideaFailureState.exhausted,
+          exhaustionReason: ideaFailureState.exhaustionReason,
+        });
+      }
       if (attempt.accepted) {
-        console.log('[ghostwriter] post accepted', { sourceTitle: sourceTitle.slice(0, 60), angle: plan.angle, expressionMode: plan.expressionMode, freshGenerationAttempt: fresh, provider });
+        console.log('[ghostwriter] post accepted', {
+          batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+          slotTraceId: slotOptions?.slotTraceId,
+          sourceTitle: sourceTitle.slice(0, 60), angle: plan.angle, expressionMode: plan.expressionMode, freshGenerationAttempt: globalFreshAttempt, provider,
+        });
         const writerPromptEstimate = estimatePromptTokens(JSON.stringify({ plan, author: { description: author.description, tone: author.tone, niches: author.niches }, recent: slotOptions?.recentPosts?.slice(0, 5).map((post) => post.slice(0, 96)) ?? [] }));
         logGenerationTelemetry({
           generationType: 'ghostwriter_batch_slot',
           expressionMode: plan.expressionMode ?? null,
           plannerCalls: 0,
-          writerCalls: fresh,
+          writerCalls: globalFreshAttempt,
           repairCalls: repairRound,
           plannerPromptTokens: [],
           writerPromptTokens: writerPromptEstimate,
@@ -567,7 +736,14 @@ export async function generateSlotPost(
           ...candidatePool.summary(),
         });
         const best = candidatePool.best();
-        if (!best || best === rankedCandidate) return attempt.result;
+        if (!best || best === rankedCandidate) return {
+          ...attempt.result,
+          ideaFailureState,
+          freshGenerationsUsed,
+          writerOperationsUsed,
+          finalIdeaUsed: ideaCandidateId,
+          ideaAttemptIndex: slotOptions?.ideaAttemptIndex,
+        };
         logFallbackProvenance({
           provenance: FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
           stage: 'candidate_retention',
@@ -578,19 +754,36 @@ export async function generateSlotPost(
           ...attempt.result,
           finalized: best.finalized,
           imageContent: buildSafeFallbackImageContent(best.finalized),
+          sourceTitle: best.plan.sourceTopic ?? sourceTitle,
+          plan: best.plan,
           qualityScore: best.acceptance.qualityScore,
           acceptance: best.acceptance,
           fallbackProvenance: [FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK],
+          ideaFailureState,
+          freshGenerationsUsed,
+          writerOperationsUsed,
+          finalIdeaUsed: best.ideaCandidateId ?? ideaCandidateId,
+          ideaAttemptIndex: best.ideaAttemptIndex ?? slotOptions?.ideaAttemptIndex,
         };
       }
 
+      if (repairRound === 0 && ideaFailureState.exhausted && slotOptions?.stopWhenIdeaExhausted) {
+        break generationLoop;
+      }
+
       if (repairRound >= MAX_TARGETED_REPAIRS_PER_GENERATION) break;
+      if (writerOperationsUsed >= (slotOptions?.writerOperationLimit ?? MAX_SLOT_WRITER_OPERATIONS)) break generationLoop;
 
       const deterministic = attempt.deterministic;
       const blocking = attempt.issues.filter((i) => i.severity === 'error');
+      const repairInput = issuesToRepairInput(attempt.issues);
+      const reviewFailureInput = repairInput.length === 0 && attempt.technicalReview.available !== false && !attempt.technicalReview.passed
+        ? attempt.issues.filter((issue) => issue.severity === 'warning')
+        : repairInput;
 
       counters.contentRepairAttempt = repairRound + 1;
       try {
+        writerOperationsUsed += 1;
         if (isSpecificityOnlyBlocking(blocking)) {
           generated = applyLinkedInFormatting(
             await contentService.expandSpecificity(generated, deterministic.specificity, author, plan, provider),
@@ -601,7 +794,7 @@ export async function generateSlotPost(
           generated = applyLinkedInFormatting(
             await contentService.repairPost(
               generated,
-              issuesToRepairInput(attempt.issues),
+              reviewFailureInput,
               author,
               provider,
               plan,
@@ -616,10 +809,27 @@ export async function generateSlotPost(
     }
   }
 
+  if (slotOptions?.deferBestUsableReturn) {
+    return {
+      ok: false,
+      reason: ideaFailureState.exhausted ? 'idea_exhausted' : 'idea_attempt_deferred',
+      sourceTitle,
+      acceptance: lastAcceptance,
+      ideaFailureState,
+      freshGenerationsUsed,
+      writerOperationsUsed,
+      finalIdeaUsed: ideaCandidateId,
+      ideaAttemptIndex: slotOptions.ideaAttemptIndex,
+    };
+  }
+
   const bestUsableCandidate = candidatePool.best();
   if (bestUsableCandidate) {
     const summary = candidatePool.summary();
+    recordDraftTrace(slotOptions, bestUsableCandidate, { returnedAsFallback: true });
     console.warn('[ghostwriter] slot returning best usable candidate after quality gate', {
+      batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+      slotTraceId: slotOptions?.slotTraceId,
       sourceTitle: sourceTitle.slice(0, 60),
       blockingIssueCodes: bestUsableCandidate.acceptance.blockingIssueCodes,
       ...summary,
@@ -637,15 +847,20 @@ export async function generateSlotPost(
       ok: true,
       finalized: bestUsableCandidate.finalized,
       imageContent: buildSafeFallbackImageContent(bestUsableCandidate.finalized),
-      sourceTitle,
-      plan,
+      sourceTitle: bestUsableCandidate.plan.sourceTopic ?? sourceTitle,
+      plan: bestUsableCandidate.plan,
       qualityScore: bestUsableCandidate.acceptance.qualityScore,
-      attempts: MAX_FRESH_GENERATIONS,
+      attempts: freshGenerationOffset + freshGenerationsUsed,
       acceptance: bestUsableCandidate.acceptance,
       fallbackProvenance: [
         FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
         ...(bestUsableCandidate.tier === 'EMERGENCY' ? [FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE] : []),
       ],
+      ideaFailureState,
+      freshGenerationsUsed,
+      writerOperationsUsed,
+      finalIdeaUsed: bestUsableCandidate.ideaCandidateId ?? ideaCandidateId,
+      ideaAttemptIndex: bestUsableCandidate.ideaAttemptIndex ?? slotOptions?.ideaAttemptIndex,
     };
   }
 
@@ -654,7 +869,193 @@ export async function generateSlotPost(
     reason: lastAcceptance?.blockingIssueCodes.join(',') || 'quality_gate_exhausted',
     sourceTitle,
     acceptance: lastAcceptance,
+    ideaFailureState,
+    freshGenerationsUsed,
+    writerOperationsUsed,
+    finalIdeaUsed: ideaCandidateId,
+    ideaAttemptIndex: slotOptions?.ideaAttemptIndex,
   };
+}
+
+export async function generateSlotPostWithIdeaRecovery(
+  contentService: ContentService,
+  initialIdea: SlotIdeaAttempt,
+  author: AuthorContext,
+  config: GhostwriterBotConfig,
+  acceptedBodies: string[],
+  provider: 'OPENAI' | 'GEMINI' = 'OPENAI',
+  slotOptions?: SlotGenerationOptions,
+  selectReplacement?: (
+    failure: IdeaFailureState,
+    attemptedCandidateIds: Set<string>,
+  ) => Promise<SlotIdeaAttempt | null> | SlotIdeaAttempt | null,
+): Promise<SlotIdeaRecoveryResult> {
+  const candidatePool = slotOptions?.candidatePool ?? new SlotCandidatePool();
+  const attemptedCandidateIds = new Set<string>();
+  const attemptsById = new Map<string, SlotIdeaAttempt>();
+  const trackers = new Map<string, IdeaFailureTracker>();
+  let current = initialIdea;
+  let ideaAttemptIndex = 0;
+  let freshGenerationOffset = 0;
+  let writerOperationsOffset = 0;
+  let lastFailure: Extract<GeneratedSlotResult, { ok: false }> | undefined;
+
+  while (writerOperationsOffset < MAX_SLOT_WRITER_OPERATIONS) {
+    attemptedCandidateIds.add(current.candidateId);
+    attemptsById.set(current.candidateId, current);
+    const tracker = trackers.get(current.candidateId) ?? new IdeaFailureTracker(current.candidateId);
+    trackers.set(current.candidateId, tracker);
+    const remainingWriterOperations = MAX_SLOT_WRITER_OPERATIONS - writerOperationsOffset;
+    const canAttemptReplacement = Boolean(selectReplacement) && ideaAttemptIndex + 1 < MAX_SLOT_IDEA_ATTEMPTS;
+    const segmentLimit = canAttemptReplacement ? IDEA_EXHAUSTION_FRESH_GENERATIONS : MAX_FRESH_GENERATIONS;
+    const deferBestUsableReturn = canAttemptReplacement;
+    const result = await generateSlotPost(
+      contentService,
+      current.plan,
+      current.trend,
+      author,
+      config,
+      acceptedBodies,
+      provider,
+      {
+        ...slotOptions,
+        candidatePool,
+        ideaCandidateId: current.candidateId,
+        ideaAttemptIndex,
+        ideaFailureTracker: tracker,
+        freshGenerationLimit: segmentLimit,
+        freshGenerationOffset,
+        stopWhenIdeaExhausted: Boolean(selectReplacement),
+        deferBestUsableReturn,
+        writerOperationLimit: remainingWriterOperations,
+        retainedCollisionCandidate: ideaAttemptIndex === 0 ? slotOptions?.retainedCollisionCandidate : undefined,
+      },
+    );
+    freshGenerationOffset += result.freshGenerationsUsed ?? segmentLimit;
+    writerOperationsOffset += result.writerOperationsUsed ?? remainingWriterOperations;
+
+    if (result.ok && result.acceptance.accepted) {
+      const finalIdea = attemptsById.get(result.finalIdeaUsed ?? current.candidateId) ?? current;
+      const finalResult = {
+        ...result,
+        freshGenerationsUsed: freshGenerationOffset,
+        writerOperationsUsed: writerOperationsOffset,
+      };
+      console.info('[idea-recovery] slot resolved', {
+        batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+        slotTraceId: slotOptions?.slotTraceId,
+        initialIdea: initialIdea.candidateId,
+        finalIdeaUsed: finalIdea.candidateId,
+        ideaAttemptIndex: finalResult.ideaAttemptIndex ?? ideaAttemptIndex,
+        replacementUsed: finalIdea.candidateId !== initialIdea.candidateId,
+        fallbackUsed: false,
+      });
+      return { result: finalResult, finalIdea, attemptedCandidateIds: [...attemptedCandidateIds] };
+    }
+
+    if (!result.ok) lastFailure = result;
+    const failure = result.ideaFailureState ?? tracker.state();
+    if (failure.exhausted && selectReplacement && canAttemptReplacement && writerOperationsOffset < MAX_SLOT_WRITER_OPERATIONS) {
+      const replacement = await selectReplacement(failure, attemptedCandidateIds);
+      if (replacement) {
+        console.info('[idea-recovery] replacing exhausted idea', {
+          batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+          slotTraceId: slotOptions?.slotTraceId,
+          initialIdea: initialIdea.candidateId,
+          ideaAttemptIndex,
+          freshGenerationCount: failure.independentGenerationCount,
+          recurringFailureCodes: [...failure.recurringBlockingCodes, ...failure.recurringWarningCodes],
+          ideaExhausted: true,
+          exhaustionReason: failure.exhaustionReason,
+          replacementCandidateOrigin: replacement.origin ?? 'unknown',
+          replacementCandidateId: replacement.candidateId,
+          replacementReason: 'highest_ranked_safe_current_batch_alternate',
+        });
+        current = replacement;
+        ideaAttemptIndex += 1;
+        continue;
+      }
+      if (candidatePool.best()) break;
+    }
+
+    if (result.ok && (!deferBestUsableReturn || writerOperationsOffset >= MAX_SLOT_WRITER_OPERATIONS)) {
+      const finalIdea = attemptsById.get(result.finalIdeaUsed ?? current.candidateId) ?? current;
+      const finalResult = {
+        ...result,
+        freshGenerationsUsed: freshGenerationOffset,
+        writerOperationsUsed: writerOperationsOffset,
+      };
+      console.info('[idea-recovery] slot resolved', {
+        batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+        slotTraceId: slotOptions?.slotTraceId,
+        initialIdea: initialIdea.candidateId,
+        finalIdeaUsed: finalIdea.candidateId,
+        ideaAttemptIndex: finalResult.ideaAttemptIndex ?? ideaAttemptIndex,
+        replacementUsed: finalIdea.candidateId !== initialIdea.candidateId,
+        fallbackUsed: Boolean(finalResult.fallbackProvenance?.includes(FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK)),
+      });
+      return { result: finalResult, finalIdea, attemptedCandidateIds: [...attemptedCandidateIds] };
+    }
+
+    if (writerOperationsOffset >= MAX_SLOT_WRITER_OPERATIONS) break;
+  }
+
+  const best = candidatePool.best();
+  if (best) {
+    recordDraftTrace(slotOptions, best, { returnedAsFallback: true });
+    logFallbackProvenance({
+      provenance: FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK,
+      stage: 'candidate_retention',
+      reason: 'all_idea_attempts_exhausted',
+      metadata: { tier: best.tier },
+    });
+    const finalIdea = attemptsById.get(best.ideaCandidateId ?? current.candidateId) ?? current;
+    const result: Extract<GeneratedSlotResult, { ok: true }> = {
+      ok: true,
+      finalized: best.finalized,
+      imageContent: buildSafeFallbackImageContent(best.finalized),
+      sourceTitle: best.plan.sourceTopic ?? current.trend?.topic ?? 'Author expertise',
+      plan: best.plan,
+      qualityScore: best.acceptance.qualityScore,
+      attempts: freshGenerationOffset,
+      acceptance: best.acceptance,
+      fallbackProvenance: [FALLBACK_PROVENANCE.BEST_USABLE_FALLBACK],
+      ideaFailureState: trackers.get(finalIdea.candidateId)?.state(),
+      freshGenerationsUsed: freshGenerationOffset,
+      writerOperationsUsed: writerOperationsOffset,
+      finalIdeaUsed: finalIdea.candidateId,
+      ideaAttemptIndex: best.ideaAttemptIndex,
+    };
+    console.info('[idea-recovery] slot resolved', {
+      batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+      slotTraceId: slotOptions?.slotTraceId,
+      initialIdea: initialIdea.candidateId,
+      finalIdeaUsed: finalIdea.candidateId,
+      ideaAttemptIndex: best.ideaAttemptIndex ?? ideaAttemptIndex,
+      replacementUsed: finalIdea.candidateId !== initialIdea.candidateId,
+      fallbackUsed: true,
+    });
+    return { result, finalIdea, attemptedCandidateIds: [...attemptedCandidateIds] };
+  }
+
+  const boundedFallback = buildBoundedSafeWriterFallback({
+    plan: current.plan,
+    trend: current.trend,
+    author,
+    config,
+    acceptedBodies,
+    batchFingerprints: slotOptions?.batchFingerprints,
+    recentTopicHistory: slotOptions?.recentTopicHistory,
+    candidatePool,
+    traceOptions: slotOptions,
+  });
+  if (boundedFallback) {
+    return { result: boundedFallback, finalIdea: current, attemptedCandidateIds: [...attemptedCandidateIds] };
+  }
+
+  throw new Error(
+    `[ghostwriter] slot failed after bounded idea recovery: ${lastFailure?.reason ?? 'quality_gate_exhausted'}`,
+  );
 }
 
 export async function generateSlotPostUntilSuccess(
@@ -688,6 +1089,8 @@ export async function generateSlotPostUntilSuccess(
     lastFailure = result;
     if (round < MAX_QUOTA_FILL_ROUNDS) {
       console.warn('[ghostwriter] slot retrying until quota met', {
+        batchTraceId: slotOptions?.traceRecorder?.batchTraceId,
+        slotTraceId: slotOptions?.slotTraceId,
         sourceTitle: result.sourceTitle?.slice(0, 60),
         reason: result.reason,
         round,
@@ -705,6 +1108,7 @@ export async function generateSlotPostUntilSuccess(
     batchFingerprints: slotOptions?.batchFingerprints,
     recentTopicHistory: slotOptions?.recentTopicHistory,
     candidatePool,
+    traceOptions: slotOptions,
   });
   if (boundedFallback) return boundedFallback;
 

@@ -20,6 +20,10 @@
     GHOSTWRITER_NICHES_REQUIRED_MESSAGE,
     getSavedGhostwriterRequirements,
   } from '../services/ghostwriterConfigRequirementService';
+  import {
+    reconcileStaleBatchGenerationJob,
+    startBatchGenerationHeartbeat,
+  } from '../services/batchGenerationJobLifecycleService';
 
   export type BotGenerateRequestBody = {
     daysWindow: number;
@@ -42,8 +46,10 @@
   const botService = new TrendingBotService();
 
   router.get("/generate/status/:jobId", requireAuth, async (req, res) => {
+    const jobId = req.params.jobId.trim();
+    await reconcileStaleBatchGenerationJob({ jobId, userId: req.userId! });
     const job = await prisma.botGenerationJob.findFirst({
-      where: { id: req.params.jobId, userId: req.userId! },
+      where: { id: jobId, userId: req.userId! },
     });
 
     if (!job) return res.status(404).json({ error: "Job not found" });
@@ -165,6 +171,7 @@
         regionId: owner?.regionId ?? null,
         daysWindow: parsedDaysWindow,
         status: "RUNNING",
+        heartbeatAt: new Date(),
         totalSlots: resolvedSlots.length,
         completedSlots: 0,
       },
@@ -173,23 +180,38 @@
     // Batch schedule/frequency are request-scoped only — not persisted to BotConfig.
     const previewId = typeof req.body.previewId === 'string' ? req.body.previewId : undefined;
 
-    botService
-      .generateNow(req.userId!, job.id, {
-        previewId,
-        slots: resolvedSlots,
-      })
-      .then(async () => {
-        await prisma.botGenerationJob.update({
-          where: { id: job.id },
-          data: { status: "DONE", completedAt: new Date() },
+    void (async () => {
+      const stopHeartbeat = startBatchGenerationHeartbeat(job.id);
+      try {
+        await botService.generateNow(req.userId!, job.id, {
+          previewId,
+          slots: resolvedSlots,
         });
-      })
-      .catch(async (err: any) => {
-        await prisma.botGenerationJob.update({
-          where: { id: job.id },
-          data: { status: "FAILED", completedAt: new Date(), error: String(err?.message || err) },
+        await prisma.botGenerationJob.updateMany({
+          where: { id: job.id, status: "RUNNING" },
+          data: { status: "DONE", completedAt: new Date(), heartbeatAt: new Date() },
         });
-      });
+      } catch (err: any) {
+        try {
+          await prisma.botGenerationJob.updateMany({
+            where: { id: job.id, status: "RUNNING" },
+            data: {
+              status: "FAILED",
+              completedAt: new Date(),
+              heartbeatAt: new Date(),
+              error: String(err?.message || err),
+            },
+          });
+        } catch (statusError) {
+          console.error('[batch-job] failed to persist terminal status', {
+            jobId: job.id,
+            statusError,
+          });
+        }
+      } finally {
+        stopHeartbeat();
+      }
+    })();
 
     res.json({ jobId: job.id, status: "RUNNING" });
   });

@@ -144,4 +144,23 @@ describe('unified batch candidate selection', () => {
     const result = await buildUnifiedCandidateSelection({ strategyCandidates: [strong, usable, unsafe], count: 2 });
     assert.deepEqual(result.selected.map((item) => item.coreClaim), [strong.fingerprint.coreClaim, usable.fingerprint.coreClaim]);
   });
+
+  it('emits bounded-input selection evaluations with score and collision provenance without changing the winner', () => {
+    const first = candidate({ claim: 'One retry owner prevents amplification', mechanism: 'single retry owner', score: 91 });
+    const duplicate = candidate({ claim: 'One retry owner prevents amplification', mechanism: 'single retry owner', score: 89 });
+    const distinct = candidate({ claim: 'Dead-letter review needs an explicit release condition', mechanism: 'release condition', score: 84 });
+    const events: Array<{ selectionStep: number; disposition: string; memoryPenalty: number; collision?: string }> = [];
+    const selected = selectUnifiedBatchCandidates([first, duplicate, distinct], 2, createRecentContentMemory(), undefined, {
+      observer: (event) => events.push({
+        selectionStep: event.selectionStep,
+        disposition: event.disposition,
+        memoryPenalty: event.memoryPenalty,
+        collision: event.collisionCandidate?.coreClaim,
+      }),
+    });
+    assert.deepEqual(selected.map((item) => item.coreClaim), [first.fingerprint.coreClaim, distinct.fingerprint.coreClaim]);
+    assert.ok(events.some((event) => event.selectionStep === 2 && event.disposition === 'BATCH_DUPLICATE'
+      && event.collision === first.fingerprint.coreClaim));
+    assert.ok(events.every((event) => Number.isFinite(event.memoryPenalty)));
+  });
 });

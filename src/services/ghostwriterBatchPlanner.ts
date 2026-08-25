@@ -36,6 +36,7 @@ export type BatchEditorialContext = {
   /** Batch callers must leave this false until an explicit anecdote-approval flow exists. */
   personalEvidenceAvailable?: boolean;
   performanceProfile?: AccountPerformanceProfile;
+  currentBatch?: NonNullable<BatchPostPlan['editorialDecision']>[];
 };
 
 export function buildTopicDiverseBatchPlan(
@@ -77,8 +78,11 @@ export function buildDeterministicBatchPlan(
     const angle = topic ? resolvePlanAngle(topic, requestedAngle) : requestedAngle;
     const editorialDecision = selectEditorialDecision(trend, {
       recentMemory: editorialContext.recentMemory,
-      currentBatch: plans.flatMap((plan) => plan.editorialDecision ? [plan.editorialDecision] : []),
-      audience: editorialContext.audience,
+      currentBatch: [
+        ...(editorialContext.currentBatch ?? []),
+        ...plans.flatMap((plan) => plan.editorialDecision ? [plan.editorialDecision] : []),
+      ],
+      audience: trend?.resolvedAudience ?? editorialContext.audience,
       primaryGoal: editorialContext.primaryGoal,
       personalEvidenceAvailable: editorialContext.personalEvidenceAvailable === true,
       performanceProfile: editorialContext.performanceProfile,
@@ -104,6 +108,7 @@ export function buildDeterministicBatchPlan(
         : `Evergreen ${angle.replace(/_/g, ' ')} post from author expertise`,
       evergreen: !trend,
       claimSource,
+      resolvedAudience: trend?.resolvedAudience ?? [],
       editorialDecision,
       selectedCentralClaim,
       centralClaim: claimSource === 'STRATEGY_SELECTED' ? selectedCentralClaim : undefined,
@@ -142,6 +147,7 @@ export function assignTrendsToPlan(
       sourceTopic: trend?.topic ?? p.sourceTopic,
       evergreen: !trend,
       claimSource,
+      resolvedAudience: trend?.resolvedAudience ?? p.resolvedAudience ?? [],
       selectedCentralClaim: trend?.topic?.trim() || p.selectedCentralClaim,
       centralClaim: claimSource === 'STRATEGY_SELECTED'
         ? trend?.topic?.trim() || p.centralClaim
@@ -150,7 +156,7 @@ export function assignTrendsToPlan(
   });
 }
 
-export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext) {
+export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext, trends: TrendCandidate[] = []) {
   return {
     count: plan.length,
     niches: author.niches ?? [],
@@ -170,7 +176,13 @@ export function summarizeBatchPlan(plan: BatchPostPlan[], author: AuthorContext)
     }) : null),
     depthClasses: plan.map((p) => p.depthClass ?? null),
     targetLengthRanges: plan.map((p) => p.targetLengthRange ?? null),
-    evergreenCount: plan.filter((p) => p.evergreen).length,
+    semanticStrategySelected: trends.filter((trend) => trend.ideaGenerationMode === 'SEMANTIC').length,
+    deterministicStrategySelected: trends.filter((trend) => trend.ideaGenerationMode === 'DETERMINISTIC_FALLBACK').length,
+    searchSelected: trends.filter((trend) => trend.sourceType === 'searched'
+      || trend.ideaOrigin === 'SEARCH_DISCOVERED' || trend.ideaOrigin === 'RECENT_DEVELOPMENT').length,
+    inventorySelected: trends.filter((trend) => Boolean(trend.inventoryId)).length,
+    legacySelected: plan.filter((item, index) => item.claimSource === 'LEGACY_TOPIC' && !trends[index]?.inventoryId).length,
+    emptyPlanCount: plan.filter((item) => !(item.selectedCentralClaim ?? item.centralClaim ?? item.coreClaim)?.trim()).length,
     topicClusters: plan.map((p) => p.topicCluster ?? null),
     normalizedTopics: plan.map((p) => p.normalizedTopic ?? null),
   };

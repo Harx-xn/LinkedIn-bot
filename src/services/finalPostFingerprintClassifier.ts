@@ -1,4 +1,5 @@
 import { normalizeTrendTitle } from './trendTitleUtils';
+import { classifyConceptualMotif } from './conceptualMotifService';
 
 export type FinalPostFingerprintClassification = {
   hookType: string;
@@ -12,6 +13,8 @@ export type FinalPostFingerprintClassification = {
   ideaFamily: string;
   contentIntent: string;
   authorityMode: string;
+  conceptualMotif: string | null;
+  reasoningArchetype: string | null;
 };
 
 function paragraphs(body: string): string[] {
@@ -133,6 +136,12 @@ export function classifyFinalPostFingerprint(
         : argumentPattern === 'CLAIM_MECHANISM_CONSEQUENCE'
           ? 'MECHANISM_AND_CONSEQUENCE'
           : 'FOCUSED_OBSERVATION';
+  const motif = classifyConceptualMotif({
+    claim: body,
+    mechanism: extractFinalMechanism(body, context.plannedMechanism),
+    perspective,
+    ideaFamily: inferredFamily || context.plannedIdeaFamily,
+  });
 
   return {
     hookType: classifyHookType(body),
@@ -143,6 +152,7 @@ export function classifyFinalPostFingerprint(
     perspective,
     ideaFamily: inferredFamily || context.plannedIdeaFamily || 'FOCUSED_OBSERVATION',
     contentIntent,
+    ...motif,
     authorityMode: /\b(?:I|we|my|our)\b/.test(body)
       ? 'FIRST_PERSON_PRACTITIONER'
       : context.sourcePresent

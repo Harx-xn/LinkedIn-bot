@@ -116,6 +116,16 @@ export type TrendCandidate = {
   strategyReasons?: string[];
   strategyRiskFlags?: string[];
   qualificationConfidence?: number;
+  /** Runtime-only search admission diagnostics. */
+  subjectRelevance?: number;
+  sourceClaimTransformability?: number;
+  searchDisposition?: import('./searchCandidateAdmissionService').SearchDisposition;
+  searchRejectionReason?: string | null;
+  evidenceOnly?: boolean;
+  searchRelevanceBreakdown?: Record<string, number>;
+  /** Abstract thesis shape, distinct from rhetorical form or concrete mechanism. */
+  conceptualMotif?: string | null;
+  reasoningArchetype?: string | null;
   sourceType?: 'searched' | 'strategy_derived' | 'source_derived_angle';
   ideaOrigin?: IdeaOrigin;
   territory?: string;
@@ -123,6 +133,18 @@ export type TrendCandidate = {
   authorityMode?: import('./contentIntelligenceService').AuthorityMode;
   searchRequired?: boolean;
   ideaQualityScore?: number;
+  /** Runtime-only modeled idea components used by diagnostic traces. */
+  ideaScoreBreakdown?: {
+    strategyFit: number;
+    audienceValue: number;
+    practicalValue: number;
+    discussionPotential: number;
+    specificity: number;
+    nonObviousness: number;
+    authorityFit: number;
+    novelty: number;
+    fallbackFamily: string | null;
+  };
   saturationPenalty?: number;
   audienceConsequence?: string;
   evidenceNeed?: 'NONE' | 'CURRENT_FACTS' | 'EXTERNAL_VERIFICATION' | 'USER_EXPERIENCE';
@@ -130,6 +152,13 @@ export type TrendCandidate = {
   /** Optional semantic-critic hint. It is never a publishability gate. */
   shareabilityHint?: number;
   ideaGenerationMode?: 'SEMANTIC' | 'DETERMINISTIC_FALLBACK';
+  audienceIdeaNaturalness?: number;
+  creatorContentFit?: number;
+  candidateCoherence?: import('./candidateCoherenceService').CandidateCoherence;
+  coherencePenalty?: number;
+  coherenceRejectionReason?: string | null;
+  /** Empty means the idea is intentionally broad rather than audience-labeled. */
+  resolvedAudience?: string[];
   selectionMode?: 'normal' | 'zero_result_fallback';
   discoveryIntent?: DiscoveryIntent;
   evidenceRole?: EvidenceRole;
@@ -543,6 +572,8 @@ export type BatchPostPlan = {
   matchedPillar?: string;
   suggestedAngle?: string;
   audienceRelevance?: string;
+  /** Idea-level audience resolution. Empty means no explicit audience targeting. */
+  resolvedAudience?: string[];
   expressionMode?: ExpressionMode;
   /** Idea-aware editorial form. This is authoritative over legacy rotation labels. */
   editorialDecision?: EditorialDecision;

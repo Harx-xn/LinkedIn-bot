@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseTechnicalReviewOutput } from './contentService';
-import { buildAcceptanceDecision, shouldRunTechnicalReview } from './ghostwriterGenerationService';
+import { buildAcceptanceDecision, mergeQualityIssues, shouldRunTechnicalReview } from './ghostwriterGenerationService';
 import { evaluateSemanticProgression } from './semanticProgression';
 import { detectDeterministicTechnicalIssues, detectUnsupportedFirstPersonClaims } from './ghostwriterValidationService';
 
@@ -125,6 +125,63 @@ The boundary still needs an expiry policy, because storing every key forever cre
     assert.ok(codes.includes('REDUNDANT_EXPLANATION'));
     assert.ok(codes.includes('WEAK_ARGUMENT_PROGRESSION'));
     assert.match(result.issues.find((issue) => issue.code === 'REDUNDANT_EXPLANATION')!.repairInstruction, /paraphrased support/i);
+  });
+
+  it('upgrades a reviewer density warning when the numeric threshold requires an error', () => {
+    const result = parseTechnicalReviewOutput(reviewJson({
+      informationDensity: 40,
+      issues: [{
+        code: 'LOW_INFORMATION_DENSITY', severity: 'warning', excerpt: 'Some framing.',
+        explanation: 'The draft could be denser.', repairInstruction: 'Add a concrete mechanism.',
+      }],
+    }), 'A longer excerpt from the reviewed post.');
+    const issue = result.issues.filter((item) => item.code === 'LOW_INFORMATION_DENSITY');
+    assert.equal(issue.length, 1);
+    assert.equal(issue[0].severity, 'error');
+    assert.equal(result.passed, false);
+  });
+
+  it('keeps reviewer errors stronger than a non-triggering numeric metric', () => {
+    const result = parseTechnicalReviewOutput(reviewJson({
+      informationDensity: 90,
+      issues: [{
+        code: 'LOW_INFORMATION_DENSITY', severity: 'error', excerpt: 'Repeated setup.',
+        explanation: 'The support adds no information.', repairInstruction: 'Replace setup with a mechanism.',
+      }],
+    }));
+    assert.equal(result.issues.find((item) => item.code === 'LOW_INFORMATION_DENSITY')?.severity, 'error');
+    assert.equal(result.passed, false);
+  });
+
+  it('keeps an error when issue sources also report the same code as a warning', () => {
+    const issues = mergeQualityIssues(
+      [{ code: 'CLAIM_DRIFT', severity: 'warning', evidence: ['deterministic wording signal'] }],
+      [{ code: 'CLAIM_DRIFT', severity: 'error', evidence: ['reviewer fidelity score'], instruction: 'Restore the selected claim.' }],
+    );
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].severity, 'error');
+    assert.deepEqual(issues[0].evidence, ['deterministic wording signal', 'reviewer fidelity score']);
+    assert.equal(issues[0].instruction, 'Restore the selected claim.');
+  });
+
+  it('normalizes redundancy consistently on either side of the configured threshold', () => {
+    const below = parseTechnicalReviewOutput(reviewJson({ redundancyRisk: 55 }));
+    const above = parseTechnicalReviewOutput(reviewJson({ redundancyRisk: 56 }));
+    assert.equal(below.issues.some((item) => item.code === 'REDUNDANT_EXPLANATION'), false);
+    assert.equal(above.issues.find((item) => item.code === 'REDUNDANT_EXPLANATION')?.severity, 'error');
+  });
+
+  it('treats material claim drift as an error while retaining minor warning-level deviation', () => {
+    const warning = {
+      code: 'CLAIM_DRIFT', severity: 'warning', excerpt: 'A broader phrase.',
+      explanation: 'Wording is slightly broader.', repairInstruction: 'Narrow the wording.',
+    };
+    const minor = parseTechnicalReviewOutput(reviewJson({ claimFidelity: 65, issues: [warning] }));
+    const material = parseTechnicalReviewOutput(reviewJson({ claimFidelity: 64, issues: [warning] }));
+    assert.equal(minor.issues.find((item) => item.code === 'CLAIM_DRIFT')?.severity, 'warning');
+    assert.equal(minor.passed, true);
+    assert.equal(material.issues.find((item) => item.code === 'CLAIM_DRIFT')?.severity, 'error');
+    assert.equal(material.passed, false);
   });
 
   it('keeps safety and unsupported-authority checks unchanged', () => {

@@ -140,32 +140,32 @@ model User {
   googleClientId       String?
   googleClientSecret   String?
 
-  botConfigs                 BotConfig?
-  linkedinAccounts           LinkedInAccount[]
-  posts                      Post[]
-  schedules                  Schedule[]
-  sheetConfigs               SheetConfig[]
-  subscriptions              Subscription[]
-  BotGenerationJob           BotGenerationJob[]
-  promotionRedemptions       PromotionRedemption[]
-  inviteRedemptions          InviteRedemption[]
-  notifications              Notification[]
-  createdInviteLinks         InviteLink[]                @relation("InviteCreatedBy")
-  imageGenerationUsages      ImageGenerationUsage[]
-  manualAiRewriteUsages      ManualAiRewriteUsage[]
-  carouselAiGenerationUsages CarouselAiGenerationUsage[]
-  carouselProjects           CarouselProject[]
-  nicheSearchPlans           UserNicheSearchPlan[]
-  topicHistory               GeneratedTopicHistory[]
-  topicInventory             TopicInventory[]
-  voiceProfile               UserVoiceProfile?
-  personalExperiences        PersonalExperience[]
-  contentIntelligence        UserContentIntelligence?
-  postContentFingerprints    PostContentFingerprint[]
-  authProviderAccounts       AuthProviderAccount[]
-  supportRequests            SupportRequest[]
-  linkedinAnalyticsImports   LinkedInAnalyticsImport[]
-  linkedinProfileSnapshots   LinkedInProfileSnapshot[]
+  botConfigs                  BotConfig?
+  linkedinAccounts            LinkedInAccount[]
+  posts                       Post[]
+  schedules                   Schedule[]
+  sheetConfigs                SheetConfig[]
+  subscriptions               Subscription[]
+  BotGenerationJob            BotGenerationJob[]
+  promotionRedemptions        PromotionRedemption[]
+  inviteRedemptions           InviteRedemption[]
+  notifications               Notification[]
+  createdInviteLinks          InviteLink[]                @relation("InviteCreatedBy")
+  imageGenerationUsages       ImageGenerationUsage[]
+  manualAiRewriteUsages       ManualAiRewriteUsage[]
+  carouselAiGenerationUsages  CarouselAiGenerationUsage[]
+  carouselProjects            CarouselProject[]
+  nicheSearchPlans            UserNicheSearchPlan[]
+  topicHistory                GeneratedTopicHistory[]
+  topicInventory              TopicInventory[]
+  voiceProfile                UserVoiceProfile?
+  personalExperiences         PersonalExperience[]
+  contentIntelligence         UserContentIntelligence?
+  postContentFingerprints     PostContentFingerprint[]
+  authProviderAccounts        AuthProviderAccount[]
+  supportRequests             SupportRequest[]
+  linkedinAnalyticsImports    LinkedInAnalyticsImport[]
+  linkedinProfileSnapshots    LinkedInProfileSnapshot[]
   subscriptionEmailDeliveries SubscriptionEmailDelivery[]
 
   @@index([regionId])
@@ -619,22 +619,22 @@ model PostContentFingerprint {
   postId String @unique
   userId String
 
-  primaryTopic String
-  subtopic     String?
-  pillar       String?
-  territory    String?
-  coreClaim    String
-  mechanism    String?
-  perspective  String?
+  primaryTopic    String
+  subtopic        String?
+  pillar          String?
+  territory       String?
+  coreClaim       String
+  mechanism       String?
+  perspective     String?
   argumentPattern String?
-  structure    String?
-  hookType     String?
-  evidenceType String?
-  exampleType  String?
-  ctaType      String?
-  authorityMode String?
-  contentIntent String?
-  keywords     Json?
+  structure       String?
+  hookType        String?
+  evidenceType    String?
+  exampleType     String?
+  ctaType         String?
+  authorityMode   String?
+  contentIntent   String?
+  keywords        Json?
 
   createdAt DateTime @default(now())
 
@@ -646,22 +646,31 @@ model PostContentFingerprint {
 }
 
 model BotGenerationJob {
-  id             String    @id @default(cuid())
-  userId         String?
-  regionId       String?
-  daysWindow     Int
-  status         String    @default("RUNNING")
-  createdAt      DateTime  @default(now())
-  completedAt    DateTime?
-  error          String?
-  completedSlots Int       @default(0)
-  totalSlots     Int       @default(0)
+  id                       String    @id @default(cuid())
+  userId                   String?
+  regionId                 String?
+  daysWindow               Int
+  status                   String    @default("RUNNING")
+  createdAt                DateTime  @default(now())
+  completedAt              DateTime?
+  heartbeatAt              DateTime?
+  error                    String?
+  completedSlots           Int       @default(0)
+  totalSlots               Int       @default(0)
+  // Bounded, privacy-filtered diagnostic snapshot. This is observability only:
+  // generation never depends on the trace write succeeding.
+  batchTraceId             String?   @unique
+  generationTrace          Json?
+  generationTraceVersion   Int?
+  generationTraceExpiresAt DateTime?
 
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
   region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
   @@index([regionId, createdAt])
+  @@index([status, heartbeatAt])
+  @@index([generationTraceExpiresAt])
 }
 
 model SheetConfig {
@@ -725,17 +734,17 @@ model Plan {
 }
 
 model PlanProviderMapping {
-  id                String   @id @default(cuid())
-  planId            String
-  provider          String
-  environment       String   @default("LIVE")
-  providerPlanId    String?
+  id                 String   @id @default(cuid())
+  planId             String
+  provider           String
+  environment        String   @default("LIVE")
+  providerPlanId     String?
   providerPaidPlanId String?
-  providerProductId String?
-  providerPriceId   String?
-  metadata          Json?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  providerProductId  String?
+  providerPriceId    String?
+  metadata           Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
 
@@ -788,9 +797,9 @@ model Subscription {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  region               Region?               @relation(fields: [regionId], references: [id], onDelete: SetNull)
-  plan                 Plan                  @relation(fields: [planId], references: [id], onDelete: Restrict)
+  user                 User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  region               Region?                     @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  plan                 Plan                        @relation(fields: [planId], references: [id], onDelete: Restrict)
   promotionRedemptions PromotionRedemption[]
   billingTransactions  BillingTransaction[]
   emailDeliveries      SubscriptionEmailDelivery[]
@@ -803,17 +812,17 @@ model Subscription {
 }
 
 model SubscriptionEmailDelivery {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   subscriptionId String
   userId         String
   eventType      String
-  status         String   @default("PENDING") // PENDING | SENT | FAILED
+  status         String    @default("PENDING") // PENDING | SENT | FAILED
   messageId      String?
   sentAt         DateTime?
   failedAt       DateTime?
   errorMessage   String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)

@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import type { BatchPostPlan, GeneratedPostContent, PostDepthPlan } from './generationTypes';
-import { classifyPostDepth, POST_DEPTH_TARGETS, resolvePostDepthMetadata, withDerivedPostDepth } from './postDepth';
+import { classifyPostDepth, classifyPostDepthWithTrace, POST_DEPTH_TARGETS, resolvePostDepthMetadata, withDerivedPostDepth } from './postDepth';
 import { evaluateGeneratedPostLength } from './generatedPostLength';
 import { filterBlockingIssues, runDeterministicValidation } from './ghostwriterValidationService';
 import { generateSlotPost, generateSlotPostUntilSuccess } from './ghostwriterGenerationService';
@@ -88,6 +89,125 @@ describe('batch post depth classification', () => {
     assert.equal(evaluateGeneratedPostLength('x'.repeat(2200), POST_DEPTH_TARGETS.DEEP), 'PREFERRED');
     assert.equal(evaluateGeneratedPostLength('x'.repeat(1200), POST_DEPTH_TARGETS.COMPACT), 'ACCEPTABLE');
     assert.equal(evaluateGeneratedPostLength('x'.repeat(3001), POST_DEPTH_TARGETS.COMPACT), 'TOO_LONG');
+  });
+
+  it('does not promote three paraphrased fields to DEEP', () => {
+    const result = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      centralClaim: 'A local optimization can move the bottleneck.',
+      underlyingCauseOrMechanism: 'The bottleneck moves to another step.',
+      meaningfulConsequence: 'Another step becomes the bottleneck.',
+    }));
+    assert.equal(result.depthClass, 'COMPACT');
+    assert.ok(result.discountedRedundantSignals.length >= 2);
+  });
+
+  it('keeps one sharp claim COMPACT', () => {
+    const result = classifyPostDepthWithTrace(plan());
+    assert.equal(result.depthClass, 'COMPACT');
+    assert.deepEqual(result.independentSubstanceUnits.map((unit) => unit.type), ['CORE_INSIGHT']);
+  });
+
+  it('makes a distinct mechanism and consequence STANDARD', () => {
+    const result = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      underlyingCauseOrMechanism: 'A separate state transition preserves the authorization timestamp.',
+      meaningfulConsequence: 'Operators can choose whether to resume, cancel, or investigate after a timeout.',
+    }));
+    assert.equal(result.depthClass, 'STANDARD');
+    assert.equal(result.signalsContributing.mechanismPresent, true);
+    assert.equal(result.signalsContributing.consequencePresent, true);
+  });
+
+  it('counts a genuine trade-off as independent substance without forcing DEEP', () => {
+    const withoutTradeoff = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      underlyingCauseOrMechanism: 'A separate state transition preserves the authorization timestamp.',
+      meaningfulConsequence: 'Operators can choose whether to resume, cancel, or investigate after a timeout.',
+    }));
+    const withTradeoff = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      underlyingCauseOrMechanism: 'A separate state transition preserves the authorization timestamp.',
+      meaningfulConsequence: 'Operators can choose whether to resume, cancel, or investigate after a timeout.',
+      usefulTensionOrQualification: 'The extra checkpoint is slower, but it prevents an ambiguous replay decision.',
+    }));
+    assert.ok(withTradeoff.depthScore > withoutTradeoff.depthScore);
+    assert.equal(withTradeoff.signalsContributing.tradeoffPresent, true);
+    assert.equal(withTradeoff.depthClass, 'STANDARD');
+  });
+
+  it('does not count a source title alone as evidence', () => {
+    const result = classifyPostDepthWithTrace(plan(), {
+      topic: 'Benchmark report title',
+      link: 'https://example.test/report',
+      evidenceRole: 'primary',
+      supportingSources: [{ url: 'https://example.test/report', source: 'Report title', evidenceRole: 'primary' }],
+    });
+    assert.equal(result.signalsContributing.evidencePresent, false);
+    assert.equal(result.depthClass, 'COMPACT');
+  });
+
+  it('lets a genuine multi-step process increase depth', () => {
+    const depthPlan: PostDepthPlan = {
+      ...BASE_DEPTH,
+      strongestObservations: [
+        'First, record the authorization decision before work enters the queue.',
+        'Next, execute the approved action with an idempotency key tied to that decision.',
+        'Then, reconcile the worker response against the separately stored execution state.',
+      ],
+    };
+    const result = classifyPostDepthWithTrace(withDerivedPostDepth({
+      ...plan(depthPlan), angle: 'practical_tutorial', layout: 'technical_walkthrough', depthPlan,
+    }));
+    assert.equal(result.depthClass, 'DEEP');
+    assert.equal(result.signalsContributing.walkthroughPresent, true);
+  });
+
+  it('does not reward artificial listification', () => {
+    const depthPlan: PostDepthPlan = {
+      ...BASE_DEPTH,
+      centralClaim: 'Record the approval state before execution begins.',
+      strongestObservations: [
+        'First, record the approval state before execution begins.',
+        'Next, record the approval state before starting execution.',
+        'Then, save the approval state prior to execution.',
+        'Finally, store approval before execution starts.',
+      ],
+    };
+    const result = classifyPostDepthWithTrace(withDerivedPostDepth({
+      ...plan(depthPlan), angle: 'practical_tutorial', layout: 'technical_walkthrough', depthPlan,
+    }));
+    assert.notEqual(result.depthClass, 'DEEP');
+    assert.equal(result.signalsContributing.walkthroughPresent, false);
+    assert.ok(result.discountedRedundantSignals.length >= 3);
+  });
+
+  it('preserves compact drafting without universal long-form pressure', () => {
+    const compact = withDerivedPostDepth(plan());
+    assert.equal(compact.depthClass, 'COMPACT');
+    assert.deepEqual(compact.targetLengthRange, POST_DEPTH_TARGETS.COMPACT);
+    assert.ok(POST_DEPTH_TARGETS.COMPACT.min < POST_DEPTH_TARGETS.DEEP.min);
+  });
+
+  it('classifies unrelated niches by substance rather than domain vocabulary', () => {
+    const operations = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      underlyingCauseOrMechanism: 'A shared queue hides which team owns the retry decision.',
+      meaningfulConsequence: 'Operators cannot distinguish safe recovery from duplicate execution.',
+    }));
+    const education = classifyPostDepthWithTrace(plan({
+      ...BASE_DEPTH,
+      centralClaim: 'Feedback timing changes which misconception a learner can correct.',
+      underlyingCauseOrMechanism: 'Delayed review separates the correction from the decision that produced the error.',
+      meaningfulConsequence: 'Learners repeat the wrong method before they can identify the faulty step.',
+    }));
+    assert.equal(operations.depthClass, 'STANDARD');
+    assert.equal(education.depthClass, 'STANDARD');
+  });
+
+  it('adds no model client or model call to depth classification', () => {
+    const source = readFileSync(require.resolve('./postDepth'), 'utf8');
+    assert.doesNotMatch(source, /openai|gemini|generateWithFallback|generateContent|chat\.completions/i);
   });
 });
 
@@ -201,6 +321,76 @@ describe('depth-aware generation and repair', () => {
     );
     assert.equal(result.ok, true);
     assert.equal(repairCalls, 0);
+  });
+
+  it('repairs a warning-only reviewer failure instead of normally accepting it', async () => {
+    let reviewCalls = 0;
+    let repairCalls = 0;
+    let receivedRepairCodes: string[] = [];
+    const service = {
+      generatePlannedPost: async () => post(STRONG_COMPACT_BODY),
+      reviewTechnicalClaims: async () => {
+        reviewCalls += 1;
+        return reviewCalls === 1
+          ? {
+              available: true, passed: false, confidence: 1,
+              informationDensity: 75, progressionQuality: 75, redundancyRisk: 20,
+              genericDiscourseRisk: 20, claimFidelity: 85,
+              issues: [{
+                code: 'other' as const, severity: 'warning' as const, excerpt: 'A qualification is missing.',
+                explanation: 'The conclusion needs a qualification.', repairInstruction: 'Add the qualification.',
+              }],
+            }
+          : {
+              available: true, passed: true, confidence: 1,
+              informationDensity: 85, progressionQuality: 85, redundancyRisk: 10,
+              genericDiscourseRisk: 10, claimFidelity: 95, issues: [],
+            };
+      },
+      repairPost: async (_generated: GeneratedPostContent, issues: Array<{ code: string }>) => {
+        repairCalls += 1;
+        receivedRepairCodes = issues.map((issue) => issue.code);
+        return post(STRONG_COMPACT_BODY);
+      },
+    } as unknown as ContentService;
+
+    const result = await generateSlotPost(service, plan(), null, AUTHOR, { niches: ['Operations'] }, []);
+    assert.equal(result.ok, true);
+    assert.equal(repairCalls, 1);
+    assert.deepEqual(receivedRepairCodes, ['other']);
+    assert.equal(result.ok && result.acceptance.accepted, true);
+    assert.equal(result.ok && result.fallbackProvenance, undefined);
+  });
+
+  it('returns a safe best-usable fallback after bounded warning-only review exhaustion', async () => {
+    let generationCalls = 0;
+    let repairCalls = 0;
+    const service = {
+      generatePlannedPost: async () => {
+        generationCalls += 1;
+        return post(STRONG_COMPACT_BODY);
+      },
+      reviewTechnicalClaims: async () => ({
+        available: true, passed: false, confidence: 1,
+        informationDensity: 75, progressionQuality: 75, redundancyRisk: 20,
+        genericDiscourseRisk: 20, claimFidelity: 85,
+        issues: [{
+          code: 'other' as const, severity: 'warning' as const, excerpt: 'A qualification is missing.',
+          explanation: 'The conclusion needs a qualification.', repairInstruction: 'Add the qualification.',
+        }],
+      }),
+      repairPost: async () => {
+        repairCalls += 1;
+        return post(STRONG_COMPACT_BODY);
+      },
+    } as unknown as ContentService;
+
+    const result = await generateSlotPost(service, plan(), null, AUTHOR, { niches: ['Operations'] }, []);
+    assert.equal(result.ok, true);
+    assert.equal(generationCalls, 3);
+    assert.equal(repairCalls, 6);
+    assert.equal(result.ok && result.acceptance.accepted, false);
+    assert.deepEqual(result.ok && result.fallbackProvenance, ['BEST_USABLE_FALLBACK']);
   });
 
   it('keeps legacy plans usable while deriving depth metadata internally', async () => {
