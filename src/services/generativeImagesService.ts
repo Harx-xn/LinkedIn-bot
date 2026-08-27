@@ -1,5 +1,6 @@
 import { GoogleGenAI, Modality } from '@google/genai';
 import { randomUUID } from 'node:crypto';
+import { extractGeminiUsage, trackAiProviderCall, withAiCostContext, type AiCostContext } from './costIntelligence/aiCostTrackingService';
 
 const DEFAULT_GEMINI_IMAGE_MODEL =
   process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
@@ -20,6 +21,8 @@ export type ImageTextMode = 'auto' | 'none' | 'headline' | 'minimal' | 'structur
 
 export interface GenerativeImagesServiceKeys {
   geminiApiKeys: string[];
+  userId?: string | null;
+  regionId?: string | null;
 }
 
 export interface GenerateLinkedInPostImageInput {
@@ -484,9 +487,16 @@ QUALITY REQUIREMENTS AND AVOID
 export class GenerativeImagesService {
   private readonly geminiKeys: string[];
   private currentKeyIndex = 0;
+  private trackingIdentity: Pick<AiCostContext, 'userId' | 'regionId'>;
 
   constructor(keys: GenerativeImagesServiceKeys) {
     this.geminiKeys = (keys.geminiApiKeys ?? []).map((k) => k.trim()).filter(Boolean);
+    this.trackingIdentity = { userId: keys.userId, regionId: keys.regionId };
+  }
+
+  setTrackingIdentity(identity: Pick<AiCostContext, 'userId' | 'regionId'>): this {
+    this.trackingIdentity = identity;
+    return this;
   }
 
   private getGeminiClient(keyIndex = this.currentKeyIndex): GoogleGenAI {
@@ -512,20 +522,24 @@ export class GenerativeImagesService {
     mimeType: string,
     postText: string,
   ): Promise<ImageTextQualityResult> {
-    const response = await ai.models.generateContent({
-      model: DEFAULT_GEMINI_IMAGE_QA_MODEL,
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: buildImageTextQualityPrompt(postText) },
-          { inlineData: { data: buffer.toString('base64'), mimeType } },
-        ],
-      }],
-      config: {
-        responseModalities: [Modality.TEXT],
-        responseMimeType: 'application/json',
-      },
-    });
+    const response = await withAiCostContext({ agent: 'REVIEWER', operation: 'IMAGE_QUALITY_REVIEW' }, () => trackAiProviderCall({
+      provider: 'GEMINI', model: DEFAULT_GEMINI_IMAGE_QA_MODEL, identity: this.trackingIdentity,
+      invoke: () => ai.models.generateContent({
+        model: DEFAULT_GEMINI_IMAGE_QA_MODEL,
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: buildImageTextQualityPrompt(postText) },
+            { inlineData: { data: buffer.toString('base64'), mimeType } },
+          ],
+        }],
+        config: {
+          responseModalities: [Modality.TEXT],
+          responseMimeType: 'application/json',
+        },
+      }),
+      extractUsage: extractGeminiUsage,
+    }));
     return parseImageTextQualityResult(response.text ?? '');
   }
 
@@ -552,16 +566,21 @@ export class GenerativeImagesService {
       const prompt = buildLinkedInImagePrompt(input);
       imageLog(requestId, 'provider', 'request_started', { model, aspectRatio, keyConfigured: true, keyIndex: usedKeyIndex, promptChars: prompt.length, promptPreview: prompt.slice(0, 160) });
 
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseModalities: [Modality.IMAGE],
-          imageConfig: {
-            aspectRatio,
+      const response = await withAiCostContext({ agent: 'IMAGE_GENERATOR', operation: 'IMAGE_GENERATE' }, () => trackAiProviderCall({
+        provider: 'GEMINI', model, identity: this.trackingIdentity,
+        metadata: { pricingUnitHint: 'IMAGE_OR_TOKENS' },
+        invoke: () => ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            responseModalities: [Modality.IMAGE],
+            imageConfig: {
+              aspectRatio,
+            },
           },
-        },
-      });
+        }),
+        extractUsage: extractGeminiUsage,
+      }));
 
       const parts = response.candidates?.[0]?.content?.parts ?? [];
       const imagePart = parts.find((part) => part.inlineData?.data);

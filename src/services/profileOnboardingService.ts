@@ -4,6 +4,7 @@ import { hasDashboardAccess } from './billing/billingAccessService';
 import { buildEffectiveBotStrategy, syncPrimaryPillarsToNiches } from './botStrategyService';
 import { checkSafeForWorkText } from '../utils/contentSafety';
 import OpenAI from 'openai';
+import { extractOpenAiUsage, trackAiProviderCall, withAiCostContext, createGenerationId } from './costIntelligence/aiCostTrackingService';
 import { decryptSecret } from './secretCrypto';
 import { AuthValidationError, isValidUsername, validateRegistrationContext } from './auth/authHelpers';
 import { redeemInvite } from './inviteService';
@@ -203,15 +204,19 @@ export async function enhanceProfileDescription(userId: string, rawDescription: 
   const apiKey = decryptSecret(user.region?.openaiApiKey) || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('AI provider is not configured');
   const client = new OpenAI({ apiKey });
-  const response = await client.chat.completions.create({
-    model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4.1-mini',
+  const model = process.env.OPENAI_CONTENT_MODEL || 'gpt-4.1-mini';
+  const response = await withAiCostContext({ userId, feature: 'CONTENT_INTELLIGENCE', operation: 'PROFILE_ENHANCE', agent: 'STRATEGY_ANALYZER', generationId: createGenerationId() }, () => trackAiProviderCall({
+    provider: 'OPENAI', model, identity: { userId },
+    invoke: () => client.chat.completions.create({
+    model,
     temperature: 0.35,
     max_completion_tokens: 180,
     messages: [
       { role: 'system', content: 'Improve a short professional profile for a LinkedIn GhostWriter. Preserve the facts and first-person perspective. Make it clear, specific, natural, and concise. Do not invent credentials, results, clients, numbers, or claims. Return only the improved description, with no labels or quotation marks.' },
       { role: 'user', content: description },
     ],
-  });
+    }), extractUsage: extractOpenAiUsage,
+  }));
   const enhanced = response.choices[0]?.message?.content?.trim() || '';
   if (enhanced.length < 20 || enhanced.length > 600 || !checkSafeForWorkText(enhanced).safe) {
     throw new Error('AI returned an invalid profile description');

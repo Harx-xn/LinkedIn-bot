@@ -15,6 +15,7 @@ import botConfigRouter from './routes/botConfig';
 import uploadRouter from './routes/upload';
 import botActionRouter from './routes/botAction';
 import adminRoutes from './routes/admin';
+import costIntelligenceRoutes from './routes/costIntelligence';
 import regionRoutes from './routes/region';
 import subAdminRoutes from './routes/subadmin';
 import analyticsRoutes from './routes/analytics';
@@ -93,6 +94,7 @@ app.use('/api/bot', botConfigRouter);
 app.use('/api/bot', botActionRouter); // Used for /bot/generate
 app.use('/api/upload', uploadRouter);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/cost-intelligence', costIntelligenceRoutes);
 app.use('/api/regional-admin', regionRoutes);
 app.use('/api/sub-admin', subAdminRoutes);
 app.use('/api/analytics/linkedin', linkedinContentAnalyticsRoutes);
@@ -108,6 +110,7 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/api/carousels', carouselsRouter);
 // Backwards-compatible aliases (pre-/api mounts)
 app.use('/admin', adminRoutes);
+app.use('/admin/cost-intelligence', costIntelligenceRoutes);
 app.use('/regional-admin', regionRoutes);
 
 // Serve static files (uploaded images)

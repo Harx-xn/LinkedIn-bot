@@ -60,6 +60,13 @@ import {
   logFallbackProvenance,
   type FallbackProvenance,
 } from './fallbackProvenanceService';
+import {
+  extractGeminiUsage,
+  extractOpenAiUsage,
+  trackAiProviderCall,
+  withAiCostContext,
+  type AiCostContext,
+} from './costIntelligence/aiCostTrackingService';
 
 dotenv.config();
 
@@ -174,8 +181,10 @@ export class ContentService {
   private geminiKeys: string[] = [];
   private currentKeyIndex = 0;
   private openai: OpenAI | null = null;
+  private trackingIdentity: AiCostContext;
 
-  constructor(keys?: { openaiApiKey?: string | null; geminiApiKeys?: string[] | null }) {
+  constructor(keys?: { openaiApiKey?: string | null; geminiApiKeys?: string[] | null; userId?: string | null; regionId?: string | null; trackingContext?: AiCostContext }) {
+    this.trackingIdentity = { userId: keys?.userId, regionId: keys?.regionId, ...(keys?.trackingContext ?? {}) };
     if (keys?.geminiApiKeys && keys.geminiApiKeys.length) {
       this.geminiKeys = keys.geminiApiKeys.filter(Boolean) as string[];
     } else {
@@ -190,6 +199,17 @@ export class ContentService {
 
     const openaiKey = keys?.openaiApiKey || process.env.OPENAI_API_KEY;
     if (openaiKey) this.openai = new OpenAI({ apiKey: openaiKey });
+  }
+
+  private async createTrackedOpenAiCompletion(request: any): Promise<any> {
+    if (!this.openai) throw new Error('OPENAI_API_KEY not found');
+    return trackAiProviderCall({
+      provider: 'OPENAI',
+      model: String(request.model),
+      identity: this.trackingIdentity,
+      invoke: () => this.openai!.chat.completions.create(request),
+      extractUsage: extractOpenAiUsage,
+    });
   }
 
   private getGeminiModel(systemInstruction = GHOSTWRITER_SYSTEM) {
@@ -274,7 +294,7 @@ export class ContentService {
         issues: lastFailure.issues,
         invalidOutput: raw,
       });
-      const repairedRaw = await this.generateWithFallback(repairPrompt, provider, OPENAI_REPAIR_TEMPERATURE);
+      const repairedRaw = await withAiCostContext({ agent: 'REPAIR', operation: 'JSON_REPAIR' }, () => this.generateWithFallback(repairPrompt, provider, OPENAI_REPAIR_TEMPERATURE));
       result = parseGeneratedJsonDetailed(repairedRaw);
       if (result.ok) {
         return { content: this.toGeneratedPostContent(result.data), jsonRepairAttempts: jsonRepairAttempts + 1 };
@@ -351,7 +371,7 @@ Output JSON array only:
 ]`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK);
+      const raw = await withAiCostContext({ agent: 'PLANNER', operation: 'BATCH_PLAN' }, () => this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK));
       const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
       const json = JSON.parse(cleaned);
       const validated = batchPlanSchema.safeParse(json);
@@ -477,7 +497,7 @@ Output one JSON object only:
 {"claims":[{"index":0,"centralClaim":"preserved or faithfully corrected claim","correctionReason":"null or concise reason","depthPlan":{"centralClaim":"same claim","strongestObservations":["optional; maximum three"],"underlyingCauseOrMechanism":"optional string","meaningfulConsequence":"optional string"}}]}`;
 
     try {
-      const raw = await this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK);
+      const raw = await withAiCostContext({ agent: 'PLANNER', operation: 'BATCH_PLAN' }, () => this.generateWithFallback(prompt, provider, OPENAI_PLAN_TEMPERATURE, PLAN_MAX_OUTPUT_TOKENS, FALLBACK_PROVENANCE.PLANNER_FALLBACK));
       const parsed = JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim());
       const items = Array.isArray(parsed)
         ? parsed
@@ -541,7 +561,7 @@ Output one JSON object only:
   ): Promise<GeneratedPostContent> {
     const prompt = buildPlannedPostPrompt(plan, author, sourceLink, trend, recentPosts);
 
-    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'BATCH_WRITE' }, () => this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     const parsed = await this.parseWithRepair(raw, provider, prompt);
     return {
       ...parsed,
@@ -559,7 +579,7 @@ Output one JSON object only:
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<GeneratedPostContent> {
     const prompt = buildExpandSpecificityPrompt(post, specificity, author, plan);
-    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'REPAIR', operation: 'BATCH_REPAIR' }, () => this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
@@ -640,7 +660,7 @@ ${LANGUAGE_RULES}
 
 Output MUST be valid JSON with headline, subheadline, bulletPoints, body, and hashtags.`;
 
-    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_GENERATE' }, () => this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     const parsed = await this.parseWithRepair(raw, provider, prompt);
     return {
       ...parsed,
@@ -712,7 +732,7 @@ ${LANGUAGE_RULES}
 
 Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'BATCH_WRITE' }, () => this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
@@ -724,7 +744,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     plan?: BatchPostPlan,
   ): Promise<GeneratedPostContent> {
     const prompt = buildRepairPrompt(post, reasons, author, plan);
-    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'REPAIR', operation: 'BATCH_REPAIR' }, () => this.generateStructuredPost(prompt, provider, OPENAI_REPAIR_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
@@ -735,7 +755,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<TechnicalReviewResult> {
     const prompt = buildTechnicalReviewPrompt(post, author, plan);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, REVIEW_MAX_OUTPUT_TOKENS);
+    const raw = await withAiCostContext({ agent: 'REVIEWER', operation: 'BATCH_REVIEW' }, () => this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, REVIEW_MAX_OUTPUT_TOKENS));
     const review = parseTechnicalReviewOutput(raw, post.body);
     if (!review.available) {
       console.warn('[ghostwriter] technical/quality review unavailable; using deterministic validation');
@@ -749,7 +769,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<ImageContent | null> {
     const prompt = buildImageCopyPrompt(approvedBody, plan);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS);
+    const raw = await withAiCostContext({ agent: 'IMAGE_GENERATOR', operation: 'IMAGE_COPY_GENERATE' }, () => this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS));
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
       const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
@@ -767,7 +787,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<ImageContent | null> {
     const prompt = buildImageRepairPrompt(approvedBody, image, issues);
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS);
+    const raw = await withAiCostContext({ agent: 'REPAIR', operation: 'IMAGE_COPY_REPAIR' }, () => this.generateWithFallback(prompt, provider, OPENAI_REPAIR_TEMPERATURE, IMAGE_COPY_MAX_OUTPUT_TOKENS));
     const cleaned = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
     try {
       const parsed = imageContentSchema.safeParse(JSON.parse(cleaned));
@@ -847,7 +867,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
   private async generateOpenAiGenericJson(prompt: string, maxOutputTokens: number): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
-    const response = await this.openai.chat.completions.create({
+    const response = await this.createTrackedOpenAiCompletion({
       model: OPENAI_CONTENT_MODEL,
       temperature: OPENAI_REPAIR_TEMPERATURE,
       max_completion_tokens: maxOutputTokens,
@@ -889,7 +909,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     prompt: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<GeneratedPostContent> {
-    const raw = await this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_GENERATE' }, () => this.generateStructuredPost(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
@@ -901,7 +921,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
     prompt: string,
     provider: 'GEMINI' | 'OPENAI' = 'OPENAI',
   ): Promise<GeneratedPostContent> {
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_REWRITE' }, () => this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
@@ -940,13 +960,13 @@ ${LANGUAGE_RULES}
 
 Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
-    const raw = await this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE);
+    const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_REWRITE' }, () => this.generateWithFallback(prompt, provider, OPENAI_WRITE_TEMPERATURE));
     return this.parseWithRepair(raw, provider, prompt);
   }
 
   private async generateOpenAiManualStructuredPost(prompt: string, temperature: number): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
-    const response = await this.openai.chat.completions.create({
+    const response = await this.createTrackedOpenAiCompletion({
       model: OPENAI_CONTENT_MODEL,
       temperature,
       max_completion_tokens: POST_MAX_OUTPUT_TOKENS,
@@ -971,7 +991,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
   private async generateOpenAiManualPlanning(prompt: string): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
-    const response = await this.openai.chat.completions.create({
+    const response = await this.createTrackedOpenAiCompletion({
       model: OPENAI_CONTENT_MODEL,
       temperature: OPENAI_PLAN_TEMPERATURE,
       max_completion_tokens: PLAN_MAX_OUTPUT_TOKENS,
@@ -993,7 +1013,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
   private async generateOpenAiStructuredPost(prompt: string, temperature: number): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
-    const response = await this.openai.chat.completions.create({
+    const response = await this.createTrackedOpenAiCompletion({
       model: OPENAI_CONTENT_MODEL,
       temperature,
       max_completion_tokens: POST_MAX_OUTPUT_TOKENS,
@@ -1020,15 +1040,23 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
     try {
       const model = this.getGeminiModel();
-      const result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature,
-          responseMimeType: 'application/json',
-          ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      const response = await trackAiProviderCall({
+        provider: 'GEMINI',
+        model: GEMINI_CONTENT_MODEL,
+        identity: this.trackingIdentity,
+        invoke: async () => {
+          const result = await model.generateContent({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature,
+              responseMimeType: 'application/json',
+              ...(maxOutputTokens ? { maxOutputTokens } : {}),
+            },
+          });
+          return result.response;
         },
+        extractUsage: extractGeminiUsage,
       });
-      const response = await result.response;
       return response.text();
     } catch (error: any) {
       if (error?.status === 429) {
@@ -1047,7 +1075,7 @@ Output valid JSON with headline, subheadline, bulletPoints, body, hashtags.`;
 
   private async generateOpensAiPost(prompt: string, temperature: number, maxOutputTokens?: number): Promise<string> {
     if (!this.openai) throw new Error('OPENAI_API_KEY not found');
-    const response = await this.openai.chat.completions.create({
+    const response = await this.createTrackedOpenAiCompletion({
       model: OPENAI_CONTENT_MODEL,
       temperature,
       ...(maxOutputTokens ? { max_completion_tokens: maxOutputTokens } : {}),

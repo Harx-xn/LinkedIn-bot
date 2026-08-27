@@ -40,20 +40,25 @@ export async function getDecryptedGeminiKeysForUser(userId: string): Promise<str
 export async function getContentServiceForUser(userId: string): Promise<ContentService> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
+    select: { regionId: true, region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
   });
 
   return new ContentService({
     openaiApiKey: decryptSecret(user?.region?.openaiApiKey),
     geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
+    userId,
+    regionId: user?.regionId,
   });
 }
 
 export async function getGenerativeImagesServiceForUser(
   userId: string,
 ): Promise<GenerativeImagesService> {
-  const geminiApiKeys = await getDecryptedGeminiKeysForUser(userId);
-  return new GenerativeImagesService({ geminiApiKeys });
+  const [geminiApiKeys, user] = await Promise.all([
+    getDecryptedGeminiKeysForUser(userId),
+    prisma.user.findUnique({ where: { id: userId }, select: { regionId: true } }),
+  ]);
+  return new GenerativeImagesService({ geminiApiKeys }).setTrackingIdentity({ userId, regionId: user?.regionId });
 }
 
 export async function getBotVoice(userId: string): Promise<BotVoice> {

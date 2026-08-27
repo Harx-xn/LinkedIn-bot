@@ -50,6 +50,7 @@ import {
 } from "./botStrategyTrendService";
 import { consumeInventoryTopic, releaseInventoryTopic, availableInventoryByNiche, INVENTORY_LOW_WATERMARK, enqueueLowInventoryReplenishment } from './topicInventoryService';
 import { persistGeneratedPostWithMemory } from './generatedPostPersistenceService';
+import { createGenerationId } from './costIntelligence/aiCostTrackingService';
 import {
   BatchGenerationTraceRecorder,
   createBatchTraceId,
@@ -175,7 +176,7 @@ export class TrendingBotService {
   private async getContentService(userId: string): Promise<ContentService> {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
+      select: { regionId: true, region: { select: { openaiApiKey: true, geminiApiKeys: true } } },
     });
 
     const geminiApiKeys = decryptSecretArray(user?.region?.geminiApiKeys);
@@ -184,6 +185,9 @@ export class TrendingBotService {
     return new ContentService({
       openaiApiKey,
       geminiApiKeys,
+      userId,
+      regionId: user?.regionId,
+      trackingContext: { feature: 'BATCH_POST', operation: 'BATCH_WRITE', agent: 'WRITER', generationId: createGenerationId() },
     });
   }
 
@@ -424,6 +428,9 @@ export class TrendingBotService {
     const contentService = new ContentService({
       openaiApiKey: openaiKey,
       geminiApiKeys: decryptSecretArray(user?.region?.geminiApiKeys),
+      userId,
+      regionId: user?.regionId,
+      trackingContext: { feature: 'BATCH_POST', operation: 'BATCH_WRITE', agent: 'WRITER', generationId: jobId ? `gen_${jobId}` : createGenerationId(), batchJobId: jobId },
     });
 
     const botConfig: GhostwriterBotConfig = {

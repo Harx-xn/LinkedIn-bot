@@ -9,6 +9,7 @@ import type {
   ManualPlanningResult,
   ManualProviderCallBudget,
 } from './manualPostTypes';
+import { withAiCostContext } from '../costIntelligence/aiCostTrackingService';
 
 export async function resolveManualContentService(
   userId: string,
@@ -42,10 +43,12 @@ async function fetchManualStageRaw(
   callKind: 'writer' | 'repair',
 ): Promise<string> {
   budget.recordProviderCall(callKind, prompt);
-  if (mode === 'rewrite') {
-    return contentService.fetchComposerRewriteRaw(prompt, provider);
-  }
-  return contentService.fetchComposerGenerationRaw(prompt, provider);
+  return withAiCostContext({
+    agent: callKind === 'writer' ? 'WRITER' : 'REPAIR',
+    operation: mode === 'rewrite' ? 'MANUAL_REWRITE' : callKind === 'writer' ? 'MANUAL_GENERATE' : 'MANUAL_REPAIR',
+  }, () => mode === 'rewrite'
+    ? contentService.fetchComposerRewriteRaw(prompt, provider)
+    : contentService.fetchComposerGenerationRaw(prompt, provider));
 }
 
 /** Stage 1: combined angle, hook, and content-plan call. */
@@ -56,7 +59,7 @@ export async function invokeManualPlanningPrompt(
   budget: ManualProviderCallBudget,
 ): Promise<ManualPlanningResult> {
   budget.recordProviderCall('planner', prompt);
-  const raw = await contentService.fetchComposerPlanningRaw(prompt, provider);
+  const raw = await withAiCostContext({ agent: 'PLANNER', operation: 'MANUAL_GENERATE' }, () => contentService.fetchComposerPlanningRaw(prompt, provider));
   return parseManualPlanningResult(raw);
 }
 
@@ -79,7 +82,7 @@ export async function invokeManualCriticPrompt(
   provider: ContentProvider,
   budget: ManualProviderCallBudget,
 ): Promise<string> {
-  return fetchManualStageRaw(contentService, prompt, provider, budget, 'rewrite', 'repair');
+  return withAiCostContext({ agent: 'REVIEWER', operation: 'MANUAL_REVIEW' }, () => fetchManualStageRaw(contentService, prompt, provider, budget, 'rewrite', 'repair'));
 }
 
 /** One deterministic-issue-driven repair returning the final post schema directly. */
@@ -99,7 +102,7 @@ export async function invokeManualGenerationPrompt(
   prompt: string,
   provider: ContentProvider,
 ): Promise<ManualGeneratedPost> {
-  const raw = await contentService.fetchComposerGenerationRaw(prompt, provider);
+  const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_GENERATE' }, () => contentService.fetchComposerGenerationRaw(prompt, provider));
   const parsed = await parseManualProviderOutputWithRepair(contentService, raw, provider, prompt);
   return parsed;
 }
@@ -110,7 +113,7 @@ export async function invokeManualRewritePrompt(
   prompt: string,
   provider: ContentProvider,
 ): Promise<ManualGeneratedPost> {
-  const raw = await contentService.fetchComposerRewriteRaw(prompt, provider);
+  const raw = await withAiCostContext({ agent: 'WRITER', operation: 'MANUAL_REWRITE' }, () => contentService.fetchComposerRewriteRaw(prompt, provider));
   const parsed = await parseManualProviderOutputWithRepair(contentService, raw, provider, prompt);
   return parsed;
 }

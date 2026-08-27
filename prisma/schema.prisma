@@ -27,6 +27,24 @@ enum BillingAccessStatus {
   INCOMPLETE
 }
 
+enum AiUsageStatus {
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+enum PlatformExpenseType {
+  FIXED
+  VARIABLE
+}
+
+enum PlatformExpenseCycle {
+  ONE_TIME
+  MONTHLY
+  YEARLY
+  USAGE
+}
+
 model Region {
   id       String  @id @default(cuid())
   name     String
@@ -74,6 +92,7 @@ model Region {
   carouselAiGenerationUsages CarouselAiGenerationUsage[]
   carouselProjects           CarouselProject[]
   supportRequests            SupportRequest[]
+  aiUsageEvents              AiUsageEvent[]
 }
 
 model PaymentConfig {
@@ -167,6 +186,8 @@ model User {
   linkedinAnalyticsImports    LinkedInAnalyticsImport[]
   linkedinProfileSnapshots    LinkedInProfileSnapshot[]
   subscriptionEmailDeliveries SubscriptionEmailDelivery[]
+  aiUsageEvents               AiUsageEvent[]
+  costProjectionScenarios     CostProjectionScenario[]    @relation("CostProjectionScenarioCreator")
 
   @@index([regionId])
   @@index([role])
@@ -1076,4 +1097,140 @@ model SupportRequest {
   @@index([userId, createdAt])
   @@index([regionId, status, createdAt])
   @@index([status])
+}
+
+// Versioned provider pricing. Existing rows are closed with effectiveTo instead
+// of being overwritten so historical usage always resolves against the price
+// that was in force when the provider call occurred.
+model AiModelPricing {
+  id String @id @default(cuid())
+
+  provider String
+  model    String
+
+  inputCostPerMillionTokens       Decimal  @db.Decimal(14, 8)
+  cachedInputCostPerMillionTokens Decimal? @db.Decimal(14, 8)
+  outputCostPerMillionTokens      Decimal  @db.Decimal(14, 8)
+
+  pricingUnit String @default("TOKENS")
+
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  active        Boolean   @default(true)
+  metadata      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([provider, model])
+  @@index([provider, model, effectiveFrom])
+  @@index([active])
+}
+
+// Financial telemetry only. Existing feature-usage tables remain the source of
+// truth for entitlement enforcement.
+model AiUsageEvent {
+  id String @id @default(cuid())
+
+  userId   String?
+  regionId String?
+
+  feature   String
+  operation String
+  agent     String?
+
+  provider String
+  model    String
+
+  generationId String?
+  postId       String?
+  batchJobId   String?
+
+  inputTokens       Int @default(0)
+  cachedInputTokens Int @default(0)
+  outputTokens      Int @default(0)
+  totalTokens       Int @default(0)
+
+  inputCostUsd       Decimal @default(0) @db.Decimal(14, 8)
+  cachedInputCostUsd Decimal @default(0) @db.Decimal(14, 8)
+  outputCostUsd      Decimal @default(0) @db.Decimal(14, 8)
+  totalCostUsd       Decimal @default(0) @db.Decimal(14, 8)
+
+  status        AiUsageStatus @default(SUCCESS)
+  durationMs    Int?
+  providerUsage Json?
+  metadata      Json?
+  createdAt     DateTime      @default(now())
+
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([regionId, createdAt])
+  @@index([feature, createdAt])
+  @@index([operation, createdAt])
+  @@index([agent, createdAt])
+  @@index([provider, model, createdAt])
+  @@index([generationId])
+  @@index([postId])
+  @@index([batchJobId])
+}
+
+model PlatformExpense {
+  id String @id @default(cuid())
+
+  name     String
+  provider String?
+  category String
+
+  type          PlatformExpenseType
+  billingCycle  PlatformExpenseCycle
+  amountUsd     Decimal              @db.Decimal(14, 4)
+  active        Boolean              @default(true)
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  notes         String?
+  metadata      Json?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@index([category])
+  @@index([active])
+  @@index([effectiveFrom, effectiveTo])
+}
+
+model CostAllocationRule {
+  id String @id @default(cuid())
+
+  expenseCategory  String
+  allocationMethod String
+  active           Boolean  @default(true)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([expenseCategory])
+  @@index([active])
+}
+
+model CostProjectionScenario {
+  id String @id @default(cuid())
+
+  name                     String
+  projectedUsers           Int
+  monthlyUserGrowthRate    Float
+  activeUserRate           Float
+  trialToPaidRate          Float
+  monthlyChurnRate         Float
+  averageAiUsageMultiplier Float    @default(1)
+  horizonMonths            Int      @default(12)
+  assumptions              Json?
+  createdByUserId          String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  createdBy User? @relation("CostProjectionScenarioCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([createdByUserId])
 }

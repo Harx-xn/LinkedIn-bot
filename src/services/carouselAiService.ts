@@ -4,6 +4,7 @@ import { ContentService } from './contentService';
 import { getContentServiceForUser } from './userContentContext';
 import { prisma } from '../prismaClient';
 import { getUserPlanEntitlements, PlanLimitError } from './planEntitlementService';
+import { createGenerationId, getAiCostContext, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 
 export const CAROUSEL_AI_DAILY_LIMIT = 8;
 export const MAX_AI_CAROUSEL_SLIDES_PER_GENERATION = 20;
@@ -51,6 +52,7 @@ function parseJson(raw: string) {
 }
 
 export async function generateCarouselWithAi(input: { topic: string; instructions?: string; userId?: string }) {
+  const generationId = getAiCostContext().generationId || createGenerationId();
   const service = input.userId ? await getContentServiceForUser(input.userId) : new ContentService();
   const provider = service.hasProvider('OPENAI') ? 'OPENAI' : service.hasProvider('GEMINI') ? 'GEMINI' : null;
   if (!provider) throw new Error('AI generation is not configured. Please try again later.');
@@ -68,7 +70,7 @@ Rules:\n
 - Labels should be concise running headers. Output JSON only.`;
 
   // Generic JSON mode is required here; the manual composer call enforces its own post schema.
-  const raw = await service.fetchComposerRewriteRaw(prompt, provider, 5000);
+  const raw = await withAiCostContext({ userId: input.userId, feature: 'CAROUSEL', operation: 'CAROUSEL_GENERATE', agent: 'WRITER', generationId }, () => service.fetchComposerRewriteRaw(prompt, provider, 5000));
   const parsed = generatedCarouselSchema.safeParse(parseJson(raw));
   if (!parsed.success || parsed.data.slides.length < 3 || parsed.data.slides.length > 20) {
     throw new Error('AI returned an incomplete carousel. Please generate again.');
@@ -77,6 +79,7 @@ Rules:\n
   const slideCount = parsed.data.slides.length;
 
   return {
+    generationId,
     title: parsed.data.title,
     slides: parsed.data.slides.map((item, index) => {
       const isFirst = index === 0;
@@ -93,6 +96,7 @@ Rules:\n
 }
 
 export async function generateCarouselFromPost(input: { postContent: string; slideCount: number; instructions?: string; userId: string }) {
+  const generationId = getAiCostContext().generationId || createGenerationId();
   if (!Number.isInteger(input.slideCount) || input.slideCount < MIN_POST_CAROUSEL_SLIDES || input.slideCount > MAX_AI_CAROUSEL_SLIDES_PER_GENERATION) {
     throw new Error(`Slide count must be between ${MIN_POST_CAROUSEL_SLIDES} and ${MAX_AI_CAROUSEL_SLIDES_PER_GENERATION}.`);
   }
@@ -115,12 +119,13 @@ Rules:
 - Preserve the source argument and facts. Never invent statistics, quotes, customers, or personal experiences.
 - Keep copy concise and mobile-readable. Avoid repetition, HTML, CSS, and headings such as "Slide 1".
 - The closing slide must contain a useful CTA.`;
-  const raw = await service.fetchComposerRewriteRaw(prompt, provider, 7000);
+  const raw = await withAiCostContext({ userId: input.userId, feature: 'CAROUSEL', operation: 'CAROUSEL_GENERATE', agent: 'WRITER', generationId }, () => service.fetchComposerRewriteRaw(prompt, provider, 7000));
   const parsed = generatedCarouselSchema.safeParse(parseJson(raw));
   if (!parsed.success || parsed.data.slides.length !== input.slideCount) {
     throw new Error(`AI must return exactly ${input.slideCount} valid slides.`);
   }
   return {
+    generationId,
     title: parsed.data.title,
     slides: parsed.data.slides.map((item, index) => {
       const type = index === 0 ? 'TITLE' : index === input.slideCount - 1 ? 'CLOSING' : item.type === 'RECAP' ? 'RECAP' : 'BODY';

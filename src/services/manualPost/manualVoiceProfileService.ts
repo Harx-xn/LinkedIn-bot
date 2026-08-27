@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prismaClient';
 import type { ContentService } from '../contentService';
+import { createGenerationId, getAiCostContext, withAiCostContext } from '../costIntelligence/aiCostTrackingService';
 import { getBotVoice, type BotVoice } from '../userContentContext';
 import { getContentServiceForUser } from '../userContentContext';
 import {
@@ -237,7 +238,10 @@ export async function refreshManualVoiceProfile(
 
   const service = contentService ?? await getContentServiceForUser(userId);
   const prompt = buildManualVoiceAnalysisPrompt(samples, explicitPreferences);
-  const raw = await service.fetchComposerRewriteRaw(prompt, 'OPENAI');
+  const raw = await withAiCostContext({
+    userId, feature: 'CONTENT_INTELLIGENCE', operation: 'VOICE_PROFILE_ANALYZE', agent: 'STRATEGY_ANALYZER',
+    generationId: getAiCostContext().generationId || createGenerationId(),
+  }, () => service.fetchComposerRewriteRaw(prompt, 'OPENAI'));
   const parsed = parseVoiceAnalysisOutput(raw);
   if (!parsed) {
     console.warn('[manual-voice] profile analysis parse failed', { userId });

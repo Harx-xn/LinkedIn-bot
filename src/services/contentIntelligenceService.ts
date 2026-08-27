@@ -9,6 +9,7 @@ import {
   logFallbackProvenance,
   type FallbackProvenance,
 } from './fallbackProvenanceService';
+import { createGenerationId, extractOpenAiUsage, getAiCostContext, trackAiProviderCall, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 
 export type AuthorityMode = 'EXPLICIT_EXPERTISE' | 'SUPPORTED_PRACTITIONER' | 'INFERRED_FAMILIARITY' | 'EXPLORATORY' | 'UNKNOWN';
 export type ContentIntelligenceProfile = {
@@ -87,11 +88,16 @@ async function enrich(strategy: EffectiveBotStrategy, apiKey?: string | null): P
   const fallback = buildFallbackContentIntelligence(strategy);
   const key = apiKey || process.env.OPENAI_API_KEY;
   if (!key) return { success: false, error: 'semantic_enrichment_unavailable:no_api_key' };
-  const response = await new OpenAI({ apiKey: key }).chat.completions.create({
-    model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini', temperature: 0.2,
+  const model = process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini';
+  const client = new OpenAI({ apiKey: key });
+  const response = await withAiCostContext({ feature: 'CONTENT_INTELLIGENCE', operation: 'STRATEGY_GENERATE', agent: 'STRATEGY_ANALYZER' }, () => trackAiProviderCall({
+    provider: 'OPENAI', model,
+    invoke: () => client.chat.completions.create({
+    model, temperature: 0.2,
     response_format: { type: 'json_object' },
     messages: [{ role: 'system', content: 'Conservatively enrich a LinkedIn content strategy. Return JSON matching the supplied fallback shape. Expand every pillar into niche-native territories and idea families. A selected niche is interest, not proof of expertise. Never invent biography, achievements, clients, projects, results, or first-person experience.' }, { role: 'user', content: JSON.stringify({ strategy, fallback }) }],
-  });
+    }), extractUsage: extractOpenAiUsage,
+  }));
   const parsed = profileSchema.safeParse(JSON.parse(response.choices[0]?.message?.content || '{}'));
   return parsed.success
     ? { success: true, profile: { ...parsed.data, version: fallback.version } }
@@ -233,7 +239,10 @@ export async function getOrBuildContentIntelligence(
 ): Promise<ContentIntelligenceResult> {
   return resolveContentIntelligence(userId, strategy, {
     load: () => prisma.userContentIntelligence.findUnique({ where: { userId } }),
-    enrich: () => enrich(strategy, apiKey),
+    enrich: () => withAiCostContext({
+      userId, feature: 'CONTENT_INTELLIGENCE', operation: 'STRATEGY_GENERATE', agent: 'STRATEGY_ANALYZER',
+      generationId: getAiCostContext().generationId || createGenerationId(),
+    }, () => enrich(strategy, apiKey)),
     save: async (profile, inputFingerprint) => prisma.userContentIntelligence.upsert({
       where: { userId },
       create: { userId, profile: profile as unknown as Prisma.InputJsonValue, inputFingerprint, version: 1, confidence: profile.confidence },

@@ -24,6 +24,7 @@
     reconcileStaleBatchGenerationJob,
     startBatchGenerationHeartbeat,
   } from '../services/batchGenerationJobLifecycleService';
+  import { withAiCostContext } from '../services/costIntelligence/aiCostTrackingService';
 
   export type BotGenerateRequestBody = {
     daysWindow: number;
@@ -176,6 +177,7 @@
         completedSlots: 0,
       },
     });
+    const generationId = `gen_${job.id}`;
 
     // Batch schedule/frequency are request-scoped only — not persisted to BotConfig.
     const previewId = typeof req.body.previewId === 'string' ? req.body.previewId : undefined;
@@ -183,10 +185,18 @@
     void (async () => {
       const stopHeartbeat = startBatchGenerationHeartbeat(job.id);
       try {
-        await botService.generateNow(req.userId!, job.id, {
+        await withAiCostContext({
+          userId: req.userId!,
+          regionId: owner?.regionId,
+          feature: 'BATCH_POST',
+          operation: 'BATCH_PLAN',
+          agent: 'PLANNER',
+          generationId,
+          batchJobId: job.id,
+        }, () => botService.generateNow(req.userId!, job.id, {
           previewId,
           slots: resolvedSlots,
-        });
+        }));
         await prisma.botGenerationJob.updateMany({
           where: { id: job.id, status: "RUNNING" },
           data: { status: "DONE", completedAt: new Date(), heartbeatAt: new Date() },
@@ -213,7 +223,7 @@
       }
     })();
 
-    res.json({ jobId: job.id, status: "RUNNING" });
+    res.json({ jobId: job.id, generationId, status: "RUNNING" });
   });
   
   // GET /bot/trends/preview - Preview top trends for current config

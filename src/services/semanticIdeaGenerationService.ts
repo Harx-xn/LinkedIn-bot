@@ -13,6 +13,7 @@ import type { RecentContentMemory } from './recentContentMemoryService';
 import { semanticMemorySimilarity } from './recentContentMemoryService';
 import type { TopicHistoryRow } from './topicHistoryService';
 import { evaluateCandidateCoherence } from './candidateCoherenceService';
+import { extractOpenAiUsage, trackAiProviderCall, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 
 const evidenceNeedSchema = z.enum(['NONE', 'CURRENT_FACTS', 'EXTERNAL_VERIFICATION', 'USER_EXPERIENCE']);
 const authoritySchema = z.enum(['EXPLICIT_EXPERTISE', 'SUPPORTED_PRACTITIONER', 'INFERRED_FAMILIARITY', 'EXPLORATORY', 'UNKNOWN']);
@@ -142,13 +143,19 @@ function parseProviderResponse(value: unknown): z.infer<typeof responseSchema> {
 }
 
 async function defaultProvider(apiKey: string, request: Parameters<SemanticIdeaProvider>[0]): Promise<unknown> {
-  const response = await new OpenAI({ apiKey }).chat.completions.create({
-    model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini',
+  const model = process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini';
+  const client = new OpenAI({ apiKey });
+  const response = await withAiCostContext({ feature: 'TOPIC_DISCOVERY', operation: 'TOPIC_GENERATE', agent: 'IDEA_GENERATOR' }, () => trackAiProviderCall({
+    provider: 'OPENAI', model,
+    invoke: () => client.chat.completions.create({
+    model,
     temperature: 0.45,
     max_completion_tokens: request.maxOutputTokens,
     response_format: { type: 'json_object' },
     messages: [{ role: 'system', content: request.system }, { role: 'user', content: JSON.stringify(request.payload) }],
-  });
+    }),
+    extractUsage: extractOpenAiUsage,
+  }));
   return response.choices[0]?.message?.content || '{}';
 }
 

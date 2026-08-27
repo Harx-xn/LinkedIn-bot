@@ -5,6 +5,7 @@ import { getContentServiceForUser } from './userContentContext';
 import { calculateLinkedInMetrics } from './linkedinAnalyticsMetrics';
 import type { NormalizedLinkedInAnalytics } from './linkedinAnalyticsTypes';
 import { extractBalancedJsonObject } from './ghostwriterJsonParser';
+import { createGenerationId, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 
 const urnFromUrl=(url:string)=>decodeURIComponent(url).match(/(?:activity|ugcPost|share)[:\/-](\d{8,})/i)?.[1];
 const lengthGroup=(content:string)=>content.length<700?'short':content.length<1600?'medium':'long';
@@ -46,7 +47,7 @@ export async function generateAnalyticsInsights(userId:string,input:Record<strin
  const service=await getContentServiceForUser(userId); if(!service.hasProvider('OPENAI')&&!service.hasProvider('GEMINI')) throw new Error('AI provider unavailable.');
  const prompt=`You are Veyrais' LinkedIn analytics analyst. Return JSON only: {"insights":[{"type":"CONTENT_PILLAR|TOPIC|FORMAT|HOOK|AUDIENCE|SENIORITY|INDUSTRY|PROFILE_ALIGNMENT|STRATEGY_ALIGNMENT|ENGAGEMENT|FOLLOWER_GROWTH|MOMENTUM|MEDIA|OPPORTUNITY|WARNING","importance":"HIGH|MEDIUM|LOW","title":"","finding":"","recommendation":"","evidence":[{"metric":"","value":0}],"confidence":0.0,"nextMove":"DO_MORE|TEST|FIX|STOP_REDUCE"}]}. Produce 4-8 non-generic insights. Use only supplied evidence; never invent numbers or causality. Call samples under 3 early signals. Omit unsupported audience/profile claims.\nINPUT:\n${JSON.stringify(input)}`;
  const provider=service.hasProvider('OPENAI')?'OPENAI':'GEMINI';
- const raw=await service.fetchJsonRaw(prompt,provider,3200);
+ const raw=await withAiCostContext({userId,feature:'ANALYTICS',operation:'ANALYTICS_INSIGHTS',agent:'STRATEGY_ANALYZER',generationId:createGenerationId()},()=>service.fetchJsonRaw(prompt,provider,3200));
  return parseAnalyticsInsightResponse(raw);
 }
 

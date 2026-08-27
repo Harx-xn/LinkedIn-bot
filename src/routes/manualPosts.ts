@@ -40,6 +40,8 @@ import {
   hasSavedGhostwriterDescription,
 } from '../services/ghostwriterConfigRequirementService';
 import { savePersonalExperience, suggestPersonalExperiences } from '../services/manualPost/personalExperienceService';
+import { createGenerationId, withAiCostContext } from '../services/costIntelligence/aiCostTrackingService';
+import { linkAiUsageGenerationsToPost } from '../services/costIntelligence/aiUsageService';
 
 const router = Router();
 
@@ -50,6 +52,14 @@ function extensionForMimeType(mimeType: string): string {
   if (mimeType.includes('webp')) return 'webp';
   if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
   return 'png';
+}
+
+function requestGenerationIds(body: unknown): string[] {
+  if (!body || typeof body !== 'object') return [];
+  const value = (body as { generationIds?: unknown }).generationIds;
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
 }
 
 function resolveBrandNameFromVoice(voice: Awaited<ReturnType<typeof getBotVoice>>): string | undefined {
@@ -188,8 +198,9 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     await requireSavedGhostwriterDescription(userId);
-    const result = await generateManualPostContent(userId, req.body || {});
-    res.json(result);
+    const generationId = createGenerationId();
+    const result = await withAiCostContext({ userId, feature: 'MANUAL_POST', operation: 'MANUAL_GENERATE', agent: 'WRITER', generationId }, () => generateManualPostContent(userId, req.body || {}));
+    res.json({ ...result, generationId });
   }),
 );
 
@@ -199,8 +210,9 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const result = await rewriteUnsavedManualContent(userId, req.body || {});
-    res.json(result);
+    const generationId = createGenerationId();
+    const result = await withAiCostContext({ userId, feature: 'REWRITE', operation: 'MANUAL_REWRITE', agent: 'WRITER', generationId }, () => rewriteUnsavedManualContent(userId, req.body || {}));
+    res.json({ ...result, generationId });
   }),
 );
 
@@ -211,8 +223,9 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     await requireSavedGhostwriterDescription(userId);
-    const result = await generateManualPostFromUrl(userId, req.body || {});
-    res.json(result);
+    const generationId = createGenerationId();
+    const result = await withAiCostContext({ userId, feature: 'MANUAL_POST', operation: 'MANUAL_GENERATE', agent: 'WRITER', generationId, metadata: { source: 'ARTICLE_URL' } }, () => generateManualPostFromUrl(userId, req.body || {}));
+    res.json({ ...result, generationId });
   }),
 );
 
@@ -222,12 +235,13 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const result = await suggestManualPostTopics(userId, {
+    const generationId = createGenerationId();
+    const result = await withAiCostContext({ userId, feature: 'TOPIC_DISCOVERY', operation: 'TOPIC_GENERATE', agent: 'IDEA_GENERATOR', generationId }, () => suggestManualPostTopics(userId, {
       count: req.body?.count,
       provider: req.body?.provider,
       refresh: req.body?.refresh === true,
-    });
-    res.json(result);
+    }));
+    res.json({ ...result, generationId });
   }),
 );
 
@@ -269,16 +283,17 @@ router.post(
 
     const options = parseAiImageOptions(req.body);
 
-    const result = await generateAndUploadManualAiImage({
+    const generationId = createGenerationId();
+    const result = await withAiCostContext({ userId, feature: 'AI_IMAGE', operation: 'IMAGE_GENERATE', agent: 'IMAGE_GENERATOR', generationId }, () => generateAndUploadManualAiImage({
       userId,
       postText: content,
       uploadKey: `generated/ai-manual-${userId}-${Date.now()}`,
       ...options,
-    });
+    }));
 
     await recordImageGeneration(userId);
 
-    res.json(result);
+    res.json({ ...result, generationId });
   }),
 );
 
@@ -289,6 +304,7 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     const post = await createDraft(userId, req.body || {});
+    await linkAiUsageGenerationsToPost(userId, requestGenerationIds(req.body), post.id);
     res.status(201).json(post);
   }),
 );
@@ -300,6 +316,7 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     const post = await createAndPublishNow(userId, req.body || {}, randomUUID());
+    if (post) await linkAiUsageGenerationsToPost(userId, requestGenerationIds(req.body), post.id);
     res.json(post);
   }),
 );
@@ -311,6 +328,7 @@ router.post(
   handle(async (req, res) => {
     const userId = requireUserId(req);
     const post = await createAndSchedule(userId, req.body || {});
+    await linkAiUsageGenerationsToPost(userId, requestGenerationIds(req.body), post.id);
     res.status(201).json(post);
   }),
 );
@@ -333,8 +351,9 @@ router.post(
   requireAuth,
   handle(async (req, res) => {
     const userId = requireUserId(req);
-    const post = await rewriteSavedManualPost(userId, req.params.postId, req.body || {});
-    res.json(post);
+    const generationId = createGenerationId();
+    const post = await withAiCostContext({ userId, feature: 'REWRITE', operation: 'MANUAL_REWRITE', agent: 'WRITER', generationId, postId: req.params.postId }, () => rewriteSavedManualPost(userId, req.params.postId, req.body || {}));
+    res.json({ ...post, generationId });
   }),
 );
 
@@ -367,12 +386,13 @@ router.post(
 
     const options = parseAiImageOptions(req.body);
 
-    const { mediaUrl, requestId } = await generateAndUploadManualAiImage({
+    const generationId = createGenerationId();
+    const { mediaUrl, requestId } = await withAiCostContext({ userId, feature: 'AI_IMAGE', operation: 'IMAGE_GENERATE', agent: 'IMAGE_GENERATOR', generationId, postId }, () => generateAndUploadManualAiImage({
       userId,
       postText: content,
       uploadKey: `generated/ai-manual-${postId}-${Date.now()}`,
       ...options,
-    });
+    }));
 
     let updated;
     try {
@@ -386,7 +406,7 @@ router.post(
 
     await recordImageGeneration(userId);
 
-    res.json(updated);
+    res.json({ ...updated, generationId });
   }),
 );
 

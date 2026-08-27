@@ -2,6 +2,7 @@ import type { ContentService } from '../contentService';
 import type { ContentProvider } from '../manualPostAiService';
 import { parseManualJsonDetailed } from './manualPostJsonParser';
 import type { ManualGeneratedPost, ManualJsonParseResult, ManualProviderCallBudget } from './manualPostTypes';
+import { withAiCostContext } from '../costIntelligence/aiCostTrackingService';
 
 const MAX_MANUAL_JSON_REPAIRS = 1;
 
@@ -80,7 +81,7 @@ export async function parseManualProviderOutputWithRepair(
       invalidOutput: lastRaw,
     });
     budget?.recordProviderCall('repair', repairPrompt);
-    const repairedRaw = await contentService.fetchComposerRepairRaw(repairPrompt, provider);
+    const repairedRaw = await withAiCostContext({ agent: 'REPAIR', operation: 'MANUAL_REPAIR' }, () => contentService.fetchComposerRepairRaw(repairPrompt, provider));
     result = parseManualJsonDetailed(repairedRaw);
     if (result.ok) return result.data;
 

@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { createGenerationId, extractOpenAiUsage, getAiCostContext, trackAiProviderCall, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 import { z } from 'zod';
 import { prisma } from '../prismaClient';
 import { createHash } from 'node:crypto';
@@ -602,8 +603,11 @@ export class NicheExpansionService {
     if (!this.openai) return buildFallbackExpansionPlan(niche);
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini',
+      const model = process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini';
+      const response = await withAiCostContext({ feature: 'TOPIC_DISCOVERY', operation: 'NICHE_EXPANSION', agent: 'STRATEGY_ANALYZER' }, () => trackAiProviderCall({
+        provider: 'OPENAI', model,
+        invoke: () => this.openai!.chat.completions.create({
+        model,
         temperature: 0.3,
         response_format: {
           type: 'json_schema',
@@ -623,7 +627,8 @@ Return one domain, confidence 0-1, 4-8 subtopics, 12-20 specific queries distrib
 ${failedQueryDiagnostics.length ? `Previous queries failed validation. Correct these failures and do not repeat them:\n${JSON.stringify(failedQueryDiagnostics.slice(0, 20))}` : ''}`,
           },
         ],
-      });
+        }), extractUsage: extractOpenAiUsage,
+      }));
 
       const raw = response.choices[0].message.content || '';
       const parsed = nicheExpansionSchema.safeParse(JSON.parse(raw));
@@ -693,7 +698,10 @@ ${failedQueryDiagnostics.length ? `Previous queries failed validation. Correct t
       }
     }
 
-    const plan = await this.generatePlanWithAI(niche, failedQueryDiagnostics);
+    const plan = await withAiCostContext({
+      userId, feature: 'TOPIC_DISCOVERY', operation: 'NICHE_EXPANSION', agent: 'STRATEGY_ANALYZER',
+      generationId: getAiCostContext().generationId || createGenerationId(),
+    }, () => this.generatePlanWithAI(niche, failedQueryDiagnostics));
     const sanitized = { ...sanitizeExpansionPlan(plan), inputFingerprint: currentInputFingerprint };
 
     await prisma.userNicheSearchPlan.upsert({

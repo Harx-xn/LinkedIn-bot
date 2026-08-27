@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { extractOpenAiUsage, trackAiProviderCall, withAiCostContext } from './costIntelligence/aiCostTrackingService';
 import { z } from 'zod';
 import type { NicheExpansionPlan, TopicCluster, TopicFingerprint, TrendCandidate } from './generationTypes';
 import { normalizeTrendTitle } from './trendTitleUtils';
@@ -170,8 +171,11 @@ export class TopicFingerprintService {
     }
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini',
+      const model = process.env.OPENAI_CONTENT_MODEL || 'gpt-4o-mini';
+      const response = await withAiCostContext({ feature: 'TOPIC_DISCOVERY', operation: 'TOPIC_FINGERPRINT', agent: 'STRATEGY_ANALYZER' }, () => trackAiProviderCall({
+        provider: 'OPENAI', model,
+        invoke: () => this.openai!.chat.completions.create({
+        model,
         temperature: 0.2,
         response_format: {
           type: 'json_schema',
@@ -194,7 +198,8 @@ Source: ${trend.source ?? 'unknown'}
 Summary: ${trend.summary ?? ''}`,
           },
         ],
-      });
+        }), extractUsage: extractOpenAiUsage,
+      }));
 
       const raw = response.choices[0].message.content || '';
       const parsed = fingerprintSchema.safeParse(JSON.parse(raw));
