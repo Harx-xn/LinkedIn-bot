@@ -18,6 +18,8 @@ import {
   buildSafeFallbackImageContent,
   detectUnsupportedFirstPersonClaims,
   filterBlockingIssues,
+  isHardBlockIssueCode,
+  isRepairableEditorialIssueCode,
   isCriticalCandidateIssueCode,
   issuesToRepairInput,
   runDeterministicValidation,
@@ -159,6 +161,8 @@ function recordDraftTrace(
     redundancyRisk: candidate.technicalReview.redundancyRisk ?? null,
     genericDiscourseRisk: candidate.technicalReview.genericDiscourseRisk ?? null,
     issueCodes: candidate.issues.map((issue) => issue.code),
+    effectiveBlockingCodes: candidate.acceptance.blockingIssueCodes,
+    reviewerStatus: candidate.acceptance.reviewerStatus ?? (candidate.technicalReview.available === false ? 'REVIEWER_UNAVAILABLE' : candidate.technicalReview.passed ? 'REVIEWER_PASSED' : 'REVIEWER_FAILED'),
     candidateTier: candidate.tier,
     becameBestCandidate: flags.becameBestCandidate ?? false,
     acceptedNormally: flags.acceptedNormally ?? false,
@@ -207,8 +211,14 @@ export function buildAcceptanceDecision(params: {
   technicalReview: TechnicalReviewResult;
   blocking: QualityIssue[];
   warnings: QualityIssue[];
+  repairAttempts?: number;
 }): SlotAcceptanceDecision {
   const reviewAvailable = params.technicalReview.available !== false;
+  const deterministicErrors = params.deterministic.issues.filter((issue) => issue.severity === 'error');
+  const reviewerCritical = params.technicalReview.issues.some((issue) => issue.severity === 'error' && isHardBlockIssueCode(issue.code));
+  const reviewerStatus: SlotAcceptanceDecision['reviewerStatus'] = reviewAvailable
+    ? params.technicalReview.passed ? 'REVIEWER_PASSED' : reviewerCritical ? 'REVIEWER_CRITICAL_FAIL' : 'REVIEWER_QUALITY_FAIL'
+    : deterministicErrors.length === 0 ? 'REVIEWER_NOT_REQUIRED_SAFE_PATH' : 'REVIEWER_UNAVAILABLE';
   const semanticQuality = reviewAvailable
     ? Math.round((
       (params.technicalReview.informationDensity ?? 100)
@@ -218,12 +228,24 @@ export function buildAcceptanceDecision(params: {
       + (params.technicalReview.claimFidelity ?? 100)
     ) / 5)
     : params.deterministic.deterministicScore;
+  const onlyEditorialBlocking = params.blocking.length > 0
+    && params.blocking.every((issue) => isRepairableEditorialIssueCode(issue.code));
+  const strongEditorialTolerance = (params.repairAttempts ?? 0) >= 1
+    && params.deterministic.deterministicScore >= 80
+    && (params.deterministic.specificity?.score ?? 0) >= 65
+    && onlyEditorialBlocking
+    && reviewerStatus !== 'REVIEWER_CRITICAL_FAIL';
+  const reviewerAllowsAcceptance = reviewerStatus === 'REVIEWER_PASSED'
+    || reviewerStatus === 'REVIEWER_NOT_REQUIRED_SAFE_PATH'
+    || (reviewerStatus === 'REVIEWER_QUALITY_FAIL' && (params.repairAttempts ?? 0) >= 1);
   return {
-    accepted: params.blocking.length === 0 && (!reviewAvailable || params.technicalReview.passed),
+    accepted: (params.blocking.length === 0 && reviewerAllowsAcceptance) || strongEditorialTolerance,
     deterministicScore: params.deterministic.deterministicScore,
     specificityScore: params.deterministic.specificity?.score ?? 0,
     qualityScore: Math.min(params.deterministic.deterministicScore, semanticQuality),
     technicalPassed: reviewAvailable && params.technicalReview.passed,
+    reviewerStatus,
+    acceptanceMode: strongEditorialTolerance ? 'EDITORIAL_TOLERANCE' : 'NORMAL',
     blockingIssueCodes: params.blocking.map((i) => i.code),
     warningIssueCodes: params.warnings.map((i) => i.code),
   };
@@ -323,7 +345,9 @@ function applyLinkedInFormatting(
  * candidate existed. It uses only the selected claim and existing plan reasoning,
  * then runs the same hard deterministic, authority, formatting and platform gates.
  */
-export function buildBoundedSafeWriterFallback(params: {
+export async function buildBoundedSafeWriterFallback(params: {
+  contentService: ContentService;
+  provider?: 'OPENAI' | 'GEMINI';
   plan: BatchPostPlan;
   trend: TrendCandidate | null;
   author: AuthorContext;
@@ -333,7 +357,7 @@ export function buildBoundedSafeWriterFallback(params: {
   recentTopicHistory?: TopicHistoryRow[];
   candidatePool?: SlotCandidatePool;
   traceOptions?: SlotGenerationOptions;
-}): Extract<GeneratedSlotResult, { ok: true }> | null {
+}): Promise<Extract<GeneratedSlotResult, { ok: true }> | null> {
   const sourceTitle = params.trend?.topic ?? params.plan.sourceTopic ?? 'Author expertise';
   const claim = (
     params.plan.centralClaim
@@ -345,30 +369,33 @@ export function buildBoundedSafeWriterFallback(params: {
     ?? ''
   ).replace(/\s+/g, ' ').trim();
   if (!claim) return null;
-  const plannedSupport = [
-    params.plan.depthPlan?.underlyingCauseOrMechanism,
-    params.plan.depthPlan?.meaningfulConsequence,
-    params.plan.depthPlan?.usefulTensionOrQualification,
-    params.plan.depthPlan?.endingInsight,
-  ].filter((value): value is string => Boolean(value?.trim()))
-    .map((value) => value.replace(/\s+/g, ' ').trim())
-    .filter((value, index, all) => all.indexOf(value) === index && value.toLowerCase() !== claim.toLowerCase())
-    .slice(0, 2);
-  const safeSupport = plannedSupport.length
-    ? plannedSupport
-    : ['The practical value is making the next decision with the relevant constraint stated clearly.'];
-  const generated = applyLinkedInFormatting({
-    headline: claim.slice(0, 90),
-    subheadline: '',
-    bulletPoints: [],
-    body: [claim, ...safeSupport].join('\n\n'),
-    hashtags: '',
-  }, sourceTitle);
-  const deterministic = runDeterministicValidation(generated, params.author, params.plan, params.acceptedBodies, {
+  const fallbackPlan: BatchPostPlan = {
+    ...params.plan,
+    centralClaim: claim,
+    selectedCentralClaim: claim,
+    editorialDecision: undefined,
+    depthClass: 'STANDARD',
+    targetLengthRange: { min: 1600, max: 1800 },
+  };
+  let generated: GeneratedPostContent;
+  try {
+    generated = applyLinkedInFormatting(await params.contentService.generatePlannedPost(
+      fallbackPlan,
+      params.author,
+      params.trend?.link ?? '',
+      params.provider ?? 'OPENAI',
+      params.trend,
+      [],
+    ), sourceTitle);
+  } catch (error) {
+    console.error('[ghostwriter] bounded safe writer failed', { message: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+  const deterministic = runDeterministicValidation(generated, params.author, fallbackPlan, params.acceptedBodies, {
     sourceTitle,
     batchFingerprints: params.batchFingerprints,
     history: params.recentTopicHistory,
-    enforceLength: false,
+    enforceLength: true,
   });
   const finalized = finalizeGeneratedPostContent(generated, sourceTitle, {
     topic: sourceTitle,
@@ -389,31 +416,32 @@ export function buildBoundedSafeWriterFallback(params: {
     .filter((issue) => issue.severity === 'error')
     .map((issue) => ({ code: issue.code, severity: 'error' as const }));
   const issues = mergeQualityIssues(deterministic.issues, formatIssues, authorityIssues, linkedInIssues);
-  if (issues.some((issue) => isCriticalCandidateIssueCode(issue.code))) return null;
+  if (finalized.content.length < 1400 || finalized.content.length > 3000) return null;
+  if (issues.some((issue) => isHardBlockIssueCode(issue.code))) return null;
   const blocking = issues.filter((issue) => issue.severity === 'error');
   const warnings = issues.filter((issue) => issue.severity === 'warning');
   const technicalReview: TechnicalReviewResult = { available: false, passed: false, confidence: 0, issues: [] };
   const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
   const pool = params.candidatePool ?? new SlotCandidatePool();
   const ranked = pool.add({
-    origin: 'emergency_fallback', generated, finalized, acceptance, technicalReview, issues, plan: params.plan,
+    origin: 'emergency_fallback', generated, finalized, acceptance, technicalReview, issues, plan: fallbackPlan,
     ideaCandidateId: params.traceOptions?.ideaCandidateId,
     ideaAttemptIndex: params.traceOptions?.ideaAttemptIndex,
   });
   if (!ranked.eligible) return null;
   recordDraftTrace(params.traceOptions, ranked, { becameBestCandidate: pool.best() === ranked, returnedAsFallback: true });
   logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.WRITER_FALLBACK, stage: 'bounded_safe_writer', reason: 'writer_attempts_exhausted' });
-  logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE, stage: 'bounded_safe_writer', metadata: { tier: ranked.tier } });
+  logFallbackProvenance({ provenance: FALLBACK_PROVENANCE.SAFE_FALLBACK_ACCEPTANCE, stage: 'bounded_safe_writer', metadata: { tier: ranked.tier } });
   return {
     ok: true,
     finalized,
     imageContent: buildSafeFallbackImageContent(finalized),
     sourceTitle,
-    plan: params.plan,
+    plan: fallbackPlan,
     qualityScore: acceptance.qualityScore,
-    attempts: MAX_FRESH_GENERATIONS * MAX_QUOTA_FILL_ROUNDS,
+    attempts: MAX_FRESH_GENERATIONS * MAX_QUOTA_FILL_ROUNDS + 1,
     acceptance,
-    fallbackProvenance: [FALLBACK_PROVENANCE.WRITER_FALLBACK, FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE],
+    fallbackProvenance: [FALLBACK_PROVENANCE.WRITER_FALLBACK, FALLBACK_PROVENANCE.SAFE_FALLBACK_ACCEPTANCE],
   };
 }
 
@@ -516,7 +544,7 @@ async function tryAcceptPost(
     : issue);
   const blocking = filterBlockingIssues(allIssues, slotAttemptIndex(counters));
   const warnings = allIssues.filter((i) => i.severity === 'warning');
-  const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings });
+  const acceptance = buildAcceptanceDecision({ deterministic, technicalReview, blocking, warnings, repairAttempts: counters.contentRepairAttempt });
   const observation = {
     generated,
     finalized,
@@ -530,7 +558,7 @@ async function tryAcceptPost(
     contentRepairAttempt: counters.contentRepairAttempt,
   };
 
-  if (!acceptance.accepted || blocking.length > 0 || formatIssues.length || authorityIssues.length) {
+  if (!acceptance.accepted || blocking.some((issue) => isHardBlockIssueCode(issue.code)) || formatIssues.length || authorityIssues.length) {
     logSlotDecision(sourceTitle, plan, counters, acceptance, undefined, slotOptions);
     return { accepted: false, acceptance, deterministic, technicalReview, issues: allIssues, observation };
   }
@@ -738,6 +766,13 @@ export async function generateSlotPost(
         const best = candidatePool.best();
         if (!best || best === rankedCandidate) return {
           ...attempt.result,
+          fallbackProvenance: [attempt.result.acceptance.acceptanceMode === 'EDITORIAL_TOLERANCE'
+            ? FALLBACK_PROVENANCE.EDITORIAL_TOLERANCE_ACCEPTANCE
+            : repairRound > 0
+              ? FALLBACK_PROVENANCE.REPAIRED_ACCEPTANCE
+            : globalFreshAttempt > 1
+              ? FALLBACK_PROVENANCE.REGENERATED_ACCEPTANCE
+              : FALLBACK_PROVENANCE.NORMAL_ACCEPTANCE],
           ideaFailureState,
           freshGenerationsUsed,
           writerOperationsUsed,
@@ -938,6 +973,9 @@ export async function generateSlotPostWithIdeaRecovery(
       const finalIdea = attemptsById.get(result.finalIdeaUsed ?? current.candidateId) ?? current;
       const finalResult = {
         ...result,
+        fallbackProvenance: finalIdea.candidateId !== initialIdea.candidateId
+          ? [...(result.fallbackProvenance ?? []), FALLBACK_PROVENANCE.ALTERNATE_CANDIDATE_ACCEPTANCE]
+          : result.fallbackProvenance,
         freshGenerationsUsed: freshGenerationOffset,
         writerOperationsUsed: writerOperationsOffset,
       };
@@ -982,6 +1020,9 @@ export async function generateSlotPostWithIdeaRecovery(
       const finalIdea = attemptsById.get(result.finalIdeaUsed ?? current.candidateId) ?? current;
       const finalResult = {
         ...result,
+        fallbackProvenance: finalIdea.candidateId !== initialIdea.candidateId
+          ? [...(result.fallbackProvenance ?? []), FALLBACK_PROVENANCE.ALTERNATE_CANDIDATE_ACCEPTANCE]
+          : result.fallbackProvenance,
         freshGenerationsUsed: freshGenerationOffset,
         writerOperationsUsed: writerOperationsOffset,
       };
@@ -1038,7 +1079,9 @@ export async function generateSlotPostWithIdeaRecovery(
     return { result, finalIdea, attemptedCandidateIds: [...attemptedCandidateIds] };
   }
 
-  const boundedFallback = buildBoundedSafeWriterFallback({
+  const boundedFallback = await buildBoundedSafeWriterFallback({
+    contentService,
+    provider,
     plan: current.plan,
     trend: current.trend,
     author,
@@ -1099,7 +1142,9 @@ export async function generateSlotPostUntilSuccess(
     }
   }
 
-  const boundedFallback = buildBoundedSafeWriterFallback({
+  const boundedFallback = await buildBoundedSafeWriterFallback({
+    contentService,
+    provider,
     plan,
     trend,
     author,

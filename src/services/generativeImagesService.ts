@@ -1,6 +1,6 @@
 import { GoogleGenAI, Modality } from '@google/genai';
 import { randomUUID } from 'node:crypto';
-import { extractGeminiUsage, trackAiProviderCall, withAiCostContext, type AiCostContext } from './costIntelligence/aiCostTrackingService';
+import { extractGeminiImageUsage, extractGeminiUsage, trackAiProviderCall, withAiCostContext, type AiCostContext } from './costIntelligence/aiCostTrackingService';
 
 const DEFAULT_GEMINI_IMAGE_MODEL =
   process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
@@ -579,7 +579,7 @@ export class GenerativeImagesService {
             },
           },
         }),
-        extractUsage: extractGeminiUsage,
+        extractUsage: extractGeminiImageUsage,
       }));
 
       const parts = response.candidates?.[0]?.content?.parts ?? [];

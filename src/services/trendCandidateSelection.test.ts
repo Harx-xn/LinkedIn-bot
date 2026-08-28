@@ -27,6 +27,55 @@ function profile(niche: string, terms: string[], extras: Partial<NicheExpansionP
 }
 
 describe('candidate qualification acceptance paths', () => {
+  it('hard-rejects category plus query context when the source is out of niche', () => {
+    const strategy = strategyFor('Operations Engineering', ['operational controls']);
+    const plan = profile('Operations Engineering', ['user experience', 'framework']);
+    const score = scoreTrendForStrategy({
+      topic: 'A clinical research framework improves user experience in patient care',
+      searchQuery: 'Operations Engineering user experience framework research',
+      publishedAt: new Date(),
+    }, strategy, { profile: plan });
+    assert.equal(score.nicheMatch?.activeNicheEvidence?.pillarSatisfied, false);
+    assert.ok(score.nicheMatch?.rejectionCodes.includes('niche_mismatch'));
+    assert.equal(decideCandidateEligibility(score.nicheMatch!, true).eligible, false);
+  });
+
+  it('accepts a direct active-niche source', () => {
+    const strategy = strategyFor('Operations Engineering', ['operational controls']);
+    const plan = profile('Operations Engineering', ['operational controls']);
+    const score = scoreTrendForStrategy({ topic: 'Operations Engineering controls reduce production handoff failures' }, strategy, { profile: plan });
+    assert.equal(score.nicheMatch?.activeNicheEvidence?.pillarSatisfied, true);
+    assert.equal(decideCandidateEligibility(score.nicheMatch!, true).eligible, true);
+  });
+
+  it('accepts an explicit cross-domain transfer into the active niche', () => {
+    const strategy = strategyFor('Operations Engineering', ['operational controls']);
+    const plan = profile('Industrial Reliability', ['queue backpressure'], { normalizedNiche: 'Industrial Reliability' });
+    const score = scoreTrendForStrategy({
+      topic: 'Applying queue backpressure lessons from distributed systems to Industrial Reliability',
+    }, strategy, { profile: plan });
+    assert.equal(score.nicheMatch?.activeNicheEvidence?.pillarSatisfiedBy, 'explicit_cross_domain');
+    assert.equal(decideCandidateEligibility(score.nicheMatch!, true).eligible, true);
+  });
+
+  it('does not let a high additive score rescue a hard niche mismatch', () => {
+    const strategy = buildEffectiveBotStrategy({
+      description: 'Operations Engineering', niches: JSON.stringify(['Operations Engineering']),
+      profilePositioning: { positioningStatement: '', credibilityPoints: [], uniquePointOfView: '', topicsToBeKnownFor: ['user experience framework'] },
+      targetAudience: { primaryAudience: 'Operators', roles: [], industries: [], painPoints: ['user experience'], desiredOutcomes: ['better outcomes'], objectionsOrMisbeliefs: [], knowledgeLevel: 'intermediate' },
+      contentPillars: { primaryPillars: [{ name: 'Operations Engineering', description: 'operational controls', audienceRelevance: '', exampleAngles: [], trendKeywords: ['operational controls'] }], secondaryPillars: [], experimentalPillars: [], excludedTopics: [] },
+      topicRules: { minimumRelevanceScore: 65, requirePillarMatch: false, requireAudiencePainMatch: false, avoidDuplicateAngles: true, avoidRecentTopicsDays: 30 },
+    });
+    const plan = profile('Operations Engineering', ['user experience', 'framework'], { commonProblems: ['user experience'] });
+    const score = scoreTrendForStrategy({
+      topic: 'A clinical framework improves user experience and better outcomes',
+      searchQuery: 'Operations Engineering user experience framework', publishedAt: new Date(),
+    }, strategy, { profile: plan });
+    assert.ok(score.score >= 65, JSON.stringify(score.breakdown));
+    assert.equal(score.accepted, false);
+    assert.equal(decideCandidateEligibility(score.nicheMatch!, true).eligible, false);
+  });
+
   it('lets scoped entities, platforms, and contextual aliases satisfy a required pillar', () => {
     const strategy = strategyFor('AI Automation', ['workflow automation'], true);
     const plan = profile('AI Automation', ['workflow automation'], { importantEntities: ['Automation Guild'], productsAndPlatforms: ['UiPath'], entityAliases: ['AgentFlow'], requiredContextTerms: ['workflow', 'automation'] });

@@ -118,6 +118,25 @@ function deterministicDimensions(input: Omit<ContentIdeaCandidate, 'score' | 're
   return { specificityPotential, nonObviousness, practicalValue, usefulTension, discussionPotential, consequenceSubstance };
 }
 
+export function evaluateCandidateSubstance(
+  input: Pick<ContentIdeaCandidate, 'pillar' | 'territory' | 'coreClaim' | 'mechanism' | 'audienceConsequence'>,
+): { substantive: boolean; replaceableNicheRisk: boolean; dimensions: string[] } {
+  const all = `${input.coreClaim} ${input.mechanism} ${input.audienceConsequence ?? ''}`;
+  const contextTokens = new Set(substantiveTokens(`${input.pillar} ${input.territory}`));
+  const mechanismTokens = substantiveTokens(input.mechanism).filter((token) => !contextTokens.has(token));
+  const dimensions = [
+    mechanismTokens.length >= 3 && (MECHANISM_SIGNAL.test(input.mechanism) || PROCESS_SIGNAL.test(input.mechanism)) ? 'mechanism' : '',
+    DECISION_SIGNAL.test(all) && BOUNDED_SIGNAL.test(all) ? 'decision_rule' : '',
+    hasMeaningfulContrast(input.coreClaim, input.mechanism) ? 'trade_off' : '',
+    CONSEQUENCE_SIGNAL.test(input.audienceConsequence ?? '') && substantiveTokens(input.audienceConsequence).length >= 5 ? 'consequence' : '',
+    /\b(?:failure|fails?|invalid|timeout|deadlock|race|drift|overflow|stale|collision|loss|leak|bottleneck)\b/i.test(all) ? 'failure_mode' : '',
+    /\b(?:\d+(?:\.\d+)?|api|query|cache|queue|schema|transaction|render|build|asset|token|webhook|index|database|latency|memory)\b/i.test(all) ? 'concrete_detail' : '',
+  ].filter(Boolean);
+  const abstractChange = /\b(?:matters?|important|keep learning|stay current|circumstances? change|things? change|evolves?|complexity (?:grows?|increases?)|adapt(?:ing|s)? (?:a )?(?:framework|approach|practice))\b/i.test(all);
+  const replaceableNicheRisk = abstractChange && dimensions.length === 0;
+  return { substantive: dimensions.length > 0, replaceableNicheRisk, dimensions };
+}
+
 function similarityRisk(claim: string, history: TopicHistoryRow[]): number {
   return Math.round(Math.max(0, ...history.map((row) => jaccardSimilarity(claim, `${row.coreClaim ?? ''} ${row.normalizedTopic}`))) * 100);
 }
@@ -131,6 +150,7 @@ export function scoreContentIdea(
   const wordCount = input.coreClaim.trim().split(/\s+/).length;
   const categorySummary = wordCount < 7 || (/^[\w\s&/-]+\s+for\s+[\w\s&/-]+[.!]?$/i.test(input.coreClaim) && !/\b(should|cannot|can|fails?|changes?|reduces?|increases?|depends?|creates?|removes?|becomes?|starts?|needs?|wins?|fix(?:es)?)\b/i.test(input.coreClaim));
   const dimensions = deterministicDimensions(input, categorySummary || BROAD.test(input.coreClaim));
+  const substance = evaluateCandidateSubstance(input);
   const authorityFit = coherence?.candidateCoherence.authorityFramingFit
     ?? (input.authorityMode === 'EXPLICIT_EXPERTISE' ? 95 : input.authorityMode === 'SUPPORTED_PRACTITIONER' ? 85 : input.authorityMode === 'INFERRED_FAMILIARITY' ? 70 : input.authorityMode === 'EXPLORATORY' ? 60 : 45);
   // Strategy fit deliberately excludes authority. The coherence layer has already
@@ -166,23 +186,35 @@ export function scoreContentIdea(
     coherence && coherence.audienceIdeaNaturalness < 20 ? 'audience_naturalness_too_low' : '',
     coherence && coherence.creatorContentFit < 20 ? 'creator_content_fit_too_low' : '',
     coherence?.coherenceRejectionReason ?? '',
+    !substance.substantive ? 'insufficient_candidate_substance' : '',
+    substance.replaceableNicheRisk ? 'replaceable_niche_claim' : '',
   ].filter(Boolean);
+  if (!substance.substantive) {
+    score.specificityPotential = Math.min(score.specificityPotential, 22);
+    score.practicalValue = Math.min(score.practicalValue, 24);
+    score.composite = Math.min(score.composite, 44);
+  }
+  if (substance.replaceableNicheRisk) {
+    score.nonObviousness = Math.min(score.nonObviousness, 18);
+    score.composite = Math.min(score.composite, 38);
+  }
   return { score, rejectedReasons };
 }
 
 function claimFor(territory: string, family: string, problem?: string, outcome?: string): { claim: string; mechanism: string; audienceConsequence?: string } {
   const subject = problem || territory;
-  const templates: Record<string, string> = {
-    'decision heuristic': `The best ${territory} decision is usually the one that removes ${subject}, not the one with the most features.`,
-    'hidden constraint': `${territory} looks flexible until ${subject} starts dictating the surrounding workflow.`,
-    'unexpected interaction': `A small change in ${territory} can move the bottleneck into ${subject} instead of removing it.`,
-    'trade-off': `The simplest ${territory} option often wins until coordination cost becomes larger than implementation cost.`,
-    'misleading best practice': `A ${territory} best practice becomes harmful when it is copied without the constraint that originally justified it.`,
-    'implementation lesson': `The first ${territory} improvement should reduce ${subject} before it adds new capability.`,
+  const templates: Record<string, { claim: string; mechanism: string }> = {
+    'decision heuristic': { claim: `Choose a ${territory} option only after comparing how it changes ${subject}.`, mechanism: `ranking alternatives against the observed ${subject} signal` },
+    'hidden constraint': { claim: `${territory} looks flexible until ${subject} becomes a gating dependency.`, mechanism: `${subject} blocks the next workflow transition` },
+    'unexpected interaction': { claim: `A small change in ${territory} can move the bottleneck into ${subject} instead of removing it.`, mechanism: `a dependency handoff transfers load into ${subject}` },
+    'trade-off': { claim: `The simplest ${territory} option stops winning when coordination overhead exceeds its implementation savings.`, mechanism: 'coordination overhead crosses the implementation-savings threshold' },
+    'misleading best practice': { claim: `A ${territory} practice fails when its original boundary conditions are absent.`, mechanism: 'missing boundary conditions invalidate the copied practice' },
+    'implementation lesson': { claim: `Instrument ${territory} at the point where ${subject} first becomes observable.`, mechanism: `a feedback checkpoint exposes ${subject} before downstream rework` },
   };
+  const made = templates[family] ?? { claim: `${territory} creates value only when it changes a measurable decision about ${subject}.`, mechanism: `a measurable ${subject} signal changes the next decision` };
   return {
-    claim: templates[family] ?? `${territory} creates value only when it changes the decision behind ${subject}.`,
-    mechanism: subject,
+    claim: made.claim,
+    mechanism: made.mechanism,
     audienceConsequence: outcome ? `This reduces ${subject} so the reader can ${outcome}.` : undefined,
   };
 }
@@ -220,6 +252,8 @@ export function selectDiverseIdeas(
 ): ContentIdeaCandidate[] {
   const selected: ContentIdeaCandidate[] = [];
   const remaining = [...candidates];
+  const pillarCount = new Set(candidates.map((candidate) => candidate.pillar)).size;
+  const pillarCap = pillarCount > 1 ? Math.ceil(count / pillarCount) : count;
   while (selected.length < count && remaining.length) {
     const evaluated = remaining.map((candidate) => {
       const motif = classifyConceptualMotif({
@@ -235,13 +269,23 @@ export function selectDiverseIdeas(
       }, memory);
       return { candidate, penalty, adjusted: candidate.score.composite - penalty.total };
     }).sort((a, b) => b.adjusted - a.adjusted);
-    const viable = evaluated.find(({ candidate }) => (
+    const eligible = evaluated.filter(({ candidate }) => (
       (!candidate.rejectedReasons.length || !remaining.some((item) => item.rejectedReasons.length === 0))
       && !selected.some((prior) => (
         jaccardSimilarity(prior.coreClaim, candidate.coreClaim) > .78
         && jaccardSimilarity(prior.mechanism, candidate.mechanism) > .7
       ))
     ));
+    const conceptuallyDistinct = ({ penalty }: typeof eligible[number]) => !(
+      penalty.strong.includes('recent_mechanism')
+      && (penalty.strong.includes('recent_core_claim') || penalty.strong.includes('conceptual_motif_and_perspective'))
+    );
+    const withinPillarBalance = ({ candidate }: typeof eligible[number]) =>
+      selected.filter((item) => item.pillar === candidate.pillar).length < pillarCap;
+    const viable = eligible.find((item) => withinPillarBalance(item) && conceptuallyDistinct(item))
+      ?? eligible.find(withinPillarBalance)
+      ?? eligible.find(conceptuallyDistinct)
+      ?? eligible[0];
     if (!viable) break;
     const chosen = {
       ...viable.candidate,

@@ -32,6 +32,25 @@ function ranked(topic: string, claim: string, mechanism: string, totalScore: num
 }
 
 describe('recent content memory', () => {
+  it('uses rejected-generation fingerprints only to penalize immediate duplication', () => {
+    const rejected = memoryFingerprint({
+      origin: 'REJECTED_DUPLICATE_ONLY',
+      topic: 'affordable web design',
+      coreClaim: 'Affordable web design becomes costly when scalability and performance are deferred.',
+      mechanism: null,
+      authorityMode: null,
+    });
+    const memory = createRecentContentMemory([rejected]);
+    const penalty = scoreAgainstRecentContentMemory(memoryFingerprint({
+      topic: 'low cost web design',
+      coreClaim: 'Affordable web design becomes expensive when performance and scalability are postponed.',
+      mechanism: null,
+    }), memory);
+    assert.ok(penalty.total >= 36);
+    assert.ok(penalty.strong.includes('recent_core_claim'));
+    assert.equal(memory.fingerprints[0].authorityMode, null);
+  });
+
   it('allows the same topic when the claim and mechanism differ', () => {
     const memory = createRecentContentMemory([memoryFingerprint()]);
     const penalty = scoreAgainstRecentContentMemory(memoryFingerprint({

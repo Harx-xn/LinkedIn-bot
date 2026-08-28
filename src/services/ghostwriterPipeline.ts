@@ -389,6 +389,10 @@ export async function prepareBatchContextV2(params: {
         ?? (!diagnosticCandidate.ranked.novelty.allowed ? diagnosticCandidate.ranked.novelty.reasons[0] ?? 'RECENT_MECHANISM_DUPLICATE' : null);
       params.traceRecorder.recordCandidate({
         candidateTraceId: traceId,
+        sourceType: diagnosticCandidate.ranked.trend.sourceType ?? null,
+        ideaOrigin: diagnosticCandidate.ranked.trend.ideaOrigin ?? null,
+        selectedClaim: diagnosticCandidate.coreClaim || null,
+        selectedMechanism: diagnosticCandidate.mechanism || null,
         origin: diagnosticCandidateOrigin({
           ideaGenerationMode: diagnosticCandidate.ranked.trend.ideaGenerationMode,
           ideaOrigin: diagnosticCandidate.ranked.trend.ideaOrigin,

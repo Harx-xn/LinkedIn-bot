@@ -211,6 +211,27 @@ export function buildPlanBlock(plan: BatchPostPlan, sourceLink?: string, trend?:
     depth?.endingInsight ? `- Possible ending insight: ${depth.endingInsight}` : '',
     depth?.avoidIdeas.length ? `- Avoid: ${depth.avoidIdeas.join(' | ')}` : '',
   ].filter(Boolean).join('\n');
+  const hookFunction: Record<string, string> = {
+    OBSERVATION: 'begin with the specific observable pattern; do not convert it into a mistake or misconception premise',
+    DIRECT_VALUE_PROMISE: 'state the useful claim, decision, or mechanism immediately; do not announce the topic first',
+    CONTRARIAN_CLAIM: 'state only the contrast already supported by the claim; do not invent a popular belief or controversy',
+    SPECIFIC_RESULT: 'lead with the supported result or measurement and its meaning',
+    MISTAKE: 'name the supported failure behavior and its cause; do not claim it is common unless evidence says so',
+    COMPARISON: 'establish the compared options or conditions immediately',
+    QUESTION: 'ask a genuinely unresolved question whose answer is developed by the post; never use question then obvious answer',
+    FIRST_PERSON_LESSON: 'open on the supported personal observation without embellishing the experience',
+    STORY_OPENING: 'enter at a supported concrete moment or change, not a generic scene-setting paragraph',
+  };
+  const structureFunction: Record<string, string> = {
+    CLAIM_EXPLANATION_IMPLICATION: 'claim → explanation → implication',
+    STORY_TURNING_POINT_LESSON: 'supported situation → meaningful turn → bounded lesson',
+    OBSERVATION_MECHANISM_CONSEQUENCE: 'specific observation → mechanism → consequence or qualification',
+    MISTAKE_CAUSE_CORRECTION: 'supported failure behavior → cause → correction or decision check',
+    COMPARISON_DISTINCTION_DECISION: 'comparison dimensions → condition that changes the preference → decision rule',
+    QUESTION_ANSWER_TAKEAWAY: 'genuine question → reasoned answer → substantive implication',
+    FRAMEWORK_EXPLANATION_APPLICATION: 'state/process change → resulting behavior → bounded application',
+    COMPACT_INSIGHT: 'one substantive claim developed only as far as needed',
+  };
   return `
 CLAIM CONTRACT — SELECTED CENTRAL CLAIM — PRESERVE THIS MEANING:
 ${centralClaim}
@@ -224,8 +245,11 @@ AUDIENCE AND OBJECTIVE:
 ASSIGNED EDITORIAL FORM:
 ${buildAngleSpecificityBlock(plan)}
 ${editorial ? `- Opening direction: ${editorial.hookFamily.toLowerCase().replace(/_/g, ' ')}; express the claim directly, without a stock formula or clickbait.
+- Opening function: ${hookFunction[editorial.hookFamily] ?? 'make a substantive rhetorical move in line one'}.
 - Rhetorical direction: ${editorial.rhetoricalStructure.toLowerCase().replace(/_/g, ' ')}; use it flexibly, without headings or a fixed paragraph count.
+- Reasoning progression: ${structureFunction[editorial.rhetoricalStructure] ?? 'make each paragraph advance a distinct reasoning function'}.
 - Ending direction: ${editorial.endingIntent.toLowerCase().replace(/_/g, ' ')}.
+- The final paragraph must realize that ending behavior; it may stop on a substantive point and must not add an automatic summary or recommendation.
 - Reference/share value, when useful: ${editorial.referenceValueForm.toLowerCase().replace(/_/g, ' ')}.
 - Presentation goal: ${editorial.shareabilityProfile?.presentationGuidance ?? 'Present the central claim clearly without manufacturing a list, framework, controversy, or CTA.'}
 - Personal evidence: ${editorial.personalEvidenceAvailable ? 'use only explicitly supplied facts' : 'unavailable; do not use a first-person story, lesson, or result'}.

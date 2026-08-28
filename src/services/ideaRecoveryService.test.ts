@@ -295,7 +295,7 @@ describe('idea-level generation recovery', () => {
       },
     );
     assert.equal(replacementCalls, 1);
-    assert.ok(pool.bestForIdea('idea-a'));
+    assert.equal(pool.bestForIdea('idea-a'), null);
     assert.equal(recovery.finalIdea.candidateId, 'idea-b');
     assert.equal(recovery.result.acceptance.accepted, true);
     assert.ok((recovery.result.writerOperationsUsed ?? 0) <= MAX_SLOT_WRITER_OPERATIONS);
@@ -316,8 +316,8 @@ describe('idea-level generation recovery', () => {
       AUTHOR, { niches: ['Operations'] }, [], 'OPENAI', { candidatePool: pool },
       () => ({ candidateId: 'idea-b', plan: plan('Broken alternate'), trend: alternateTrend }),
     );
-    assert.equal(recovery.finalIdea.candidateId, 'idea-a');
-    assert.deepEqual(recovery.result.fallbackProvenance, ['BEST_USABLE_FALLBACK']);
+    assert.equal(recovery.finalIdea.candidateId, 'idea-b');
+    assert.ok(recovery.result.fallbackProvenance?.includes('SAFE_FALLBACK_ACCEPTANCE'));
   });
 
   it('returns the best safe draft when both bounded ideas are exhausted', async () => {
@@ -337,7 +337,7 @@ describe('idea-level generation recovery', () => {
     );
     assert.equal(replacementCalls, 1);
     assert.equal(recovery.result.ok, true);
-    assert.deepEqual(recovery.result.fallbackProvenance, ['BEST_USABLE_FALLBACK']);
+    assert.ok(recovery.result.fallbackProvenance?.includes('SAFE_FALLBACK_ACCEPTANCE'));
     assert.ok((recovery.result.writerOperationsUsed ?? 0) <= MAX_SLOT_WRITER_OPERATIONS);
   });
 
@@ -355,6 +355,7 @@ describe('idea-level generation recovery', () => {
       () => ({ candidateId: 'idea-b', plan: plan('Critical alternate'), trend: alternateTrend }),
     );
     assert.equal(pool.bestForIdea('idea-b'), null);
-    assert.equal(recovery.finalIdea.candidateId, 'idea-a');
+    assert.equal(recovery.finalIdea.candidateId, 'idea-b');
+    assert.ok(recovery.result.fallbackProvenance?.includes('SAFE_FALLBACK_ACCEPTANCE'));
   });
 });

@@ -108,7 +108,7 @@ export type UnifiedSelectionEvaluation = {
 export type UnifiedSelectionObserver = (evaluation: UnifiedSelectionEvaluation) => void;
 
 const TIMELY_INTENTS = new Set(['recent_development', 'official_update', 'industry_change', 'research_or_data', 'emerging_opportunity']);
-const CRITICAL_ISSUE = /unsupported_authority|authority_boundary|prohibited|factual_safety|unsafe_evidence|excluded_topic|hard_platform/i;
+const CRITICAL_ISSUE = /unsupported_authority|authority_boundary|prohibited|factual_safety|unsafe_evidence|excluded_topic|hard_platform|niche_mismatch|missing_pillar_match/i;
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
@@ -144,6 +144,13 @@ function stableCandidateId(candidate: RankedTrendCandidate): string {
     candidate.fingerprint.normalizedTopic, candidate.fingerprint.coreClaim,
     candidate.trend.link ?? '',
   ].join('|').toLowerCase();
+}
+
+function topicNamesActivePillar(topic: string, pillar: string): boolean {
+  const ignored = new Set(['development', 'engineering', 'technology', 'solutions', 'design']);
+  const tokens = (value: string) => value.toLowerCase().match(/[a-z0-9]+/g)?.filter((token) => token.length >= 3 && !ignored.has(token)) ?? [];
+  const topicTokens = new Set(tokens(topic));
+  return tokens(pillar).some((token) => topicTokens.has(token));
 }
 
 export function normalizeBatchCandidate(
@@ -201,6 +208,12 @@ export function normalizeBatchCandidate(
   let searchDisposition = candidate.trend.searchDisposition ?? null;
   let searchRejectionReason = candidate.trend.searchRejectionReason ?? null;
   let evidenceOnly = Boolean(candidate.trend.evidenceOnly || searchDisposition === 'EVIDENCE_ONLY');
+  const untransformedCrossDomainSubject = isSearch
+    && !topicNamesActivePillar(candidate.trend.topic, pillar)
+    && (coherence.audienceIdeaNaturalness ?? 100) < 35;
+  if (untransformedCrossDomainSubject) {
+    issues.push('CROSS_DOMAIN_FINAL_TOPIC_UNTRANSFORMED');
+  }
   if (isSearch && searchDisposition === 'NEW_IDEA_CANDIDATE') {
     if ((subjectRelevance ?? 100) < 45) {
       searchDisposition = 'REJECTED_FOR_CREATOR_FIT';
@@ -215,7 +228,10 @@ export function normalizeBatchCandidate(
     }
   }
   if (searchRejectionReason && !evidenceOnly) issues.push(searchRejectionReason);
-  const criticalIssues = issues.filter((issue) => CRITICAL_ISSUE.test(issue) || issue.startsWith('COHERENCE_') || issue.startsWith('SEARCH_'));
+  const criticalIssues = issues.filter((issue) => CRITICAL_ISSUE.test(issue)
+    || issue.startsWith('COHERENCE_')
+    || issue.startsWith('SEARCH_')
+    || issue === 'CROSS_DOMAIN_FINAL_TOPIC_UNTRANSFORMED');
   const motif = candidate.trend.conceptualMotif || candidate.trend.reasoningArchetype
     ? { conceptualMotif: candidate.trend.conceptualMotif ?? null, reasoningArchetype: candidate.trend.reasoningArchetype ?? null }
     : classifyConceptualMotif({
@@ -370,8 +386,12 @@ export function selectUnifiedBatchCandidates(
         performance,
       };
     }).sort((a, b) => b.tier - a.tier || b.adjusted - a.adjusted);
-    const choice = evaluated.find(({ candidate, tier: candidateTier }) => candidateTier > 0
+    const eligible = evaluated.filter(({ candidate, tier: candidateTier }) => candidateTier > 0
       && !selected.some((prior) => areHardBatchDuplicates(prior.ranked, candidate.ranked)));
+    const choice = eligible.find(({ memoryPenalty }) => !(
+      memoryPenalty.strong.includes('recent_mechanism')
+      && (memoryPenalty.strong.includes('recent_core_claim') || memoryPenalty.strong.includes('conceptual_motif_and_perspective'))
+    )) ?? eligible[0];
     const selectionStep = (diagnostics?.selectionStepOffset ?? 0) + selected.length + 1;
     for (const evaluation of evaluated) {
       const collisionCandidate = selected.find((prior) => areHardBatchDuplicates(prior.ranked, evaluation.candidate.ranked));

@@ -51,6 +51,27 @@ function candidate(input: {
 }
 
 describe('unified batch candidate selection', () => {
+  it('rejects an untransformed foreign-domain subject while retaining cross-domain evidence for transformation', () => {
+    const foreign = candidate({
+      claim: 'mHealth development framework applies game-design principles',
+      mechanism: 'game-design feedback loops',
+      pillar: 'Unity Game Development',
+      searched: true,
+    });
+    foreign.trend.topic = 'mHealth development';
+    foreign.trend.audienceIdeaNaturalness = 26;
+    foreign.trend.candidateCoherence = {
+      audienceIdeaNaturalness: 26, creatorContentFit: 95, pillarClaimFit: 74,
+      sourceClaimFit: 72, authorityFramingFit: 70, overall: 67,
+    };
+    const normalized = normalizeBatchCandidate(foreign);
+    assert.ok(normalized.criticalIssues.includes('CROSS_DOMAIN_FINAL_TOPIC_UNTRANSFORMED'));
+
+    foreign.trend.topic = 'What Unity developers can learn from an mHealth game-design framework';
+    const transformed = normalizeBatchCandidate(foreign);
+    assert.equal(transformed.criticalIssues.includes('CROSS_DOMAIN_FINAL_TOPIC_UNTRANSFORMED'), false);
+  });
+
   const distinctStrategy = [
     ['Explicit ownership removes approval loops', 'single decision owner', 'Decision ownership'],
     ['Reconciliation checkpoints expose ledger drift early', 'checkpoint reconciliation', 'Financial controls'],
@@ -162,5 +183,30 @@ describe('unified batch candidate selection', () => {
     assert.ok(events.some((event) => event.selectionStep === 2 && event.disposition === 'BATCH_DUPLICATE'
       && event.collision === first.fingerprint.coreClaim));
     assert.ok(events.every((event) => Number.isFinite(event.memoryPenalty)));
+  });
+
+  it('prefers conceptual diversity across a five-post batch when alternatives exist', () => {
+    const repeated = Array.from({ length: 4 }, (_, index) => candidate({
+      claim: `Topic ${index} looks improved, but the underlying constraint still controls the outcome`,
+      mechanism: 'unchanged decision criteria preserve the underlying constraint',
+      territory: `Topic ${index}`, score: 96 - index,
+    }));
+    const alternatives = [
+      candidate({ claim: 'A bounded retry queue prevents duplicate work', mechanism: 'idempotency keys deduplicate queued retries', territory: 'Retry control', score: 88 }),
+      candidate({ claim: 'Sampling failed records reveals parser drift', mechanism: 'negative samples isolate schema drift', territory: 'Data quality', score: 86 }),
+      candidate({ claim: 'Release windows need an explicit rollback threshold', mechanism: 'error-rate threshold triggers rollback', territory: 'Release control', score: 84 }),
+      candidate({ claim: 'Cache keys must include tenant scope', mechanism: 'tenant-bound keys prevent cross-account collisions', territory: 'Cache isolation', score: 82 }),
+    ];
+    const selected = selectUnifiedBatchCandidates([...repeated, ...alternatives], 5);
+    const repeatedSelected = selected.filter((item) => item.mechanism.includes('unchanged decision criteria'));
+    assert.equal(selected.length, 5);
+    assert.equal(repeatedSelected.length, 1);
+  });
+
+  it('allows the same topic family when mechanisms are materially different', () => {
+    const first = candidate({ claim: 'Release reliability improves with bounded retries', mechanism: 'idempotency keys deduplicate retries', territory: 'Release reliability', score: 90 });
+    const second = candidate({ claim: 'Release reliability improves with staged exposure', mechanism: 'canary traffic limits blast radius', territory: 'Release reliability', score: 88 });
+    const selected = selectUnifiedBatchCandidates([first, second], 2);
+    assert.equal(selected.length, 2);
   });
 });

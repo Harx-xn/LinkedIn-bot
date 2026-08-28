@@ -116,6 +116,47 @@ The boundary still needs an expiry policy, because storing every key forever cre
     const decision = buildAcceptanceDecision({ deterministic, technicalReview: { available: false, passed: false, confidence: 0, issues: [] }, blocking: [], warnings: [] });
     assert.equal(decision.accepted, true);
     assert.equal(decision.technicalPassed, false);
+    assert.equal(decision.reviewerStatus, 'REVIEWER_NOT_REQUIRED_SAFE_PATH');
+
+    const blockedDeterministic = { ...deterministic, passed: false, issues: [{ code: 'hook_realization_mismatch', severity: 'error' as const }] };
+    const unavailable = buildAcceptanceDecision({
+      deterministic: blockedDeterministic,
+      technicalReview: { available: false, passed: false, confidence: 0, issues: [] },
+      blocking: [],
+      warnings: [],
+    });
+    assert.equal(unavailable.accepted, false);
+    assert.equal(unavailable.reviewerStatus, 'REVIEWER_UNAVAILABLE');
+  });
+
+  it('accepts strong editorial mismatch after bounded repair but keeps claim drift fatal', () => {
+    const deterministic = { passed: false, deterministicScore: 93, score: 93, issues: [], specificity: { score: 74, signals: [], missing: [] } };
+    const editorial = { code: 'rhetorical_structure_mismatch', severity: 'error' as const };
+    const tolerated = buildAcceptanceDecision({
+      deterministic,
+      technicalReview: { available: true, passed: true, confidence: 0.9, issues: [] },
+      blocking: [editorial], warnings: [], repairAttempts: 1,
+    });
+    assert.equal(tolerated.accepted, true);
+    assert.equal(tolerated.acceptanceMode, 'EDITORIAL_TOLERANCE');
+    const drift = buildAcceptanceDecision({
+      deterministic,
+      technicalReview: { available: true, passed: false, confidence: 0.9, issues: [{ code: 'CLAIM_DRIFT', severity: 'error', excerpt: '', explanation: '', repairInstruction: '' }] },
+      blocking: [{ code: 'CLAIM_DRIFT', severity: 'error' }], warnings: [], repairAttempts: 1,
+    });
+    assert.equal(drift.accepted, false);
+    assert.equal(drift.reviewerStatus, 'REVIEWER_CRITICAL_FAIL');
+  });
+
+  it('classifies moderate reviewer quality failure without exhausting a strong repaired draft', () => {
+    const deterministic = { passed: true, deterministicScore: 92, score: 92, issues: [], specificity: { score: 76, signals: [], missing: [] } };
+    const result = buildAcceptanceDecision({
+      deterministic,
+      technicalReview: { available: true, passed: false, confidence: 0.8, informationDensity: 62, progressionQuality: 68, redundancyRisk: 42, genericDiscourseRisk: 35, claimFidelity: 91, issues: [{ code: 'REDUNDANT_EXPLANATION', severity: 'warning', excerpt: '', explanation: '', repairInstruction: '' }] },
+      blocking: [], warnings: [{ code: 'REDUNDANT_EXPLANATION', severity: 'warning' }], repairAttempts: 1,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.reviewerStatus, 'REVIEWER_QUALITY_FAIL');
   });
 
   it('creates targeted density and redundancy repair codes', () => {

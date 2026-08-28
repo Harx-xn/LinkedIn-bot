@@ -449,6 +449,9 @@ Output JSON array only:
         angle: plan.angle,
         expressionMode: plan.expressionMode,
         author,
+        resolvedAudience: plan.resolvedAudience ?? [],
+        candidateMechanism: plan.mechanismFocus?.join(' ') || trend?.fingerprint?.mechanisms.join(' '),
+        sourceEvidence: [trend?.summary, ...(trend?.keyPoints ?? [])].filter(Boolean).join(' '),
       });
     };
 

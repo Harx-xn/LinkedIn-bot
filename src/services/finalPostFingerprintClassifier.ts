@@ -15,6 +15,25 @@ export type FinalPostFingerprintClassification = {
   authorityMode: string;
   conceptualMotif: string | null;
   reasoningArchetype: string | null;
+  openingSyntax: OpeningSyntax;
+  rhetoricalMove: OpeningRhetoricalMove;
+  openingBehavior: string;
+  secondLineTransition: string;
+  transitionPattern: string;
+};
+
+export type OpeningSyntax = 'QUESTION' | 'CONDITIONAL' | 'CONTRAST' | 'CONSEQUENCE_FIRST' | 'MECHANISM_FIRST' | 'DATA_FIRST' | 'DIRECT_INSTRUCTION' | 'SCENARIO' | 'DIRECT_DECLARATIVE';
+export type OpeningRhetoricalMove = 'MISCONCEPTION_CORRECTION' | 'DIAGNOSTIC' | 'TRADE_OFF' | 'COMPARISON' | 'CAUSAL_EXPLANATION' | 'DECISION_RULE' | 'WARNING' | 'PATTERN_RECOGNITION' | 'PRACTICAL_OBSERVATION' | 'GENERIC_SETUP';
+
+export type OpeningFormFingerprint = {
+  syntax: OpeningSyntax;
+  rhetoricalMove: OpeningRhetoricalMove;
+  behavior: string;
+  secondLineTransition: string;
+  transitionPattern: string;
+  substantive: boolean;
+  genericCategorySetup: boolean;
+  obviousQuestionAnswer: boolean;
 };
 
 function paragraphs(body: string): string[] {
@@ -25,8 +44,50 @@ function sentences(body: string): string[] {
   return body.replace(/\n+/g, ' ').split(/(?<=[.!?])\s+/).map((part) => part.trim()).filter(Boolean);
 }
 
+export function classifyOpeningForm(body: string): OpeningFormFingerprint {
+  const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const first = lines[0] ?? '';
+  const second = lines[1] ?? '';
+  const firstNormalized = normalizeTrendTitle(first);
+  const genericCategorySetup = /^(?:in|within) (?:the )?(?:realm|field|world|space) of\b|^(?:in|within) [a-z][a-z -]{2,45}(?:development|automation|engineering|marketing|security)\b|^when (?:discussing|talking about|it comes to)\b|^for [a-z][a-z -]{1,35}(?:developers?|teams?|leaders?|professionals?|operators?)\b/i.test(first)
+    && !/\b(?:because|but|until|unless|without|fails?|breaks?|prevents?|causes?|reduces?|increases?|means|only when|depends? on|cost|risk|bottleneck|threshold)\b/i.test(first);
+  const obviousQuestionAnswer = /\?\s*(?:the answer is\b|yes(?:\b|[,!.])|no(?:\b|[,!.])|of course\b)/i.test(`${first} ${second}`);
+  const syntax: OpeningSyntax = /\?$/.test(first) ? 'QUESTION'
+    : /^(?:if|when|unless|once)\b/i.test(first) ? 'CONDITIONAL'
+      : /^(?:but|yet|however|instead|rather than|unlike|while)\b/i.test(first) || /\b(?:not .{0,35} but|rather than|versus)\b/i.test(first) ? 'CONTRAST'
+        : /^(?:the (?:cost|risk|result|consequence)|[a-z -]+ (?:costs?|delays?|prevents?|reduces?|increases?))\b/i.test(first) ? 'CONSEQUENCE_FIRST'
+          : /^(?:because|through|by )\b/i.test(first) || /\b(?:causes?|drives?|prevents?|invalidates?|moves? the bottleneck)\b/i.test(first) ? 'MECHANISM_FIRST'
+            : /^\d+(?:\.\d+)?%?\b/i.test(first) ? 'DATA_FIRST'
+              : /^(?:use|choose|check|measure|compare|instrument|remove|map|test|validate|start|stop)\b/i.test(first) ? 'DIRECT_INSTRUCTION'
+                : /^(?:imagine|suppose|consider)\b/i.test(first) ? 'SCENARIO' : 'DIRECT_DECLARATIVE';
+  const rhetoricalMove: OpeningRhetoricalMove = /\b(?:common|prevalent|critical) (?:mistake|misconception)|many .{0,25} assume|myth\b/i.test(first) ? 'MISCONCEPTION_CORRECTION'
+    : /\b(?:symptom|diagnos|signal|reveals?|root cause|failure mode)\b/i.test(first) ? 'DIAGNOSTIC'
+      : /\b(?:trade-?off|at the cost of|versus|rather than|while .{0,45} but)\b/i.test(first) ? 'TRADE_OFF'
+        : /\b(?:compare|compared|difference between|versus|unlike)\b/i.test(first) ? 'COMPARISON'
+          : /\b(?:because|causes?|drives?|prevents?|through|by )\b/i.test(first) ? 'CAUSAL_EXPLANATION'
+            : /\b(?:only when|unless|threshold|choose|decision rule)\b/i.test(first) ? 'DECISION_RULE'
+              : /\b(?:warning|risk|fails?|breaks?|cannot|can't)\b/i.test(first) ? 'WARNING'
+                : /\b(?:pattern|often|tends? to|keeps? recurring)\b/i.test(first) ? 'PATTERN_RECOGNITION'
+                  : genericCategorySetup ? 'GENERIC_SETUP' : 'PRACTICAL_OBSERVATION';
+  const secondLineTransition = !second ? 'NONE'
+    : /^(?:however|moreover|additionally|ultimately|therefore|in summary)\b/i.test(second) ? 'GENERIC_CONNECTOR'
+      : /\b(?:because|through|by |causes?|prevents?)\b/i.test(second) ? 'MECHANISM'
+        : /\b(?:but|instead|rather|unless|while)\b/i.test(second) ? 'CONTRAST'
+          : firstNormalized && normalizeTrendTitle(second) === firstNormalized ? 'RESTATEMENT' : 'DEEPENING';
+  const transitionPattern = [...body.matchAll(/(?:^|\n\s*\n)(however|moreover|additionally|ultimately|therefore|in summary)\b/gi)]
+    .map((match) => match[1].toLowerCase()).join('>') || 'IMPLICIT';
+  const substantive = !genericCategorySetup && !obviousQuestionAnswer && (
+    /\b(?:because|but|until|unless|without|fails?|breaks?|prevents?|causes?|reduces?|increases?|means|only when|depends? on|cost|risk|bottleneck|threshold|\d+(?:\.\d+)?%?)\b/i.test(first)
+    || first.split(/\s+/).length >= 8
+  );
+  return { syntax, rhetoricalMove, behavior: genericCategorySetup ? 'GENERIC_CATEGORY_SETUP' : obviousQuestionAnswer ? 'OBVIOUS_QUESTION_ANSWER' : 'SUBSTANTIVE_MOVE', secondLineTransition, transitionPattern, substantive, genericCategorySetup, obviousQuestionAnswer };
+}
+
 export function classifyHookType(body: string): string {
   const first = paragraphs(body)[0] ?? body.trim();
+  const opening = classifyOpeningForm(body);
+  if (opening.rhetoricalMove === 'MISCONCEPTION_CORRECTION') return 'MISCONCEPTION_CORRECTION_HOOK';
+  if (opening.genericCategorySetup) return 'GENERIC_CATEGORY_SETUP_HOOK';
   if (/^\s*(?:[-*•]|\d+[.)])\s+/.test(first)) return 'LIST_OPENING';
   if (/\?$/.test(first)) return 'QUESTION_HOOK';
   if (/^\s*(?:\d+(?:\.\d+)?%?|one in \d+|most|few)\b/i.test(first)) return 'DATA_OR_QUANTIFIED_HOOK';
@@ -142,6 +203,7 @@ export function classifyFinalPostFingerprint(
     perspective,
     ideaFamily: inferredFamily || context.plannedIdeaFamily,
   });
+  const opening = classifyOpeningForm(body);
 
   return {
     hookType: classifyHookType(body),
@@ -153,6 +215,11 @@ export function classifyFinalPostFingerprint(
     ideaFamily: inferredFamily || context.plannedIdeaFamily || 'FOCUSED_OBSERVATION',
     contentIntent,
     ...motif,
+    openingSyntax: opening.syntax,
+    rhetoricalMove: opening.rhetoricalMove,
+    openingBehavior: opening.behavior,
+    secondLineTransition: opening.secondLineTransition,
+    transitionPattern: opening.transitionPattern,
     authorityMode: /\b(?:I|we|my|our)\b/.test(body)
       ? 'FIRST_PERSON_PRACTITIONER'
       : context.sourcePresent

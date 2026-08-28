@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AiUsageStatus, Prisma, UserRole } from '@prisma/client';
+import { AiPricingType, AiUsageStatus, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prismaClient';
-import { calculateTokenCost, resolveAiModelPricing } from './aiPricingService';
+import { calculateAiCost, calculateTokenCost, resolveAiModelPricing, validatePricingConfiguration } from './aiPricingService';
 import { linkAiUsageGenerationsToPost, recordAiUsage } from './aiUsageService';
-import { createGenerationId, extractOpenAiUsage, trackAiProviderCall, withAiCostContext } from './aiCostTrackingService';
+import { createGenerationId, extractGeminiImageUsage, extractOpenAiUsage, trackAiProviderCall, withAiCostContext } from './aiCostTrackingService';
 import { expenseCostForPeriod, normalizedMonthlyExpense } from './platformCostService';
 import { getUserEconomics, percentile, summarizePlanDistribution } from './unitEconomicsService';
 import { buildPricingRecommendation, recommendedMinimumPrice } from './pricingIntelligenceService';
@@ -28,6 +28,75 @@ test('cost intelligence pricing and accounting', async (t) => {
     assert.equal(precise.totalCostUsd.toFixed(8), '0.00001235');
   });
 
+  await t.test('preserves existing text-token pricing through the multi-unit calculator', () => {
+    const value = calculateAiCost(
+      { inputTokens: 4_000, cachedInputTokens: 0, outputTokens: 1_000, generatedImages: 0, requestCount: 1, billableSeconds: null },
+      { pricingType: AiPricingType.TEXT_TOKENS, inputCostPerMillionTokens: '0.40', outputCostPerMillionTokens: '1.60' },
+    );
+    assert.equal(value.inputCostUsd.toFixed(8), '0.00160000');
+    assert.equal(value.outputCostUsd.toFixed(8), '0.00160000');
+    assert.equal(value.totalCostUsd.toFixed(8), '0.00320000');
+    assert.equal(value.imageCostUsd.toFixed(8), '0.00000000');
+  });
+
+  await t.test('calculates image input and actual one-or-many image outputs', () => {
+    const pricing = { pricingType: AiPricingType.IMAGE, inputCostPerMillionTokens: '0.30', imageOutputCost: '0.039', imageOutputUnit: 'PER_IMAGE' };
+    const one = calculateAiCost(
+      { inputTokens: 700, cachedInputTokens: 0, outputTokens: 99, generatedImages: 1, requestCount: 1, billableSeconds: null },
+      pricing,
+    );
+    assert.equal(one.inputCostUsd.toFixed(8), '0.00021000');
+    assert.equal(one.outputCostUsd.toFixed(8), '0.00000000');
+    assert.equal(one.imageCostUsd.toFixed(8), '0.03900000');
+    assert.equal(one.totalCostUsd.toFixed(8), '0.03921000');
+    const two = calculateAiCost(
+      { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, generatedImages: 2, requestCount: 1, billableSeconds: null },
+      pricing,
+    );
+    assert.equal(two.imageCostUsd.toFixed(8), '0.07800000');
+  });
+
+  await t.test('calculates per-request and per-second pricing without token inference', () => {
+    const requests = calculateAiCost(
+      { inputTokens: 999, cachedInputTokens: 0, outputTokens: 999, generatedImages: 0, requestCount: 3, billableSeconds: null },
+      { pricingType: AiPricingType.PER_REQUEST, costPerRequest: '0.0125' },
+    );
+    assert.equal(requests.requestCostUsd.toFixed(8), '0.03750000');
+    assert.equal(requests.totalCostUsd.toFixed(8), '0.03750000');
+    const seconds = calculateAiCost(
+      { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, generatedImages: 0, requestCount: 1, billableSeconds: '12.5' },
+      { pricingType: AiPricingType.PER_SECOND, costPerSecond: '0.004' },
+    );
+    assert.equal(seconds.timeCostUsd.toFixed(8), '0.05000000');
+  });
+
+  await t.test('rejects missing and incompatible pricing configuration', () => {
+    assert.deepEqual(validatePricingConfiguration({ pricingType: AiPricingType.IMAGE, imageOutputUnit: 'PER_IMAGE' }), ['Image output cost is required']);
+    assert.deepEqual(validatePricingConfiguration({ pricingType: AiPricingType.IMAGE, imageOutputCost: 1, imageOutputUnit: 'Per image' }), []);
+    assert.deepEqual(validatePricingConfiguration({ pricingType: AiPricingType.IMAGE, imageOutputCost: 1 }), ['Image output unit is required']);
+    assert.deepEqual(validatePricingConfiguration({ pricingType: AiPricingType.PER_REQUEST }), ['Cost per request is required']);
+    assert.ok(validatePricingConfiguration({ pricingType: AiPricingType.TEXT_TOKENS, inputCostPerMillionTokens: 1, outputCostPerMillionTokens: 2, imageOutputCost: 3 }).some((error) => error.includes('not valid')));
+    assert.throws(() => calculateAiCost(
+      { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, generatedImages: 1, requestCount: 1, billableSeconds: null },
+      { pricingType: AiPricingType.IMAGE, imageOutputUnit: 'PER_IMAGE' },
+    ), /requires image output cost/);
+  });
+
+  await t.test('counts every image returned by Gemini and keeps provider token usage', () => {
+    const usage = extractGeminiImageUsage({
+      modelVersion: 'gemini-2.5-flash-image',
+      usageMetadata: { promptTokenCount: 700, cachedContentTokenCount: 100, candidatesTokenCount: 25 },
+      candidates: [
+        { content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'a' } }, { text: 'caption' }] } },
+        { content: { parts: [{ inlineData: { mimeType: 'image/jpeg', data: 'b' } }] } },
+      ],
+    });
+    assert.equal(usage.inputTokens, 600);
+    assert.equal(usage.cachedInputTokens, 100);
+    assert.equal(usage.outputTokens, 25);
+    assert.equal(usage.generatedImages, 2);
+  });
+
   await t.test('selects the model price version valid at the request date', async () => {
     const original = prisma.aiModelPricing.findFirst;
     const versions = [
@@ -49,6 +118,7 @@ test('cost intelligence pricing and accounting', async (t) => {
     const writes: any[] = [];
     (prisma.aiModelPricing as any).findFirst = async () => ({
       id: 'price-1', provider: 'OPENAI', model: 'gpt-test', pricingUnit: 'TOKENS', active: true,
+      pricingType: AiPricingType.TEXT_TOKENS,
       inputCostPerMillionTokens: new Prisma.Decimal(2), cachedInputCostPerMillionTokens: new Prisma.Decimal(0.5), outputCostPerMillionTokens: new Prisma.Decimal(8),
       effectiveFrom: new Date('2026-01-01'), effectiveTo: null, metadata: null, createdAt: new Date(), updatedAt: new Date(),
     });
@@ -68,6 +138,38 @@ test('cost intelligence pricing and accounting', async (t) => {
       assert.equal(writes[0].outputTokens, 50);
       assert.equal(writes[0].status, AiUsageStatus.SUCCESS);
       assert.equal(writes[0].metadata.costStatus, 'PRICED');
+    } finally {
+      (prisma.aiModelPricing as any).findFirst = originalPricing;
+      (prisma.aiUsageEvent as any).create = originalCreate;
+    }
+  });
+
+  await t.test('prices a requested alias by the concrete model returned by the provider', async () => {
+    const originalPricing = prisma.aiModelPricing.findFirst;
+    const originalCreate = prisma.aiUsageEvent.create;
+    const lookups: string[] = [];
+    let write: any;
+    (prisma.aiModelPricing as any).findFirst = async ({ where }: any) => {
+      lookups.push(where.model);
+      return where.model === 'gemini-2.5-flash' ? {
+        id: 'price-concrete', provider: 'GEMINI', model: 'gemini-2.5-flash', pricingUnit: 'TOKENS', pricingType: AiPricingType.TEXT_TOKENS, active: true,
+        inputCostPerMillionTokens: new Prisma.Decimal('0.30'), cachedInputCostPerMillionTokens: null, outputCostPerMillionTokens: new Prisma.Decimal('2.50'),
+        imageOutputCost: null, imageOutputUnit: null, costPerRequest: null, costPerSecond: null,
+        effectiveFrom: new Date('2026-01-01'), effectiveTo: null, metadata: null, createdAt: new Date(), updatedAt: new Date(),
+      } : null;
+    };
+    (prisma.aiUsageEvent as any).create = async ({ data }: any) => { write = data; return { id: 'event-alias', ...data }; };
+    try {
+      await trackAiProviderCall({
+        provider: 'GEMINI', model: 'gemini-flash-latest',
+        invoke: async () => ({ modelVersion: 'models/gemini-2.5-flash', usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } }),
+        extractUsage: (response) => ({ inputTokens: response.usageMetadata.promptTokenCount, cachedInputTokens: 0, outputTokens: response.usageMetadata.candidatesTokenCount }),
+      });
+      assert.deepEqual(lookups, ['gemini-2.5-flash']);
+      assert.equal(write.requestedModel, 'gemini-flash-latest');
+      assert.equal(write.resolvedModel, 'gemini-2.5-flash');
+      assert.equal(write.model, 'gemini-2.5-flash');
+      assert.equal(write.metadata.pricingMatchedModel, 'gemini-2.5-flash');
     } finally {
       (prisma.aiModelPricing as any).findFirst = originalPricing;
       (prisma.aiUsageEvent as any).create = originalCreate;

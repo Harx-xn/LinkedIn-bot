@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { PlatformExpenseCycle, PlatformExpenseType, Prisma, UserRole } from '@prisma/client';
+import { AiPricingType, PlatformExpenseCycle, PlatformExpenseType, Prisma, UserRole } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../prismaClient';
 import { authMiddleware } from '../middleware/authMiddleware';
 import { requireRole } from '../middleware/requireRole';
 import { aggregateAiDimension, aiUsageWhere, getAiSpendTimeline, getAiUsageSummary, getOverview, type CostFilters } from '../services/costIntelligence/actualCostService';
-import { assertPricingWindowAvailable, normalizeProvider } from '../services/costIntelligence/aiPricingService';
+import { assertPricingWindowAvailable, normalizeImageOutputUnit, normalizeModelName, normalizeProvider, validatePricingConfiguration } from '../services/costIntelligence/aiPricingService';
 import { expenseCostForPeriod, getPlatformExpenseSummary, normalizedMonthlyExpense } from '../services/costIntelligence/platformCostService';
 import { getPlanEconomicsSummaries, getUnitEconomics, getUserEconomics } from '../services/costIntelligence/unitEconomicsService';
 import { getPricingIntelligence, getPricingSettings, savePricingSettings } from '../services/costIntelligence/pricingIntelligenceService';
@@ -95,40 +95,84 @@ router.get('/generations/:generationId', route(async (req, res) => {
   });
 }));
 
+const optionalCost = z.preprocess((value) => value === '' || value === undefined ? null : value, z.coerce.number().min(0).nullable());
 const pricingSchema = z.object({
   provider: z.string().trim().min(1).max(80), model: z.string().trim().min(1).max(160),
-  inputCostPerMillionTokens: z.coerce.number().min(0), cachedInputCostPerMillionTokens: z.coerce.number().min(0).nullable().optional(),
-  outputCostPerMillionTokens: z.coerce.number().min(0), pricingUnit: z.string().trim().max(40).default('TOKENS'),
+  pricingType: z.nativeEnum(AiPricingType).default(AiPricingType.TEXT_TOKENS),
+  inputCostPerMillionTokens: optionalCost, cachedInputCostPerMillionTokens: optionalCost,
+  outputCostPerMillionTokens: optionalCost, imageOutputCost: optionalCost,
+  imageOutputUnit: z.preprocess(normalizeImageOutputUnit, z.string().max(40).nullable()), costPerRequest: optionalCost, costPerSecond: optionalCost,
+  pricingUnit: z.string().trim().max(40).optional(),
   effectiveFrom: z.coerce.date(), effectiveTo: z.coerce.date().nullable().optional(), active: z.boolean().default(true),
   metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, context) => {
+  const validationValue = value.pricingType === AiPricingType.IMAGE && !value.imageOutputUnit
+    ? { ...value, imageOutputUnit: 'PER_IMAGE' }
+    : value;
+  for (const message of validatePricingConfiguration(validationValue)) context.addIssue({ code: z.ZodIssueCode.custom, message });
 });
+
+function pricingUnitForType(type: AiPricingType) {
+  return type === AiPricingType.TEXT_TOKENS ? 'TOKENS' : type === AiPricingType.IMAGE ? 'IMAGE' : type === AiPricingType.PER_REQUEST ? 'REQUEST' : type === AiPricingType.PER_SECOND ? 'SECOND' : 'CUSTOM';
+}
+
+function normalizedPricingData(value: z.infer<typeof pricingSchema>) {
+  return {
+    ...value,
+    provider: normalizeProvider(value.provider),
+    model: normalizeModelName(value.provider, value.model),
+    pricingUnit: pricingUnitForType(value.pricingType),
+    imageOutputUnit: value.pricingType === AiPricingType.IMAGE
+      ? normalizeImageOutputUnit(value.imageOutputUnit) ?? 'PER_IMAGE'
+      : normalizeImageOutputUnit(value.imageOutputUnit),
+    metadata: value.metadata as Prisma.InputJsonValue | undefined,
+  };
+}
+
+function pricingSignature(value: Record<string, any>) {
+  return JSON.stringify({
+    provider: normalizeProvider(value.provider), model: normalizeModelName(value.provider, value.model), pricingType: value.pricingType,
+    input: value.inputCostPerMillionTokens == null ? null : Number(value.inputCostPerMillionTokens),
+    cached: value.cachedInputCostPerMillionTokens == null ? null : Number(value.cachedInputCostPerMillionTokens),
+    output: value.outputCostPerMillionTokens == null ? null : Number(value.outputCostPerMillionTokens),
+    image: value.imageOutputCost == null ? null : Number(value.imageOutputCost), imageUnit: value.imageOutputUnit ?? null,
+    request: value.costPerRequest == null ? null : Number(value.costPerRequest), second: value.costPerSecond == null ? null : Number(value.costPerSecond),
+    metadata: value.metadata ?? null,
+  });
+}
 
 router.get('/model-pricing', route(async (_req, res) => res.json(await prisma.aiModelPricing.findMany({ orderBy: [{ provider: 'asc' }, { model: 'asc' }, { effectiveFrom: 'desc' }] }))));
 router.post('/model-pricing', route(async (req, res) => {
   const value = pricingSchema.parse(req.body);
   await assertPricingWindowAvailable(value);
-  const created = await prisma.aiModelPricing.create({ data: { ...value, provider: normalizeProvider(value.provider), metadata: value.metadata as Prisma.InputJsonValue } });
+  const created = await prisma.aiModelPricing.create({ data: normalizedPricingData(value) });
   res.status(201).json(created);
 }));
 router.put('/model-pricing/:id', route(async (req, res) => {
   const value = pricingSchema.parse(req.body);
   const existing = await prisma.aiModelPricing.findUnique({ where: { id: req.params.id } });
   if (!existing) throw new Error('Model pricing not found');
-  const changesPrice = normalizeProvider(value.provider) !== existing.provider || value.model !== existing.model ||
-    value.inputCostPerMillionTokens !== Number(existing.inputCostPerMillionTokens) ||
-    value.outputCostPerMillionTokens !== Number(existing.outputCostPerMillionTokens) ||
-    (value.cachedInputCostPerMillionTokens ?? null) !== (existing.cachedInputCostPerMillionTokens == null ? null : Number(existing.cachedInputCostPerMillionTokens));
+  const changesPrice = pricingSignature(value) !== pricingSignature(existing);
   if (changesPrice && existing.effectiveFrom <= new Date()) {
     if (value.effectiveFrom <= existing.effectiveFrom) throw new Error('A replacement pricing version must start after the existing version');
     await assertPricingWindowAvailable({ ...value, excludeId: existing.id });
     const result = await prisma.$transaction(async (tx) => {
       await tx.aiModelPricing.update({ where: { id: existing.id }, data: { active: false, effectiveTo: value.effectiveFrom } });
-      return tx.aiModelPricing.create({ data: { ...value, provider: normalizeProvider(value.provider), metadata: value.metadata as Prisma.InputJsonValue } });
+      return tx.aiModelPricing.create({ data: normalizedPricingData(value) });
     });
     return res.json({ versioned: true, previousPricingId: existing.id, pricing: result });
   }
   await assertPricingWindowAvailable({ ...value, excludeId: existing.id });
-  return res.json(await prisma.aiModelPricing.update({ where: { id: existing.id }, data: { ...value, provider: normalizeProvider(value.provider), metadata: value.metadata as Prisma.InputJsonValue } }));
+  return res.json(await prisma.aiModelPricing.update({ where: { id: existing.id }, data: normalizedPricingData(value) }));
+}));
+router.delete('/model-pricing/:id', route(async (req, res) => {
+  const existing = await prisma.aiModelPricing.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, provider: true, model: true },
+  });
+  if (!existing) throw new Error('Model pricing not found');
+  await prisma.aiModelPricing.delete({ where: { id: existing.id } });
+  res.json({ deleted: true, pricing: existing });
 }));
 
 const expenseSchema = z.object({

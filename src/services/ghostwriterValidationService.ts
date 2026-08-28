@@ -30,6 +30,60 @@ import { resolvePostDepthMetadata } from './postDepth';
 import { evaluateFirstThreeLines } from './editorialDecisionService';
 import { classifyFinalPostFingerprint } from './finalPostFingerprintClassifier';
 
+function editorialRealizationIssues(body: string, plan: BatchPostPlan): QualityIssue[] {
+  const decision = plan.editorialDecision;
+  if (!decision) return [];
+  const actual = classifyFinalPostFingerprint(body, {
+    plannedMechanism: plan.mechanismFocus?.join(' '),
+    plannedIdeaFamily: decision.referenceValueForm,
+  });
+  const issues: QualityIssue[] = [];
+  const hookMatches: Record<string, boolean> = {
+    OBSERVATION: ['PRACTICAL_OBSERVATION', 'PATTERN_RECOGNITION', 'DIAGNOSTIC', 'CAUSAL_EXPLANATION'].includes(actual.rhetoricalMove) && actual.openingBehavior !== 'GENERIC_CATEGORY_SETUP',
+    DIRECT_VALUE_PROMISE: ['DIRECT_DECLARATIVE', 'DIRECT_INSTRUCTION', 'MECHANISM_FIRST', 'CONSEQUENCE_FIRST'].includes(actual.openingSyntax),
+    CONTRARIAN_CLAIM: ['TRADE_OFF', 'COMPARISON', 'MISCONCEPTION_CORRECTION'].includes(actual.rhetoricalMove) || actual.openingSyntax === 'CONTRAST',
+    MISTAKE: ['MISCONCEPTION_CORRECTION', 'DIAGNOSTIC', 'WARNING'].includes(actual.rhetoricalMove),
+    COMPARISON: ['COMPARISON', 'TRADE_OFF'].includes(actual.rhetoricalMove) || actual.openingSyntax === 'CONTRAST',
+    QUESTION: actual.openingSyntax === 'QUESTION' && actual.openingBehavior !== 'OBVIOUS_QUESTION_ANSWER',
+    SPECIFIC_RESULT: actual.openingSyntax === 'DATA_FIRST',
+    FIRST_PERSON_LESSON: actual.hookType === 'PERSONAL_OBSERVATION_HOOK',
+    STORY_OPENING: actual.openingSyntax === 'SCENARIO' || actual.hookType === 'PERSONAL_OBSERVATION_HOOK',
+  };
+  const opening = body.split(/\n+/).find((line) => line.trim())?.trim() ?? '';
+  const substantiveOpening = opening.length >= 45
+    && (opening.match(/[\p{L}\p{N}]+/gu) ?? []).length >= 7
+    && /\b(?:because|when|while|but|cost|risk|constraint|overhead|reduces?|increases?|changes?|fails?|creates?|requires?|depends?)\b/i.test(opening);
+  if (actual.openingBehavior === 'GENERIC_CATEGORY_SETUP' && !substantiveOpening) {
+    issues.push({ code: 'generic_category_intro', severity: 'error', evidence: [opening], instruction: 'Replace the broad category setup with a substantive, claim-specific opening.' });
+  }
+  if (hookMatches[decision.hookFamily] === false && !substantiveOpening) {
+    issues.push({ code: 'hook_realization_mismatch', severity: 'error', evidence: [`assigned=${decision.hookFamily}`, `realized=${actual.openingSyntax}/${actual.rhetoricalMove}`], instruction: `Rewrite only the opening so it performs the assigned ${decision.hookFamily.toLowerCase().replace(/_/g, ' ')} function without changing the claim or inventing audience behavior, a misconception, or controversy.` });
+  }
+  const structureMatches: Record<string, boolean> = {
+    CLAIM_EXPLANATION_IMPLICATION: ['CLAIM_MECHANISM_CONSEQUENCE', 'OBSERVATION_CAUSAL_EXPLANATION', 'CLAIM_SUPPORT_RESOLUTION'].includes(actual.argumentPattern),
+    OBSERVATION_MECHANISM_CONSEQUENCE: Boolean(actual.mechanism) && /\b(?:means|result|consequence|cost|risk|reduces?|increases?|leads? to)\b/i.test(body),
+    MISTAKE_CAUSE_CORRECTION: /\b(?:mistake|failure|fails?|symptom|problem)\b/i.test(body) && Boolean(actual.mechanism),
+    COMPARISON_DISTINCTION_DECISION: ['CONTRAST_REFRAME', 'CLAIM_TRADEOFF_QUALIFICATION'].includes(actual.argumentPattern),
+    QUESTION_ANSWER_TAKEAWAY: actual.hookType === 'QUESTION_HOOK',
+    FRAMEWORK_EXPLANATION_APPLICATION: ['PRACTICAL_SEQUENCE', 'OBSERVATION_CAUSAL_EXPLANATION', 'CLAIM_MECHANISM_CONSEQUENCE'].includes(actual.argumentPattern) && /\b(?:step|process|apply|check|sequence|framework|method)\b/i.test(body),
+    COMPACT_INSIGHT: actual.structure === 'COMPACT_ARGUMENT' || body.length < 1200,
+    STORY_TURNING_POINT_LESSON: /\b(?:I|we|then|until|realized|learned)\b/i.test(body),
+  };
+  const compatibleReasoning = Boolean(actual.mechanism)
+    && ['CLAIM_MECHANISM_CONSEQUENCE', 'OBSERVATION_CAUSAL_EXPLANATION', 'CLAIM_SUPPORT_RESOLUTION', 'CONTRAST_REFRAME', 'CLAIM_TRADEOFF_QUALIFICATION'].includes(actual.argumentPattern);
+  if (structureMatches[decision.rhetoricalStructure] === false && !compatibleReasoning) {
+    issues.push({ code: 'rhetorical_structure_mismatch', severity: 'error', evidence: [`assigned=${decision.rhetoricalStructure}`, `realized=${actual.argumentPattern}/${actual.structure}`], instruction: `Preserve the claim and evidence, but realize the assigned ${decision.rhetoricalStructure.toLowerCase().replace(/_/g, ' ')} progression rather than a generic explanatory essay.` });
+  }
+  const compatibleEndings: Record<string, string[]> = {
+    CONCLUSION: ['CONCLUSION'], INSIGHT: ['INSIGHT', 'OBSERVATION', 'NO_CTA'], PREDICTION: ['PREDICTION'], OBSERVATION: ['OBSERVATION', 'NO_CTA'],
+    CHALLENGE: ['CHALLENGE'], QUESTION: ['QUESTION'], PERSONAL_NOTE: ['PERSONAL_NOTE'], SOFT_CTA: ['SOFT_CTA'], NO_CTA: ['NO_CTA', 'INSIGHT', 'OBSERVATION'],
+  };
+  if (!(compatibleEndings[decision.endingIntent] ?? []).includes(actual.endingIntent)) {
+    issues.push({ code: 'ending_realization_mismatch', severity: 'error', evidence: [`assigned=${decision.endingIntent}`, `realized=${actual.endingIntent}`], instruction: `Replace only the ending with the assigned ${decision.endingIntent.toLowerCase().replace(/_/g, ' ')} behavior. Do not add a generic summary, recommendation, question, or CTA.` });
+  }
+  return issues;
+}
+
 const VERIFIED_IDENTITY_PATTERNS = [
   /\bI am a\b/i,
   /\bI'm a\b/i,
@@ -350,6 +404,7 @@ export function runDeterministicValidation(
     issues.push(...opening.issues);
 
     const actualForm = classifyFinalPostFingerprint(body);
+    issues.push(...editorialRealizationIssues(body, plan));
     const repeatsActualForm = acceptedBodies.some((acceptedBody) => {
       const acceptedForm = classifyFinalPostFingerprint(acceptedBody);
       return acceptedForm.structure === actualForm.structure
@@ -363,6 +418,24 @@ export function runDeterministicValidation(
         instruction: `Develop this idea through its assigned ${plan.editorialDecision.rhetoricalStructure} progression instead of repeating the prior post's body experience.`,
       });
       score -= 6;
+    }
+    const repeatedOpening = acceptedBodies.some((acceptedBody) => {
+      const accepted = classifyFinalPostFingerprint(acceptedBody);
+      return accepted.openingBehavior === actualForm.openingBehavior
+        && accepted.openingSyntax === actualForm.openingSyntax
+        && accepted.rhetoricalMove === actualForm.rhetoricalMove;
+    });
+    if (repeatedOpening && (
+      actualForm.openingBehavior !== 'SUBSTANTIVE_MOVE'
+      || actualForm.rhetoricalMove === 'MISCONCEPTION_CORRECTION'
+      || actualForm.rhetoricalMove === 'GENERIC_SETUP'
+    )) {
+      issues.push({ code: 'repeated_opening_form', severity: 'error', evidence: [`${actualForm.openingSyntax}/${actualForm.rhetoricalMove}/${actualForm.openingBehavior}`], instruction: 'Rewrite the opening with a different substantive rhetorical move while preserving the exact claim, mechanism, certainty, and evidence.' });
+    }
+    const repeatedTransitionPattern = actualForm.transitionPattern !== 'IMPLICIT' && acceptedBodies.some((acceptedBody) =>
+      classifyFinalPostFingerprint(acceptedBody).transitionPattern === actualForm.transitionPattern);
+    if (repeatedTransitionPattern) {
+      issues.push({ code: 'repeated_transition_pattern', severity: 'warning', evidence: [actualForm.transitionPattern], instruction: 'Remove unnecessary essay connectors and let the argument move through its assigned reasoning structure.' });
     }
   }
 
@@ -626,6 +699,41 @@ const PERSISTENT_COMPLETENESS_CODES = new Set([
   'CLAIM_DRIFT',
 ]);
 
+const PERSISTENT_QUALITY_CODES = new Set([
+  'CLAIM_DRIFT',
+  'SEMANTIC_REPETITION',
+  'REDUNDANT_EXPLANATION',
+  'ARGUMENT_STAGNATION',
+  'LOW_INFORMATION_DENSITY',
+  'WEAK_ARGUMENT_PROGRESSION',
+  'FORCED_NICHE_PARAGRAPH',
+  'unsupported_audience_injection',
+  'CROSS_DOMAIN_FINAL_TOPIC_UNTRANSFORMED',
+]);
+
+const REPAIRABLE_EDITORIAL_CODES = new Set([
+  'generic_category_intro',
+  'hook_realization_mismatch',
+  'rhetorical_structure_mismatch',
+  'ending_realization_mismatch',
+  'GENERIC_RECOMMENDATION_ENDING',
+  'repeated_body_structure',
+  'repeated_opening_form',
+]);
+
+export function isRepairableEditorialIssueCode(code: string): boolean {
+  return REPAIRABLE_EDITORIAL_CODES.has(code);
+}
+
+export function isHardBlockIssueCode(code: string): boolean {
+  return isCriticalCandidateIssueCode(code) || PERSISTENT_QUALITY_CODES.has(code)
+    || ['generated_post_too_short', 'ARGUMENT_STAGNATION', 'SEMANTIC_REPETITION', 'WEAK_ARGUMENT_PROGRESSION'].includes(code);
+}
+
+export function isPersistentQualityIssueCode(code: string): boolean {
+  return PERSISTENT_QUALITY_CODES.has(code);
+}
+
 const RELAXABLE_BLOCKING_CODES = new Set([
   'insufficient_specificity',
   'mistake_not_named',
@@ -658,15 +766,19 @@ export function isCriticalCandidateIssueCode(code: string): boolean {
 export function filterBlockingIssues(issues: QualityIssue[], attempt: number): QualityIssue[] {
   const errors = issues.filter((i) => i.severity === 'error');
   if (attempt >= 7) {
-    return errors.filter((i) => isCriticalCandidateIssueCode(i.code) || PERSISTENT_COMPLETENESS_CODES.has(i.code));
+    return errors.filter((i) => isCriticalCandidateIssueCode(i.code)
+      || PERSISTENT_COMPLETENESS_CODES.has(i.code)
+      || isPersistentQualityIssueCode(i.code));
   }
   if (attempt >= 3) {
-    return errors.filter((i) => !RELAXABLE_BLOCKING_CODES.has(i.code) || isCriticalCandidateIssueCode(i.code));
+    return errors.filter((i) => isPersistentQualityIssueCode(i.code)
+      || !RELAXABLE_BLOCKING_CODES.has(i.code)
+      || isCriticalCandidateIssueCode(i.code));
   }
   return errors;
 }
 
 export function canForceAcceptBlockingCodes(codes: string[]): boolean {
   if (codes.length === 0) return true;
-  return codes.every((code) => RELAXABLE_BLOCKING_CODES.has(code) && !isCriticalCandidateIssueCode(code));
+  return codes.every((code) => (RELAXABLE_BLOCKING_CODES.has(code) || isRepairableEditorialIssueCode(code)) && !isHardBlockIssueCode(code));
 }

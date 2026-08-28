@@ -7,7 +7,7 @@ import type {
 } from './generationTypes';
 import { evaluateGeneratedPostLength } from './generatedPostLength';
 import { resolvePostDepthMetadata } from './postDepth';
-import { canForceAcceptBlockingCodes, isCriticalCandidateIssueCode } from './ghostwriterValidationService';
+import { canForceAcceptBlockingCodes, isHardBlockIssueCode } from './ghostwriterValidationService';
 
 export type SlotCandidateOrigin =
   | 'initial_draft'
@@ -60,8 +60,11 @@ export type RankedSlotCandidate = CandidateObservation & {
 
 function evaluateObservation(observation: CandidateObservation, sequence: number): RankedSlotCandidate {
   const issueCodes = observation.issues.map((issue) => issue.code);
-  const critical = issueCodes.some(isCriticalCandidateIssueCode)
+  const critical = issueCodes.some(isHardBlockIssueCode)
     || observation.finalized.content.length > 3000;
+  const unresolvedReviewerFailure = observation.technicalReview.available !== false
+    && !observation.technicalReview.passed
+    && observation.acceptance.reviewerStatus === 'REVIEWER_CRITICAL_FAIL';
   const errors = observation.issues.filter((issue) => issue.severity === 'error');
   const reviewAvailable = observation.technicalReview.available !== false;
   const tier: CandidateTier = errors.length === 0 && reviewAvailable && observation.technicalReview.passed
@@ -106,7 +109,8 @@ function evaluateObservation(observation: CandidateObservation, sequence: number
   return {
     ...observation,
     sequence,
-    eligible: !critical && observation.finalized.body.trim().length >= 40,
+    eligible: !critical && !unresolvedReviewerFailure
+      && observation.finalized.body.trim().length >= 40,
     tier,
     tierRank,
     claimFidelity,

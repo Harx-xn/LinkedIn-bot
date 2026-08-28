@@ -56,6 +56,10 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 const MATCH_STOP_WORDS = new Set(['and', 'the', 'for', 'with', 'from', 'into', 'about', 'development', 'industry', 'business', 'services', 'solutions']);
+const GENERIC_CONTEXT_TOKENS = new Set([
+  'user', 'engagement', 'complexity', 'architecture', 'growth', 'framework',
+  'optimization', 'innovation', 'experience', 'design', 'principle',
+]);
 
 function normalizedTokens(value: string): string[] {
   return normalizeText(value).split(' ').filter((token) => token.length >= 2 && !MATCH_STOP_WORDS.has(token)).map((token) => {
@@ -101,6 +105,41 @@ function firstMatchingAlias(text: string, profile?: NicheExpansionPlan): string 
   });
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** A cross-domain source is eligible only when the active niche is explicitly
+ * the recipient/comparison subject, rather than merely present in search context. */
+function hasExplicitCrossDomainRelationship(
+  text: string,
+  profile: NicheExpansionPlan,
+  activePillars: ContentPillar[],
+): boolean {
+  const anchors = unique([
+    profile.normalizedNiche ?? profile.niche,
+    profile.niche,
+    ...activePillars.map((pillar) => pillar.name),
+    ...(profile.importantEntities ?? []),
+    ...(profile.productsAndPlatforms ?? []),
+  ]).filter((anchor) => normalizedTokens(anchor).length > 0 && matchesProfileTerm(text, anchor));
+  const normalized = normalizeText(text);
+  return anchors.some((anchor) => {
+    const key = escapeRegExp(normalizeText(anchor)).replace(/\s+/g, '\\s+');
+    return new RegExp(`\\b${key}\\b.{0,100}\\b(?:borrow|borrows|borrowed|learn|learns|learned|adapt|adapts|adapted|apply|applies|applied|transfer|transfers|transferred|use|uses|used)\\b.{0,60}\\bfrom\\b`, 'i').test(normalized)
+      || new RegExp(`\\b(?:apply|applies|applying|adapt|adapts|adapting|transfer|transfers|transferring|bring|brings|bringing)\\b.{0,100}\\b(?:to|into|for|within)\\b.{0,60}\\b${key}\\b`, 'i').test(normalized)
+      || new RegExp(`\\b${key}\\b.{0,80}\\b(?:versus|compared|comparison|intersection|cross domain)\\b`, 'i').test(normalized);
+  });
+}
+
+function hasCrossDomainTransferLanguage(text: string): boolean {
+  return /\b(?:apply|applies|applying|adapt|adapts|adapting|borrow|borrows|borrowing|transfer|transfers|transferring|learn|learns|learning)\b.{0,100}\b(?:from|to|into|for|within)\b/i.test(normalizeText(text));
+}
+
+function isDistinctiveCategoryTerm(term: string): boolean {
+  return normalizedTokens(term).some((token) => !GENERIC_CONTEXT_TOKENS.has(token));
+}
+
 export function buildActiveNicheEvidence(
   candidate: TrendCandidate,
   strategy: EffectiveBotStrategy,
@@ -112,12 +151,20 @@ export function buildActiveNicheEvidence(
   const queryText = queryContext(candidate);
   const activePillars = allPillars(strategy).filter((item) => !active || active.pillarNames.includes(item.name));
   const literalPillar = activePillars.find((item) => matchesProfileTerm(evidenceText, item.name));
-  const keywordPillar = activePillars.find((item) => firstMatchingTerm(evidenceText, item.trendKeywords));
+  const rawKeywordMatch = activePillars.map((pillar) => ({
+    pillar,
+    matchedTerm: firstMatchingTerm(evidenceText, pillar.trendKeywords),
+  })).find((item) => Boolean(item.matchedTerm));
   const matchedEntities = unique(profile.importantEntities ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
   const rawAliasMatches = unique(profile.entityAliases ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
   const matchedAliases = rawAliasMatches.filter((term) => firstMatchingAlias(evidenceText, { ...profile, entityAliases: [term] }));
   const matchedPlatforms = unique(profile.productsAndPlatforms ?? []).filter((term) => matchesProfileTerm(evidenceText, term));
-  const matchedCategories = unique(profile.contentCategories?.filter((category) => firstMatchingTerm(evidenceText, [category.label, ...category.terms])).map((category) => category.label) ?? []);
+  const matchedCategoryRecords = profile.contentCategories?.map((category) => ({
+    category,
+    matchedTerm: firstMatchingTerm(evidenceText, [category.label, ...category.terms]),
+  })).filter((item) => Boolean(item.matchedTerm)) ?? [];
+  const matchedCategories = unique(matchedCategoryRecords.map((item) => item.category.label));
+  const directCategoryMatch = matchedCategoryRecords.some((item) => isDistinctiveCategoryTerm(item.matchedTerm!));
   const profileTerms = unique([
     ...(profile.normalizedPillars?.flatMap((item) => [item.originalPillar, item.normalizedPillar, ...item.searchTerms, ...item.relatedEntities, ...item.subtopics]) ?? []),
     ...(profile.commonProblems ?? []), ...(profile.terminology ?? []), ...(profile.preferredTerms ?? []),
@@ -125,6 +172,13 @@ export function buildActiveNicheEvidence(
   const matchedProfileTerms = profileTerms.filter((term) => matchesProfileTerm(evidenceText, term));
   const queryTerms = unique([...(profile.importantEntities ?? []), ...(profile.productsAndPlatforms ?? []), ...(profile.contentCategories?.flatMap((item) => [item.label, ...item.terms]) ?? []), ...profileTerms]);
   const matchedQueryContext = queryTerms.filter((term) => matchesProfileTerm(queryText, term));
+  const explicitCrossDomainRelationship = matchedCategories.length > 0
+    && hasExplicitCrossDomainRelationship(evidenceText, profile, activePillars);
+  const keywordPillar = rawKeywordMatch?.matchedTerm
+    && isDistinctiveCategoryTerm(rawKeywordMatch.matchedTerm)
+    && (!hasCrossDomainTransferLanguage(evidenceText) || explicitCrossDomainRelationship)
+    ? rawKeywordMatch.pillar
+    : undefined;
   const foreignConflict = allPillars(strategy).some((item) => !activePillars.includes(item)
     && Boolean(firstMatchingTerm(evidenceText, [item.name, ...item.trendKeywords])));
   const ambiguousAlias = rawAliasMatches.some((alias) => normalizedTokens(alias).length === 1);
@@ -138,7 +192,8 @@ export function buildActiveNicheEvidence(
       : matchedEntities.length ? 'entity'
         : matchedAliases.length && ambiguityResolved ? 'alias'
           : matchedPlatforms.length ? 'platform'
-            : matchedCategories.length && matchedQueryContext.length ? 'category_plus_context' : null;
+            : explicitCrossDomainRelationship ? 'explicit_cross_domain'
+              : directCategoryMatch ? 'direct_category' : null;
   if (foreignConflict && !literalPillar && !keywordPillar) pillarSatisfiedBy = null;
   const matchedPillar = literalPillar?.name ?? keywordPillar?.name ?? (pillarSatisfiedBy ? activePillars[0]?.name ?? profile.niche : null);
   const directEvidence = unique([
@@ -552,7 +607,7 @@ export function scoreTrendForStrategy(
   const monitoredTopic = textMatchesAny(text, monitoredTopics);
   let score = directNicheEvidence;
   breakdown.directNicheEvidence = directNicheEvidence;
-  if (activeEvidence?.pillarSatisfied || pillar) {
+  if ((activeEvidence?.pillarSatisfied && activeEvidence.pillarSatisfiedBy !== 'direct_category') || pillar) {
     score += 40;
     breakdown.pillarMatch = 40;
     reasons.push(`pillar_match:${activeEvidence?.matchedPillar ?? pillar?.name}`);
@@ -655,6 +710,7 @@ export function scoreTrendForStrategy(
     score >= minimumScore
     && !excluded
     && !profileExcluded
+    && (!options.profile || activeEvidence?.pillarSatisfied === true)
     && !(strategy.topicRules.requirePillarMatch && !(activeEvidence?.pillarSatisfied ?? Boolean(pillar)) && strategy.contentPillars.primaryPillars.length > 0)
     && !(strategy.topicRules.requireAudiencePainMatch && !audienceMatch)
     && !duplicate;
@@ -665,13 +721,15 @@ export function scoreTrendForStrategy(
     if (strategy.topicRules.requireAudiencePainMatch && !audienceMatch) riskFlags.push('missing_audience_match');
   }
 
+  if (options.profile && !activeEvidence?.pillarSatisfied) riskFlags.push('niche_mismatch');
+
   if (profileExcluded) riskFlags.push(`excluded_profile_term:${profileExcluded}`);
   if (options.profile && directNicheEvidence === 0 && !category && !pillar && !entity && !platform && !monitoredTopic) {
     riskFlags.push('niche_classification_failed');
   }
 
   const nicheMatch: CandidateNicheMatch = {
-    relevant: !excluded && !profileExcluded && directNicheEvidence >= 25,
+    relevant: !excluded && !profileExcluded && (!options.profile || activeEvidence?.pillarSatisfied === true) && directNicheEvidence >= 25,
     relevanceScore: score,
     confidence: Math.min(1, (directNicheEvidence + ((activeEvidence?.pillarSatisfied || pillar) ? 35 : 0) + (directEvidence.some((item) => item.startsWith('category:')) ? 20 : 0) + (directEvidence.length > 1 ? 10 : 0) + (monitoredTopic ? 15 : 0)) / 100),
     matchedCategory: category?.id ?? null,

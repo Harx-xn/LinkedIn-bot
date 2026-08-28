@@ -58,6 +58,38 @@ describe('domain-agnostic claim narrowing', () => {
     assert.equal(deriveNarrowCentralClaim({ topic: claim, expressionMode: 'direct' }), claim);
   });
 
+  it('does not inject a global audience when the slot resolved no audience', () => {
+    const claim = deriveNarrowCentralClaim({
+      topic: 'UiPath robotic automation versus agentic automation',
+      candidateClaim: 'Automation is important.',
+      expressionMode: 'walkthrough',
+      author: { description: 'Automation specialist', tone: 'Direct', targetAudience: ['Indie Game Devs'] },
+      resolvedAudience: [],
+    });
+    assert.doesNotMatch(claim, /Indie Game Devs/i);
+  });
+
+  it('uses only a slot-resolved audience when narrowing needs an audience hint', () => {
+    const claim = deriveNarrowCentralClaim({
+      topic: 'Approval recovery', candidateClaim: 'Recovery is important.', expressionMode: 'diagnostic',
+      author: { description: 'Operator', tone: 'Direct', targetAudience: ['Global audience'] },
+      resolvedAudience: ['incident responders'],
+    });
+    assert.match(claim, /incident responders/i);
+    assert.doesNotMatch(claim, /Global audience/i);
+  });
+
+  it('preserves a substantive candidate mechanism and does not invent constraint language', () => {
+    const claim = deriveNarrowCentralClaim({
+      topic: 'Retry handling',
+      candidateClaim: 'Retry handling is important.',
+      candidateMechanism: 'idempotency keys identify a repeated operation before its side effect runs again',
+      expressionMode: 'walkthrough',
+    });
+    assert.match(claim, /idempotency keys identify/i);
+    assert.doesNotMatch(claim, /decision|constraint|criteria/i);
+  });
+
   const domains = [
     { topic: 'API authorization', mode: 'diagnostic' as const },
     { topic: 'post-surgery follow-up', mode: 'analytical' as const },

@@ -156,6 +156,14 @@ describe('fallback architecture hardening', () => {
     }
   });
 
+  it('keeps editorial realization failures repairable but not fatal through exhaustion', () => {
+    for (const code of ['generic_category_intro', 'hook_realization_mismatch', 'rhetorical_structure_mismatch', 'ending_realization_mismatch']) {
+      assert.deepEqual(filterBlockingIssues([{ code, severity: 'error' }], 1).map((issue) => issue.code), [code]);
+      assert.deepEqual(filterBlockingIssues([{ code, severity: 'error' }], 7).map((issue) => issue.code), []);
+      assert.equal(canForceAcceptBlockingCodes([code]), true);
+    }
+  });
+
   it('retains the best usable candidate through later fallback attempts', () => {
     const pool = new SlotCandidatePool();
     const best = pool.add(observation('initial_draft', 86));
@@ -187,8 +195,20 @@ describe('fallback architecture hardening', () => {
     assert.deepEqual(committed, []);
   });
 
-  it('completes through a bounded deterministic fallback when writers return nothing usable', () => {
-    const result = buildBoundedSafeWriterFallback({
+  it('completes through one bounded safe-writer call with a full post', async () => {
+    const body = [
+      'Explicit exception ownership prevents duplicate approval checks because every failed decision has one accountable path.',
+      'Approval systems usually become unreliable at the boundary between the normal route and the exception route. A request can fail validation, time out, or require a manual decision, yet several services may each interpret that state as permission to retry.',
+      'A single owner changes the mechanism. The workflow records who can resolve the exception, which state is authoritative, and whether a retry is allowed. That prevents two workers from independently reopening the same decision while still preserving a visible audit trail.',
+      'The practical consequence is not merely fewer duplicate messages. Teams can distinguish a delayed approval from a rejected one, operators know where intervention belongs, and recovery logic can remain narrow instead of repeating the whole workflow.',
+      'This boundary also needs a constraint: ownership must transfer explicitly when responsibility changes. A shared queue without a transfer rule only moves the ambiguity to a different component.',
+      'The useful design test is simple. For every exceptional state, identify one authority, one recorded transition, and one permitted recovery action. If two components can answer any of those questions differently, the approval path is still vulnerable to duplicate work.',
+      'Implementation becomes clearer when the state model separates business rejection from transport failure. A rejection closes the decision; a transport failure leaves the outcome unknown. Treating both as a generic error invites a retry even when the original decision already exists.',
+      'Monitoring should follow that distinction. Count unresolved ownership transfers, duplicate recovery attempts, and exceptions without an authority record. Those signals reveal coordination defects earlier than a broad success-rate metric, which can hide repeated work behind an eventual completion.',
+      'Reliable approval automation begins with exception ownership because the unusual path is where coordination rules become observable.',
+    ].join('\n\n');
+    const result = await buildBoundedSafeWriterFallback({
+      contentService: { generatePlannedPost: async () => ({ headline: 'Exception ownership', subheadline: '', bulletPoints: [], body, hashtags: '#Operations' }) } as never,
       plan: {
         trendIndex: 0, sourceTopic: 'Approval ownership', angle: 'product_lesson', hookStyle: 'observation',
         endingStyle: 'natural', layout: 'short_observation', rationale: 'selected upstream',
@@ -200,7 +220,8 @@ describe('fallback architecture hardening', () => {
       acceptedBodies: [],
     });
     assert.ok(result?.ok);
-    assert.ok(result?.fallbackProvenance?.includes(FALLBACK_PROVENANCE.EMERGENCY_ACCEPTANCE));
+    assert.ok(result?.fallbackProvenance?.includes(FALLBACK_PROVENANCE.SAFE_FALLBACK_ACCEPTANCE));
     assert.match(result?.finalized.body ?? '', /Explicit exception ownership/);
+    assert.ok((result?.finalized.content.length ?? 0) >= 1400);
   });
 });

@@ -19,6 +19,9 @@ export type ProviderTokenUsage = {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  generatedImages?: number;
+  requestCount?: number;
+  billableSeconds?: number | string | Prisma.Decimal | null;
   raw?: Prisma.InputJsonValue;
 };
 
@@ -65,12 +68,30 @@ export function extractGeminiUsage(response: any): ProviderTokenUsage {
   };
 }
 
+export function extractGeminiImageUsage(response: any): ProviderTokenUsage {
+  const candidates = response?.candidates ?? response?.response?.candidates ?? [];
+  const generatedImages = Array.isArray(candidates)
+    ? candidates.reduce((count: number, candidate: any) => count + (candidate?.content?.parts ?? []).filter((part: any) => {
+        const mimeType = String(part?.inlineData?.mimeType ?? '');
+        return Boolean(part?.inlineData?.data) && (!mimeType || mimeType.startsWith('image/'));
+      }).length, 0)
+    : 0;
+  return { ...extractGeminiUsage(response), generatedImages };
+}
+
 function usageFromProviderError(error: any): ProviderTokenUsage {
   if (error?.usage?.prompt_tokens != null || error?.usage?.input_tokens != null) {
     return extractOpenAiUsage(error);
   }
   if (error?.usageMetadata || error?.response?.usageMetadata) return extractGeminiUsage(error);
   return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+}
+
+function resolvedModelFromProviderResponse(provider: string, result: any): string | null {
+  const value = provider.trim().toUpperCase() === 'GEMINI'
+    ? result?.modelVersion ?? result?.response?.modelVersion
+    : result?.model;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 export async function trackAiProviderCall<T>(input: {
@@ -80,6 +101,7 @@ export async function trackAiProviderCall<T>(input: {
   extractUsage: (result: T) => ProviderTokenUsage;
   identity?: AiCostContext;
   metadata?: Record<string, unknown>;
+  resolveModel?: (result: T) => string | null | undefined;
 }): Promise<T> {
   const startedAt = new Date();
   const started = Date.now();
@@ -87,6 +109,7 @@ export async function trackAiProviderCall<T>(input: {
   try {
     const result = await input.invoke();
     const usage = input.extractUsage(result);
+    const resolvedModel = input.resolveModel?.(result) ?? resolvedModelFromProviderResponse(input.provider, result);
     await recordAiUsage({
       userId: context.userId,
       regionId: context.regionId,
@@ -95,6 +118,8 @@ export async function trackAiProviderCall<T>(input: {
       agent: context.agent,
       provider: input.provider,
       model: input.model,
+      requestedModel: input.model,
+      resolvedModel,
       generationId: context.generationId,
       postId: context.postId,
       batchJobId: context.batchJobId,
@@ -116,6 +141,7 @@ export async function trackAiProviderCall<T>(input: {
       agent: context.agent,
       provider: input.provider,
       model: input.model,
+      requestedModel: input.model,
       generationId: context.generationId,
       postId: context.postId,
       batchJobId: context.batchJobId,

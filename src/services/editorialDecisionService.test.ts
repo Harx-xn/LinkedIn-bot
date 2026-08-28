@@ -47,6 +47,22 @@ describe('idea-aware editorial decisions', () => {
     assert.notEqual(second.rhetoricalStructure, first.rhetoricalStructure);
   });
 
+  it('spreads five viable plans across distinct hook targets when alternatives exist', () => {
+    const candidates = [
+      trend('Explicit ownership makes delayed handoffs diagnosable.'),
+      trend('A scoped retry key prevents duplicate side effects.'),
+      trend('Queue age reveals where escalation ownership has failed.'),
+      trend('A decision threshold turns noisy alerts into useful signals.'),
+      trend('Cache scope determines whether tenant isolation survives a hit.'),
+    ];
+    const decisions = candidates.reduce<ReturnType<typeof selectEditorialDecision>[]>((batch, candidate) => {
+      batch.push(selectEditorialDecision(candidate, { currentBatch: batch }));
+      return batch;
+    }, []);
+    assert.ok(new Set(decisions.map((decision) => decision.hookFamily)).size >= 4);
+    assert.ok(new Set(decisions.map((decision) => decision.rhetoricalStructure)).size >= 4);
+  });
+
   it('penalizes repeated structure in the actual generated body, not only in labels', () => {
     const editorialDecision = selectEditorialDecision(trend('Explicit ownership makes delayed handoffs diagnosable.'));
     const plan: BatchPostPlan = {
@@ -99,6 +115,58 @@ describe('idea-aware editorial decisions', () => {
   it('penalizes generic category introductions in the first three lines', () => {
     const evaluation = evaluateFirstThreeLines('When it comes to patient retention, communication is important.\n\nThere are many factors to consider.');
     assert.ok(evaluation.issues.some((issue) => issue.code === 'generic_category_intro' && issue.severity === 'error'));
+  });
+
+  it('rejects an invented misconception when an observation hook was assigned', () => {
+    const editorialDecision = {
+      ...selectEditorialDecision(trend('Scoped retry keys prevent duplicate side effects.')),
+      hookFamily: 'OBSERVATION' as const,
+      rhetoricalStructure: 'OBSERVATION_MECHANISM_CONSEQUENCE' as const,
+      endingIntent: 'OBSERVATION' as const,
+    };
+    const plan: BatchPostPlan = { trendIndex: 0, sourceTopic: 'retry safety', angle: 'product_lesson', hookStyle: 'observation', endingStyle: 'natural', layout: 'short_observation', expressionMode: 'analytical', rationale: 'test', editorialDecision };
+    const body = 'A common misconception is that retries guarantee delivery.\n\nBecause a retry can repeat a committed side effect, the handler needs a scoped idempotency key.\n\nThat boundary keeps duplicate work visible.';
+    const result = runDeterministicValidation({ headline: '', subheadline: '', bulletPoints: [], body, hashtags: '' }, { description: 'Engineer', tone: 'clear', targetAudience: ['engineers'] }, plan, []);
+    assert.ok(result.issues.some((issue) => issue.code === 'hook_realization_mismatch'));
+  });
+
+  it('accepts a substantive mechanism-led observation hook', () => {
+    const editorialDecision = {
+      ...selectEditorialDecision(trend('Scoped retry keys prevent duplicate side effects.')),
+      hookFamily: 'OBSERVATION' as const,
+      rhetoricalStructure: 'OBSERVATION_MECHANISM_CONSEQUENCE' as const,
+      endingIntent: 'OBSERVATION' as const,
+    };
+    const plan: BatchPostPlan = { trendIndex: 0, sourceTopic: 'retry safety', angle: 'product_lesson', hookStyle: 'observation', endingStyle: 'natural', layout: 'short_observation', expressionMode: 'analytical', rationale: 'test', editorialDecision };
+    const body = 'Because retries can repeat a committed side effect, handlers need scoped idempotency keys.\n\nThe key lets the handler recognize the same operation before applying it again.\n\nDuplicate work remains visible at that boundary.';
+    const result = runDeterministicValidation({ headline: '', subheadline: '', bulletPoints: [], body, hashtags: '' }, { description: 'Engineer', tone: 'clear', targetAudience: ['engineers'] }, plan, []);
+    assert.equal(result.issues.some((issue) => issue.code === 'hook_realization_mismatch'), false);
+  });
+
+  it('flags a generic essay when comparison progression was assigned', () => {
+    const editorialDecision = {
+      ...selectEditorialDecision(trend('Compare retries with durable queues.')),
+      hookFamily: 'COMPARISON' as const,
+      rhetoricalStructure: 'COMPARISON_DISTINCTION_DECISION' as const,
+      endingIntent: 'OBSERVATION' as const,
+    };
+    const plan: BatchPostPlan = { trendIndex: 0, sourceTopic: 'delivery choices', angle: 'architecture_tradeoff', hookStyle: 'comparison', endingStyle: 'natural', layout: 'short_observation', expressionMode: 'analytical', rationale: 'test', editorialDecision };
+    const body = 'Delivery reliability matters for every system.\n\nTeams should think carefully about architecture and implementation details.\n\nReliable delivery remains an important goal.';
+    const result = runDeterministicValidation({ headline: '', subheadline: '', bulletPoints: [], body, hashtags: '' }, { description: 'Engineer', tone: 'clear', targetAudience: ['engineers'] }, plan, []);
+    assert.ok(result.issues.some((issue) => issue.code === 'rhetorical_structure_mismatch'));
+  });
+
+  it('flags a recommendation close when an observation ending was assigned', () => {
+    const editorialDecision = {
+      ...selectEditorialDecision(trend('Scoped retry keys prevent duplicate side effects.')),
+      hookFamily: 'OBSERVATION' as const,
+      rhetoricalStructure: 'OBSERVATION_MECHANISM_CONSEQUENCE' as const,
+      endingIntent: 'OBSERVATION' as const,
+    };
+    const plan: BatchPostPlan = { trendIndex: 0, sourceTopic: 'retry safety', angle: 'product_lesson', hookStyle: 'observation', endingStyle: 'natural', layout: 'short_observation', expressionMode: 'analytical', rationale: 'test', editorialDecision };
+    const body = 'Retries can repeat a committed side effect.\n\nBecause the handler cannot infer intent, a scoped idempotency key identifies the operation.\n\nReview your retry logic today.';
+    const result = runDeterministicValidation({ headline: '', subheadline: '', bulletPoints: [], body, hashtags: '' }, { description: 'Engineer', tone: 'clear', targetAudience: ['engineers'] }, plan, []);
+    assert.ok(result.issues.some((issue) => issue.code === 'ending_realization_mismatch'));
   });
 
   it('remains niche-generic across unrelated professions', () => {

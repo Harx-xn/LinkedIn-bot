@@ -33,6 +33,14 @@ enum AiUsageStatus {
   PARTIAL
 }
 
+enum AiPricingType {
+  TEXT_TOKENS
+  IMAGE
+  PER_REQUEST
+  PER_SECOND
+  CUSTOM
+}
+
 enum PlatformExpenseType {
   FIXED
   VARIABLE
@@ -1108,10 +1116,18 @@ model AiModelPricing {
   provider String
   model    String
 
-  inputCostPerMillionTokens       Decimal  @db.Decimal(14, 8)
-  cachedInputCostPerMillionTokens Decimal? @db.Decimal(14, 8)
-  outputCostPerMillionTokens      Decimal  @db.Decimal(14, 8)
+  pricingType AiPricingType @default(TEXT_TOKENS)
 
+  inputCostPerMillionTokens       Decimal? @db.Decimal(14, 8)
+  cachedInputCostPerMillionTokens Decimal? @db.Decimal(14, 8)
+  outputCostPerMillionTokens      Decimal? @db.Decimal(14, 8)
+
+  imageOutputCost Decimal? @db.Decimal(14, 8)
+  imageOutputUnit String?
+  costPerRequest  Decimal? @db.Decimal(14, 8)
+  costPerSecond   Decimal? @db.Decimal(14, 8)
+
+  // Retained for backward compatibility with the original pricing table.
   pricingUnit String @default("TOKENS")
 
   effectiveFrom DateTime
@@ -1123,6 +1139,7 @@ model AiModelPricing {
 
   @@index([provider, model])
   @@index([provider, model, effectiveFrom])
+  @@index([pricingType])
   @@index([active])
 }
 
@@ -1141,6 +1158,10 @@ model AiUsageEvent {
   provider String
   model    String
 
+  pricingType    AiPricingType?
+  requestedModel String?
+  resolvedModel  String?
+
   generationId String?
   postId       String?
   batchJobId   String?
@@ -1150,9 +1171,17 @@ model AiUsageEvent {
   outputTokens      Int @default(0)
   totalTokens       Int @default(0)
 
+  generatedImages Int      @default(0)
+  requestCount    Int      @default(1)
+  billableSeconds Decimal? @db.Decimal(14, 4)
+
   inputCostUsd       Decimal @default(0) @db.Decimal(14, 8)
   cachedInputCostUsd Decimal @default(0) @db.Decimal(14, 8)
   outputCostUsd      Decimal @default(0) @db.Decimal(14, 8)
+  imageCostUsd       Decimal @default(0) @db.Decimal(14, 8)
+  requestCostUsd     Decimal @default(0) @db.Decimal(14, 8)
+  timeCostUsd        Decimal @default(0) @db.Decimal(14, 8)
+  customCostUsd      Decimal @default(0) @db.Decimal(14, 8)
   totalCostUsd       Decimal @default(0) @db.Decimal(14, 8)
 
   status        AiUsageStatus @default(SUCCESS)

@@ -32,6 +32,10 @@ export type CandidateDisposition =
 
 export type GenerationTraceCandidate = {
   candidateTraceId: string;
+  sourceType?: string | null;
+  ideaOrigin?: string | null;
+  selectedClaim?: string | null;
+  selectedMechanism?: string | null;
   origin: DiagnosticCandidateOrigin;
   generationMode: string | null;
   pillar: string | null;
@@ -98,6 +102,8 @@ export type GenerationTraceDraft = {
   redundancyRisk: number | null;
   genericDiscourseRisk: number | null;
   issueCodes: string[];
+  effectiveBlockingCodes?: string[];
+  reviewerStatus?: string;
   candidateTier: string;
   becameBestCandidate: boolean;
   acceptedNormally: boolean;
@@ -228,7 +234,7 @@ export function diagnosticCandidateOrigin(input: {
   if (input.evidenceEnriched) return 'SEARCH_EVIDENCE_ENRICHMENT';
   if (input.ideaOrigin === 'USER_REQUESTED') return 'USER_REQUESTED';
   if (input.ideaOrigin === 'RECENT_DEVELOPMENT') return 'RECENT_DEVELOPMENT';
-  if (input.sourceType === 'searched' || input.ideaOrigin === 'SEARCH_DISCOVERED') return 'SEARCH_DISCOVERED';
+  if (input.sourceType === 'searched' || input.sourceType === 'source_derived_angle' || input.ideaOrigin === 'SEARCH_DISCOVERED') return 'SEARCH_DISCOVERED';
   if (input.ideaGenerationMode === 'SEMANTIC') return 'SEMANTIC_STRATEGY';
   if (input.ideaGenerationMode === 'DETERMINISTIC_FALLBACK') return 'DETERMINISTIC_STRATEGY_FALLBACK';
   return 'UNKNOWN';

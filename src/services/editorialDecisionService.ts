@@ -15,6 +15,7 @@ import type {
 } from './generationTypes';
 import type { RecentContentMemory } from './recentContentMemoryService';
 import { normalizeTrendTitle } from './trendTitleUtils';
+import { jaccardSimilarity } from './ghostwriterTextUtils';
 import {
   scoreCandidateAgainstPerformance,
   type AccountPerformanceProfile,
@@ -23,6 +24,7 @@ import {
   assessShareability,
   type ShareabilityProfile,
 } from './shareabilityIntelligenceService';
+import { classifyOpeningForm } from './finalPostFingerprintClassifier';
 
 export type EditorialDecisionContext = {
   recentMemory?: RecentContentMemory;
@@ -336,10 +338,36 @@ export function evaluateFirstThreeLines(
   const lines = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 3);
   const opening = lines.join(' ');
   const issues: QualityIssue[] = [];
+  const realized = classifyOpeningForm(body);
   if (/^(?:in today'?s|in the (?:modern|digital|ever-changing)|when it comes to|as (?:we|businesses|professionals)|\w+(?: \w+){0,4} (?:is|are) (?:important|essential|crucial|changing))/i.test(opening)) {
     issues.push({
       code: 'generic_category_intro', severity: 'error', evidence: [opening.slice(0, 180)],
       instruction: 'Open with the narrow claim, concrete observation, distinction, behavior, or tension instead of introducing the category.',
+    });
+  }
+  if (realized.genericCategorySetup && !issues.some((issue) => issue.code === 'generic_category_intro')) {
+    issues.push({
+      code: 'generic_category_intro', severity: 'error', evidence: [lines[0]?.slice(0, 180) ?? ''],
+      instruction: 'Make line one advance the claim through a mechanism, consequence, distinction, condition, or concrete observation; naming the domain or audience is not enough.',
+    });
+  }
+  if (realized.obviousQuestionAnswer) {
+    issues.push({
+      code: 'obvious_question_answer_opening', severity: 'error', evidence: [opening.slice(0, 180)],
+      instruction: 'Replace the obvious question-and-answer setup with the useful claim or uncertainty itself.',
+    });
+  }
+  if (realized.rhetoricalMove === 'MISCONCEPTION_CORRECTION'
+    && !/\b(?:because|evidence|data|when|fails?|breaks?|instead|rather|\d+(?:\.\d+)?%?)\b/i.test(opening)) {
+    issues.push({
+      code: 'unsupported_misconception_opening', severity: 'error', evidence: [opening.slice(0, 180)],
+      instruction: 'Do not manufacture a common mistake or assumption. State the supported distinction, mechanism, or evidence directly.',
+    });
+  }
+  if (lines.length >= 2 && jaccardSimilarity(lines[0], lines[1]) >= .72) {
+    issues.push({
+      code: 'opening_line_restatement', severity: 'error', evidence: lines.slice(0, 2),
+      instruction: 'Make line two deepen, explain, qualify, or contrast line one instead of restating it.',
     });
   }
   const hasConcreteTension = /\b(?:but|until|instead|rather|because|fails?|breaks?|cost|risk|mistake|only when|depends|cannot|can\'t|without|means)\b/i.test(opening);

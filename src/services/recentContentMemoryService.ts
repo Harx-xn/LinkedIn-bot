@@ -24,7 +24,7 @@ export type RecentContentFingerprint = {
   reasoningArchetype?: string | null;
   candidateId?: string | null;
   authorityMode?: string | null;
-  origin?: 'HISTORICAL' | 'CURRENT_BATCH' | 'SEARCH_DERIVED' | 'STRATEGY_DERIVED';
+  origin?: 'HISTORICAL' | 'REJECTED_DUPLICATE_ONLY' | 'CURRENT_BATCH' | 'SEARCH_DERIVED' | 'STRATEGY_DERIVED';
 };
 
 export type RecentContentMemory = {
@@ -160,7 +160,7 @@ export function scoreAgainstRecentContentMemory(
   const light: string[] = [];
   let total = 0;
   if (maxClaimSimilarity >= 0.62) { total += 36; strong.push('recent_core_claim'); }
-  if (maxMechanismSimilarity >= 0.45) { total += 34; strong.push('recent_mechanism'); }
+  if (maxMechanismSimilarity >= 0.45) { total += 40; strong.push('recent_mechanism'); }
   if (sameClaimPerspective) { total += 12; strong.push('recent_claim_and_perspective'); }
   if (motifPenalty >= 28) { total += motifPenalty; strong.push('conceptual_motif_and_perspective'); }
   else if (motifPenalty >= 16) { total += motifPenalty; medium.push('conceptual_motif_reuse'); }
@@ -173,8 +173,8 @@ export function scoreAgainstRecentContentMemory(
   const structureCount = memory.fingerprints.filter((item) => key(item.structure) === key(candidate.structure) && key(candidate.structure)).length;
   const intentCount = memory.fingerprints.filter((item) => key(item.contentIntent) === key(candidate.contentIntent) && key(candidate.contentIntent)).length;
   if (territoryCount) { total += Math.min(20, territoryCount * 4); medium.push(`territory_saturation:${territoryCount}`); }
-  if (familyCount) { total += Math.min(15, familyCount * 5); medium.push(`idea_family_reuse:${familyCount}`); }
-  if (patternCount) { total += Math.min(15, patternCount * 5); medium.push(`argument_pattern_reuse:${patternCount}`); }
+  if (familyCount) { total += Math.min(24, familyCount * 8); medium.push(`idea_family_reuse:${familyCount}`); }
+  if (patternCount) { total += Math.min(24, patternCount * 8); medium.push(`argument_pattern_reuse:${patternCount}`); }
   if (structureCount) { total += Math.min(9, structureCount * 3); medium.push(`structure_reuse:${structureCount}`); }
   if (intentCount) { total += Math.min(9, intentCount * 3); medium.push(`content_intent_reuse:${intentCount}`); }
 
@@ -192,16 +192,26 @@ export function scoreAgainstRecentContentMemory(
 }
 
 export async function loadRecentContentMemory(userId: string, limit = 80): Promise<RecentContentMemory> {
-  const rows = await prisma.postContentFingerprint.findMany({
-    where: { userId, post: { status: { in: ['REVIEW', 'SCHEDULED', 'PUBLISHED'] } } },
+  const [rows, rejectedHistory] = await Promise.all([prisma.postContentFingerprint.findMany({
+    where: { userId, post: { status: { in: ['REVIEW', 'SCHEDULED', 'PUBLISHED', 'REJECTED'] } } },
     orderBy: { createdAt: 'desc' },
     take: limit,
     select: {
       postId: true, primaryTopic: true, pillar: true, territory: true, coreClaim: true, mechanism: true, perspective: true,
       argumentPattern: true, structure: true, hookType: true, ctaType: true, authorityMode: true, contentIntent: true, keywords: true,
+      post: { select: { status: true } },
     },
-  });
-  return createRecentContentMemory(rows.map((row) => {
+  }), prisma.generatedTopicHistory.findMany({
+    where: {
+      userId,
+      status: 'REJECTED',
+      generatedAt: { gte: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) },
+    },
+    orderBy: { generatedAt: 'desc' },
+    take: Math.min(20, limit),
+    select: { id: true, postId: true, normalizedTopic: true, coreClaim: true, angle: true, topicCluster: true },
+  })]);
+  const accepted = rows.map((row) => {
     const metadata = metadataFromKeywords(row.keywords);
     return {
       topic: row.primaryTopic,
@@ -221,9 +231,19 @@ export async function loadRecentContentMemory(userId: string, limit = 80): Promi
       conceptualMotif: metadata.conceptualMotif,
       reasoningArchetype: metadata.reasoningArchetype,
       candidateId: `post:${row.postId}`,
-      origin: 'HISTORICAL' as const,
+      origin: row.post.status === 'REJECTED' ? 'REJECTED_DUPLICATE_ONLY' as const : 'HISTORICAL' as const,
     };
+  });
+  const loadedPostIds = new Set(rows.map((row) => row.postId));
+  const rejected: RecentContentFingerprint[] = rejectedHistory.filter((row) => !row.postId || !loadedPostIds.has(row.postId)).map((row) => ({
+    topic: row.normalizedTopic,
+    territory: row.topicCluster,
+    coreClaim: row.coreClaim?.trim() || row.normalizedTopic,
+    ideaFamily: row.angle,
+    candidateId: `rejected-history:${row.id}`,
+    origin: 'REJECTED_DUPLICATE_ONLY',
   }));
+  return createRecentContentMemory([...accepted, ...rejected]);
 }
 
 function rankedToMemoryFingerprint(candidate: RankedTrendCandidate): RecentContentFingerprint {

@@ -50,7 +50,8 @@ export function decideCandidateEligibility(
     || code === 'missing_ambiguity_context'
     || code === 'community_source_cannot_verify_solution'
     || code === 'missing_pillar_match'
-    || code === 'missing_audience_match',
+    || code === 'missing_audience_match'
+    || code === 'niche_mismatch',
   );
   if (nicheMatch.avoidTopicMatch) hardRejectionCodes.push('avoid_topic_match');
 

@@ -111,11 +111,17 @@ describe('slot candidate retention and ranking', () => {
     assert.equal(pool.summary().candidateOrigins.length, 2);
   });
 
-  it('returns an emergency usable candidate when none is perfect', () => {
+  it('does not publish an emergency candidate with a persistent quality failure', () => {
     const pool = new SlotCandidatePool();
     const emergency = pool.add(observation({ origin: 'emergency_fallback', density: 48, reviewAvailable: false, issues: [{ code: 'WEAK_ARGUMENT_PROGRESSION', severity: 'error' }] }));
-    assert.equal(emergency.eligible, true);
-    assert.equal(pool.best(), emergency);
-    assert.equal(pool.best()?.tier, 'EMERGENCY');
+    assert.equal(emergency.eligible, false);
+    assert.equal(pool.best(), null);
+  });
+
+  it('retains a strong candidate whose only issue is rhetorical realization', () => {
+    const pool = new SlotCandidatePool();
+    const candidate = pool.add(observation({ origin: 'targeted_repair', density: 74, issues: [{ code: 'rhetorical_structure_mismatch', severity: 'error' }] }));
+    assert.equal(candidate.eligible, true);
+    assert.equal(pool.best(), candidate);
   });
 });

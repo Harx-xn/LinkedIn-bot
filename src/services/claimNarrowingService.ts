@@ -141,8 +141,8 @@ function normalizedTopic(value: string): string {
   return normalized;
 }
 
-function audienceHint(author?: AuthorContext): string {
-  const audience = author?.targetAudience?.find((item) => item.trim())?.trim();
+function audienceHint(resolvedAudience?: string[]): string {
+  const audience = resolvedAudience?.find((item) => item.trim())?.trim();
   return audience ? ` for ${audience}` : '';
 }
 
@@ -151,6 +151,9 @@ export function deriveNarrowCentralClaim(input: {
   angle?: PostAngle;
   expressionMode?: ExpressionMode;
   author?: AuthorContext;
+  resolvedAudience?: string[];
+  candidateMechanism?: string | null;
+  sourceEvidence?: string | null;
   candidateClaim?: string | null;
 }): string {
   const candidate = input.candidateClaim?.trim() ?? '';
@@ -158,12 +161,21 @@ export function deriveNarrowCentralClaim(input: {
   if (!candidate && assessSelectedClaim(input.topic).usable) return input.topic.trim();
 
   const topic = normalizedTopic(input.topic);
-  const audience = audienceHint(input.author);
+  const audience = audienceHint(input.resolvedAudience);
+  const mechanism = input.candidateMechanism?.replace(/\s+/g, ' ').trim();
+  if (mechanism && assessSelectedClaim(`${topic} changes because ${mechanism}.`).usable) {
+    return `${topic} changes because ${mechanism}${audience}.`;
+  }
+  const evidence = input.sourceEvidence?.replace(/\s+/g, ' ').trim();
+  if (evidence) {
+    const evidenceSentence = evidence.split(/(?<=[.!?])\s+/)[0]?.replace(/[.!?]+$/, '');
+    if (evidenceSentence && assessSelectedClaim(evidenceSentence).usable) return `${evidenceSentence}${audience}.`;
+  }
   const mode = input.expressionMode;
   const angle = input.angle;
 
   if (mode === 'analytical') {
-    return `${topic} can create worse outcomes when its underlying decision criteria stay unchanged as volume or complexity grows${audience}.`;
+    return `${topic} can create worse outcomes when observable failure conditions are ignored as volume or complexity grows${audience}.`;
   }
   if (mode === 'diagnostic') {
     return `Recurring problems in ${topic} often begin in an earlier decision or workflow condition rather than the visible symptom${audience}.`;
@@ -172,20 +184,20 @@ export function deriveNarrowCentralClaim(input: {
     return `${topic} should be judged by whether it changes the constraint driving the outcome, rather than by how much activity it creates${audience}.`;
   }
   if (mode === 'walkthrough') {
-    return `${topic} works more reliably when the process starts with the decision or constraint that determines whether later steps can succeed${audience}.`;
+    return `${topic} becomes actionable when each step produces an observable result for the next${audience}.`;
   }
   if (mode === 'reflective') {
     return `Visible progress in ${topic} can hide fragility when the result depends on work or conditions the process does not measure${audience}.`;
   }
   if (mode === 'direct') {
-    return `${topic} can fail to improve outcomes when visible activity changes but the underlying constraint does not${audience}.`;
+    return `${topic} is useful only when its observable result changes${audience}.`;
   }
 
   if (angle === 'architecture_tradeoff') {
     return `${topic} becomes a trade-off when improving one visible outcome shifts cost, delay, or complexity to another part of the process${audience}.`;
   }
   if (angle === 'practical_tutorial') {
-    return `${topic} works more reliably when the process starts with the decision or constraint that determines whether the later steps can succeed${audience}.`;
+    return `${topic} becomes usable when every step exposes the result needed by the next${audience}.`;
   }
   if (angle === 'debugging_story') {
     return `A recurring problem with ${topic} often points to an upstream condition or decision, rather than the visible symptom${audience}.`;
@@ -199,5 +211,5 @@ export function deriveNarrowCentralClaim(input: {
   if (angle === 'reflection') {
     return `Visible progress in ${topic} can hide fragility when the result depends on work or conditions the process does not measure${audience}.`;
   }
-  return `${topic} becomes more useful when it changes a specific decision or constraint, rather than adding activity without changing the outcome${audience}.`;
+  return `${topic} becomes more useful when it produces a specific observable effect rather than additional activity${audience}.`;
 }

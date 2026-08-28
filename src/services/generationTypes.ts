@@ -279,7 +279,7 @@ export interface ActiveNicheEvidence {
   matchedQueryContext: string[];
   directEvidence: string[];
   pillarSatisfied: boolean;
-  pillarSatisfiedBy: 'literal_pillar' | 'pillar_keyword' | 'entity' | 'alias' | 'platform' | 'category_plus_context' | null;
+  pillarSatisfiedBy: 'literal_pillar' | 'pillar_keyword' | 'entity' | 'alias' | 'platform' | 'direct_category' | 'explicit_cross_domain' | null;
   ambiguityResolved: boolean;
   ambiguityResolutionReason: string | null;
   strength: number;
@@ -416,6 +416,8 @@ export type SlotAcceptanceDecision = {
   specificityScore: number;
   qualityScore: number;
   technicalPassed: boolean;
+  reviewerStatus?: 'REVIEWER_PASSED' | 'REVIEWER_CRITICAL_FAIL' | 'REVIEWER_QUALITY_FAIL' | 'REVIEWER_UNAVAILABLE' | 'REVIEWER_NOT_REQUIRED_SAFE_PATH';
+  acceptanceMode?: 'NORMAL' | 'EDITORIAL_TOLERANCE';
   blockingIssueCodes: string[];
   warningIssueCodes: string[];
 };
